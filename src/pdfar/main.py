@@ -5,7 +5,8 @@ from __future__ import annotations
 import sys
 from typing import Dict, List, Optional
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QLocale
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QLocale, QSize
+from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QFileDialog, QToolBar, QStatusBar,
     QScrollArea, QDockWidget, QMessageBox,
