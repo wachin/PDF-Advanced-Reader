@@ -1,9 +1,12 @@
-"""Internationalization support using Qt Linguist."""
+"""Optional internationalization via Qt Linguist.
+
+The UI currently ships English strings; this module keeps the plumbing for
+loading ``translations/pdfar_<lang>.qm`` files so a translation can be dropped
+in without code changes.
+"""
 
 from __future__ import annotations
 
-import os
-import sys
 from pathlib import Path
 
 from PyQt6.QtCore import QLocale, QTranslator
@@ -11,77 +14,38 @@ from PyQt6.QtWidgets import QApplication
 
 
 class I18n:
-    """Manages translations via Qt Linguist (.qm files)."""
-    
+    """Loads Qt Linguist translations for the application."""
+
     def __init__(self, app: QApplication):
         self.app = app
         self.translator = QTranslator(app)
         self._loaded = False
-    
+
     def load_translations(self, lang: str | None = None) -> bool:
-        """
-        Load translations for the given language code (e.g., 'en', 'es', 'de').
-        If lang is None, uses the system locale.
-        Returns True if a translation file was successfully loaded.
-        """
         if lang is None:
-            lang = QLocale.system().name()
-            lang = lang.split('_')[0]
-        
+            lang = QLocale.system().name().split("_")[0]
         qm_path = self._find_qm_file(lang)
-        if qm_path:
-            try:
-                self.translator.load(str(qm_path))
-                self.app.installTranslator(self.translator)
-                self._loaded = True
-                return True
-            except Exception:
-                pass
+        if qm_path and self.translator.load(str(qm_path)):
+            self.app.installTranslator(self.translator)
+            self._loaded = True
+            return True
         return False
-    
+
     def _find_qm_file(self, lang: str) -> Path | None:
-        """Search for the .qm file in standard locations."""
-        package_dir = Path(__file__).parent
-        parent_dir = package_dir.parent
-        translations_dir = parent_dir / "translations"
-        
-        qm_file = translations_dir / f"pdfar_{lang}.qm"
-        
-        if qm_file.exists():
-            return qm_file
-        
-        # Check translations directory in current working directory
-        cwd_translations = Path.cwd() / "translations" / f"pdfar_{lang}.qm"
-        if cwd_translations.exists():
-            return cwd_translations
-        
+        candidates = [
+            Path(__file__).resolve().parent.parent / "translations" / f"pdfar_{lang}.qm",
+            Path.cwd() / "translations" / f"pdfar_{lang}.qm",
+        ]
+        for path in candidates:
+            if path.exists():
+                return path
         return None
-    
-    def t(self, context: str, source_text: str, disambiguation: str | None = None, n: int = -1) -> str:
-        """
-        Translate a string. This is the main translation function.
-        
-        Args:
-            context: Optional context (usually class name or module)
-            source_text: The source text to translate
-            disambiguation: Optional disambiguation for same strings
-            n: Number for plural forms (use tr_n if needed)
-        
-        Returns:
-            The translated string if available, otherwise the source_text
-        """
+
+    @property
+    def loaded(self) -> bool:
+        return self._loaded
+
+    def t(self, context: str, source_text: str, disambiguation: str | None = None) -> str:
         if self._loaded:
-            if n > 0:
-                return self.app.translate(context, source_text, disambiguation, n)
-            else:
-                return self.app.translate(context, source_text, disambiguation)
+            return self.app.translate(context, source_text, disambiguation)
         return source_text
-
-
-def tr(source_text: str, disambiguation: str | None = None) -> str:
-    """
-    Convenience function for translating strings without context.
-    For use outside of QObject subclasses.
-    """
-    from PyQt6.QtCore import QCoreApplication
-    return QCoreApplication.translate("PDFAR", source_text, disambiguation)

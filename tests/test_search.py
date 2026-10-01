@@ -1,82 +1,87 @@
-"""Tests for search functionality."""
+"""Tests for search matching and the background search worker."""
+
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import re
 
 import pytest
-import fitz
-from pdfar.search import SearchParams, SearchHit, normalize_space
+
+from pdfar.search import (
+    SearchHit, SearchParams, SearchWorker, make_snippet, normalize_space, page_matches,
+)
 
 
-class TestSearchParams:
-    """Tests for SearchParams dataclass."""
-
-    def test_params_creation(self):
-        params = SearchParams(
-            query="test",
-            mode="AND",
-            case_sensitive=True,
-            whole_words=False,
-            proximity=5,
-        )
-        assert params.query == "test"
-        assert params.mode == "AND"
-        assert params.case_sensitive is True
-        assert params.whole_words is False
-        assert params.proximity == 5
+@pytest.mark.parametrize("text,params,expected", [
+    ("Hello PDFAR world", SearchParams("pdfar"), True),
+    ("Hello PDFAR world", SearchParams("pdfar", case_sensitive=True), False),
+    ("Hello PDFAR world", SearchParams("PDFAR", case_sensitive=True), True),
+    ("Hello PDFAR world", SearchParams("pdfar", whole_words=True), True),
+    ("Hello PDFARs world", SearchParams("pdfar", whole_words=True), False),
+    ("Hello PDFARs world", SearchParams("pdfar", whole_words=False), True),
+])
+def test_phrase_matching(text, params, expected):
+    assert page_matches(text, params, [params.query]) is expected
 
 
-class TestNormalizeSpace:
-    """Tests for normalize_space function."""
-
-    def test_normalize_multiple_spaces(self):
-        result = normalize_space("hello   world")
-        assert result == "hello world"
-
-    def test_normalize_leading_trailing(self):
-        result = normalize_space("  hello world  ")
-        assert result == "hello world"
-
-    def test_normalize_tabs(self):
-        result = normalize_space("hello\t\tworld")
-        assert result == "hello world"
+def test_and_or_modes():
+    text = "alpha beta gamma"
+    assert page_matches(text, SearchParams("alpha beta", mode="AND"), ["alpha", "beta"]) is True
+    assert page_matches(text, SearchParams("alpha delta", mode="AND"), ["alpha", "delta"]) is False
+    assert page_matches(text, SearchParams("alpha delta", mode="OR"), ["alpha", "delta"]) is True
+    assert page_matches(text, SearchParams("zeta omega", mode="OR"), ["zeta", "omega"]) is False
 
 
-# Test cases for whole_words functionality
-class TestWholeWords:
-    """Test whole_words search mode in SearchWorker."""
-
-    def test_whole_words_true_should_not_match_partial(self):
-        """When whole_words is True, 'test' should not match 'testing'."""
-        text = "This is a testing document"
-        
-        # Test with whole word boundary regex
-        result = __import__('re').search(r'\btest\b', text.lower())
-        assert result is None  # Should NOT match 'testing'
-
-    def test_whole_words_false_matches_anywhere(self):
-        """When whole_words is False, 'test' should match 'testing'."""
-        text = "This is a testing document"
-        
-        # Test with substring search
-        result = "test" in text.lower()
-        assert result is True  # Should match 'testing'
-
-    def test_whole_words_with_exact_word(self):
-        """Whole words should match exact word boundaries."""
-        text = "This is a test document"
-        
-        # Test with whole word boundary regex
-        result = __import__('re').search(r'\btest\b', text.lower())
-        assert result is not None  # Should match 'test'
+def test_whole_words_with_regex_characters():
+    text = "value (x) here"
+    assert page_matches(text, SearchParams("(x)", whole_words=True), ["(x)"]) is True
 
 
-# Test cases for missing import bug - this tests main.py module
-class TestSearchImport:
-    """Test that main module can be imported without errors."""
-
-    def test_search_worker_no_import_error(self):
-        """SearchWorker should be importable without re import errors."""
-        # This test documents Bug 1.2: re module was missing from main.py
-        from pdfar.main import SearchWorker
-        assert SearchWorker is not None
+def test_normalize_space():
+    assert normalize_space("  a \n b\t c  ") == "a b c"
+    assert normalize_space(None) == ""
 
 
-# Run with: pytest tests/test_search.py -v
+def test_make_snippet_centers_on_match():
+    text = "word " * 40 + "NEEDLE " + "word " * 40
+    snippet = make_snippet(text, ["NEEDLE"], False)
+    assert "NEEDLE" in snippet
+    assert len(snippet) < 250
+
+
+def _run_worker(sample_pdf, params):
+    hits = []
+    worker = SearchWorker(sample_pdf, params)
+    worker.done.connect(hits.extend)
+    worker.run()
+    return hits
+
+
+def test_worker_finds_pages(sample_pdf):
+    hits = _run_worker(sample_pdf, SearchParams("alpha beta", mode="AND"))
+    # "alpha beta gamma" is on pages 2..3 of the sample
+    assert [h.page for h in hits] == [1, 2]
+    assert all(isinstance(h, SearchHit) for h in hits)
+    assert all(h.rects for h in hits), "every hit should carry highlight rects"
+
+
+def test_worker_phrase_mode(sample_pdf):
+    hits = _run_worker(sample_pdf, SearchParams("BOTTOMRIGHT", mode="PHRASE"))
+    assert [h.page for h in hits] == [0]
+    assert hits[0].rects
+
+
+def test_worker_no_match(sample_pdf):
+    assert _run_worker(sample_pdf, SearchParams("zzz-not-there")) == []
+
+
+def test_worker_rects_are_page_bounded(sample_pdf):
+    import pymupdf as fitz
+    doc = fitz.open(sample_pdf)
+    size = doc.load_page(0).rect
+    doc.close()
+    hits = _run_worker(sample_pdf, SearchParams("Hello"))
+    for x0, y0, x1, y1 in hits[0].rects:
+        assert 0 <= x0 <= x1 <= size.width + 1
+        assert 0 <= y0 <= y1 <= size.height + 1

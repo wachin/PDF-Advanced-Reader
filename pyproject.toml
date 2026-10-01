@@ -1,20 +1,27 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "pdfar"
-version = "0.1.0"
-description = "Lector de PDF avanzado con búsqueda por página"
+version = "2.0.0"
+description = "PDFAR — a fast, feature-rich PDF reader for Linux (PyQt6 + PyMuPDF)"
 readme = "README.md"
-license = {text = "GPL-3.0"}
-authors = [
-    {name = "Washington Indacochea Delgado", email = "linuxfrontier@proton.me"}
+requires-python = ">=3.9"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "PDFAR contributors" }]
+keywords = ["pdf", "reader", "viewer", "pyqt", "linux"]
+classifiers = [
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Office/Business",
 ]
-requires-python = ">=3.8"
 dependencies = [
-    "PyQt6>=6.4.0",
-    "PyMuPDF>=1.22.0",
+    "PyQt6>=6.4",
+    "PyMuPDF>=1.22",
 ]
 
 [project.scripts]
@@ -22,3 +29,6 @@ pdfar = "pdfar.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,6 +1,4 @@
-"""PDFAR - Lector de PDF avanzado con búsqueda por página."""
+"""PDFAR - Advanced PDF Reader for Linux."""
 
-__version__ = "0.1.0"
-__author__ = "Washington Indacochea Delgado"
-__email__ = "linuxfrontier@proton.me"
-__license__ = "GPL-3.0"
+__version__ = "2.0.0"
+APP_NAME = "PDFAR"
