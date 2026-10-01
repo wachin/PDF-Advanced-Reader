@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from PyQt6.QtCore import QTimer, Qt
-from PyQt6.QtGui import QPainter, QBrush, QColor, QPen
+from PyQt6.QtGui import QPainter, QBrush, QColor, QPen, QPixmap, QImage
 from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
 import fitz
 
@@ -52,7 +52,7 @@ class PDFViewer(QWidget):
     def _build_placeholders(self):
         self.labels.clear()
         for i in range(self.doc.page_count):
-            lbl = QLabel(f"Página {i + 1}")
+            lbl = QLabel(f"Page {i + 1}")
             lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
             self.layout.addWidget(lbl)
             self.labels.append(lbl)

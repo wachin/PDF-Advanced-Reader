@@ -5,8 +5,7 @@ from __future__ import annotations
 import sys
 from typing import Dict, List, Optional
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QSize
-from PyQt6.QtGui import QAction, QKeySequence, QShortcut
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QLocale
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QFileDialog, QToolBar, QStatusBar,
     QScrollArea, QDockWidget, QMessageBox,
@@ -18,6 +17,7 @@ import fitz
 
 from .search import SearchParams, SearchHit, normalize_space
 from .viewer import PDFViewer
+from .i18n import I18n
 
 
 class SearchWorker(QObject):
@@ -85,24 +85,25 @@ class PDFAR(QMainWindow):
         self.fit_mode = "none"
         self.current_page = 0
         self.search_rects_per_page: Dict[int, List[fitz.Rect]] = {}
+        self.i18n: I18n | None = None
         self._build_ui()
 
     def _build_ui(self):
-        self.setWindowTitle("PDFAR - Lector de PDF Avanzado")
+        self.setWindowTitle("PDFAR - Advanced PDF Reader")
         self.resize(1200, 800)
 
         # Toolbar
-        tb = QToolBar("Acciones")
+        tb = QToolBar("Actions")
         tb.setIconSize(QSize(18, 18))
         self.addToolBar(tb)
 
-        act_open = QAction("Abrir", self)
+        act_open = QAction("Open", self)
         act_open.triggered.connect(self.open_pdf)
         tb.addAction(act_open)
 
         tb.addSeparator()
-        act_prev = QAction("Anterior", self)
-        act_next = QAction("Siguiente", self)
+        act_prev = QAction("Previous", self)
+        act_next = QAction("Next", self)
         act_prev.triggered.connect(lambda: self.goto_page(max(0, self.current_page - 1)))
         act_next.triggered.connect(lambda: self.goto_page(self.current_page + 1))
         tb.addAction(act_prev)
@@ -126,7 +127,7 @@ class PDFAR(QMainWindow):
 
         self.cmb_zoom = QComboBox()
         self.cmb_zoom.addItems([
-            "Ajustar página", "Ajustar anchura",
+            "Fit Page", "Fit Width",
             "50%", "100%", "150%", "200%", "250%", "300%"
         ])
         self.cmb_zoom.currentTextChanged.connect(self._apply_zoom_preset)
@@ -139,26 +140,26 @@ class PDFAR(QMainWindow):
         self.scroll_area.setWidgetResizable(True)
         self.setCentralWidget(self.scroll_area)
 
-        # Panel de búsqueda
-        dock = QDockWidget("Búsqueda", self)
+        # Search dock
+        dock = QDockWidget("Search", self)
         dock.setMinimumWidth(300)
         panel = QWidget()
         v = QVBoxLayout(panel)
 
         self.query_edit = QLineEdit()
-        self.query_edit.setPlaceholderText("Escribe palabras o \"frases\"")
+        self.query_edit.setPlaceholderText("Type words or \"exact phrases\"")
         v.addWidget(self.query_edit)
 
         self.mode = QComboBox()
         self.mode.addItems(["AND", "OR", "PHRASE"])
         v.addWidget(self.mode)
 
-        self.cb_case = QCheckBox("Mayúsculas")
-        self.cb_whole = QCheckBox("Palabra completa")
+        self.cb_case = QCheckBox("Case sensitive")
+        self.cb_whole = QCheckBox("Whole words")
         v.addWidget(self.cb_case)
         v.addWidget(self.cb_whole)
 
-        self.btn_search = QPushButton("Buscar")
+        self.btn_search = QPushButton("Search")
         self.btn_search.clicked.connect(self.start_search)
         v.addWidget(self.btn_search)
 
@@ -178,13 +179,13 @@ class PDFAR(QMainWindow):
         bar.setValue(bar.value() + direction * step)
 
     def open_pdf(self):
-        fn, _ = QFileDialog.getOpenFileName(self, "Abrir PDF", "", "PDF (*.pdf)")
+        fn, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF (*.pdf)")
         if not fn:
             return
         try:
             self.doc = fitz.open(fn)
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"No se pudo abrir el PDF:\n{e}")
+            QMessageBox.critical(self, "Error", f"Could not open PDF:\n{e}")
             return
 
         self.current_page = 0
@@ -195,7 +196,7 @@ class PDFAR(QMainWindow):
         self.scroll_area.setWidget(self.viewer)
         self._update_zoom_label()
 
-        self.status.showMessage(f"Cargado: {fn} — {self.doc.page_count} páginas", 5000)
+        self.status.showMessage(f"Loaded: {fn} — {self.doc.page_count} pages", 5000)
 
     def goto_page(self, page_index: int):
         if not self.viewer or not self.doc:
@@ -225,10 +226,10 @@ class PDFAR(QMainWindow):
     def _apply_zoom_preset(self, text: str):
         if not self.doc:
             return
-        if text in ("Ajustar página", "Ajustar anchura"):
+        if text in ("Fit Page", "Fit Width"):
             page0 = self.doc.load_page(0)
             vp = self.scroll_area.viewport().size()
-            if text == "Ajustar anchura":
+            if text == "Fit Width":
                 scale = vp.width() / page0.rect.width
             else:
                 scale = min(vp.width() / page0.rect.width, vp.height() / page0.rect.height)
@@ -247,7 +248,7 @@ class PDFAR(QMainWindow):
 
     def start_search(self):
         if not self.doc:
-            QMessageBox.information(self, "Abrir PDF", "Primero abre un archivo PDF.")
+            QMessageBox.information(self, "Open PDF", "Please open a PDF file first.")
             return
         params = self._params_from_ui()
         if not params.query:
@@ -270,7 +271,7 @@ class PDFAR(QMainWindow):
         terms = [params.query] if params.mode == 'PHRASE' else [t for t in params.query.split() if t]
 
         for h in hits:
-            item = QListWidgetItem(f"Página {h.page + 1}: {h.snippet}")
+            item = QListWidgetItem(f"Page {h.page + 1}: {h.snippet}")
             item.setData(Qt.ItemDataRole.UserRole, h.page)
             self.results.addItem(item)
 
@@ -289,11 +290,17 @@ class PDFAR(QMainWindow):
         if hits:
             self.goto_page(hits[0].page)
         else:
-            QMessageBox.information(self, "Sin resultados", "No se encontraron resultados.")
+            QMessageBox.information(self, "No results", "No results found.")
 
 
 def main():
     app = QApplication(sys.argv)
+    
+    # Set up internationalization
+    i18n = I18n(app)
+    # Try to load user's system locale, default to English
+    i18n.load_translations()
+    
     w = PDFAR()
     w.show()
     sys.exit(app.exec())
