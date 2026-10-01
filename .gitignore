@@ -55,3 +55,6 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Personal
+8vo/
