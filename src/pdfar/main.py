@@ -35,6 +35,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self._connected_tab: Optional[DocumentTab] = None
         self._search_tab: Optional[DocumentTab] = None
+        self._presentation = False
         self.search_thread: Optional[QThread] = None
         self.search_worker: Optional[SearchWorker] = None
         self.settings = QSettings(APP_NAME, APP_NAME)
@@ -88,6 +89,10 @@ class MainWindow(QMainWindow):
         self.act_open.setShortcut(QKeySequence.StandardKey.Open)
         self.act_open.triggered.connect(self.open_dialog)
 
+        self.act_presentation = QAction("Presentation", self)
+        self.act_presentation.setShortcut("F11")
+        self.act_presentation.triggered.connect(self.toggle_presentation)
+
         self.act_recent = QAction("Recent ▾", self)
         self.menu_recent = QMenu("Recent files", self)
         self.act_recent.setMenu(self.menu_recent)
@@ -104,8 +109,10 @@ class MainWindow(QMainWindow):
     def _build_toolbar(self) -> None:
         tb = QToolBar("Main")
         tb.setMovable(False)
+        tb.setObjectName("mainToolbar")
         tb.setIconSize(tb.iconSize())
         self.addToolBar(tb)
+        self.toolbar = tb
 
         tb.addAction(self.act_open)
         tb.addAction(self.act_recent)
@@ -167,7 +174,53 @@ class MainWindow(QMainWindow):
         self.act_find.setShortcut(QKeySequence.StandardKey.Find)
         self.act_find.triggered.connect(self._focus_search)
         tb.addAction(self.act_find)
+        tb.addSeparator()
+        tb.addAction(self.act_presentation)
         tb.addAction(self.act_sidebar)
+
+    # --------------------------------------------------- presentation mode
+    def toggle_presentation(self) -> None:
+        """Enter/exit fullscreen presentation: hide all chrome, fit page."""
+        if getattr(self, "_presentation", False):
+            self._exit_presentation()
+        else:
+            self._enter_presentation()
+
+    def _enter_presentation(self) -> None:
+        if self._active_tab() is None:
+            return
+        self._presentation = True
+        self._prev_fit_mode = self.view.fit_mode
+        self.toolbar.hide()
+        self.statusBar().hide()
+        self.search_dock.hide()
+        if hasattr(self, "side_dock") and self.side_dock is not None:
+            self._side_dock_was_visible = self.side_dock.isVisible()
+            self.side_dock.hide()
+        self.tabs.tabBar().hide()
+        self.tabs.cornerWidget().hide()
+        self.showFullScreen()
+        self._set_fit("page")
+
+    def _exit_presentation(self) -> None:
+        self._presentation = False
+        self.showNormal()
+        self.toolbar.show()
+        self.statusBar().show()
+        self.search_dock.show()
+        if hasattr(self, "side_dock") and self.side_dock is not None:
+            self.side_dock.setVisible(getattr(self, "_side_dock_was_visible", True))
+        self.tabs.tabBar().show()
+        self.tabs.cornerWidget().show()
+        if getattr(self, "_prev_fit_mode", "width"):
+            self._set_fit(self._prev_fit_mode)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if getattr(self, "_presentation", False) and event.key() == Qt.Key.Key_Escape:
+            self._exit_presentation()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def _build_search_dock(self) -> None:
         dock = QDockWidget("Search", self)
