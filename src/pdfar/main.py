@@ -206,6 +206,11 @@ class PDFAR(QMainWindow):
             self.scroll_area.ensureWidgetVisible(w, xMargin=0, yMargin=20)
         self.current_page = page_index
 
+    def goto_result(self, item: QListWidgetItem):
+        page = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(page, int):
+            self.goto_page(page)
+
     def _update_zoom_label(self):
         self.lbl_zoom.setText(f"{int(round(self.zoom * 100))}%")
 
