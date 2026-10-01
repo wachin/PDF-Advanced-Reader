@@ -113,6 +113,11 @@ class RenderPool(QObject):
         with self._cv:
             return len(self._heap) + len(self._inflight)
 
+    def is_running(self) -> bool:
+        """True while the pool still accepts render jobs (not shut down)."""
+        with self._cv:
+            return not self._closed
+
     def shutdown(self, wait: bool = True) -> None:
         """Stop accepting jobs and (by default) wait for workers to exit.
 

@@ -15,14 +15,15 @@ from PyQt6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QKeyS
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
-    QSpinBox, QStatusBar, QToolBar, QVBoxLayout, QWidget,
+    QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSpinBox,
+    QStatusBar, QTabWidget, QToolBar, QVBoxLayout, QWidget,
 )
 
 from . import APP_NAME, __version__
 from .i18n import I18n
 from .search import SearchParams, SearchWorker, normalize_space
 from .sidebar import Sidebar
+from .tabs import DocumentTab
 from .viewer import PDFView
 
 
@@ -31,12 +32,24 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.doc_path: Optional[str] = None
-        self.view: Optional[PDFView] = None
-        self.sidebar: Optional[Sidebar] = None
+        self.tabs = QTabWidget()
+        self._connected_tab: Optional[DocumentTab] = None
+        self._search_tab: Optional[DocumentTab] = None
         self.search_thread: Optional[QThread] = None
         self.search_worker: Optional[SearchWorker] = None
         self.settings = QSettings(APP_NAME, APP_NAME)
+
+        self.tabs.setDocumentMode(True)
+        self.tabs.setTabsClosable(True)
+        self.tabs.setMovable(True)
+        self.tabs.tabCloseRequested.connect(self._close_tab)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        plus = QPushButton("+")
+        plus.setFlat(True)
+        plus.setToolTip("Open a PDF in a new tab")
+        plus.clicked.connect(self.open_dialog)
+        self.tabs.setCornerWidget(plus, Qt.Corner.TopRightCorner)
+        self.setCentralWidget(self.tabs)
 
         self.setWindowTitle(f"{APP_NAME} — Advanced PDF Reader")
         self.resize(1280, 860)
@@ -48,6 +61,26 @@ class MainWindow(QMainWindow):
         self._build_statusbar()
         self._build_shortcuts()
         self._restore_state()
+
+    # --------------------------------------------- active document accessors
+    def _active_tab(self) -> Optional[DocumentTab]:
+        widget = self.tabs.currentWidget()
+        return widget if isinstance(widget, DocumentTab) else None
+
+    @property
+    def view(self) -> Optional[PDFView]:
+        tab = self._active_tab()
+        return tab.view if tab else None
+
+    @property
+    def sidebar(self) -> Optional[Sidebar]:
+        tab = self._active_tab()
+        return tab.sidebar if tab else None
+
+    @property
+    def doc_path(self) -> Optional[str]:
+        tab = self._active_tab()
+        return tab.doc_path if tab else None
 
     # ------------------------------------------------------------- UI
     def _build_actions(self) -> None:
@@ -208,6 +241,9 @@ class MainWindow(QMainWindow):
         self._shortcut("Ctrl+0", self._fit_page)
         self._shortcut("Ctrl+1", self._zoom_100)
         self._shortcut("Ctrl+2", self._fit_width)
+        self._shortcut("Ctrl+W", self._close_active_tab)
+        self._shortcut("Ctrl+Tab", self._next_tab)
+        self._shortcut("Ctrl+Shift+Tab", self._prev_tab)
 
     def _shortcut(self, sequence: str, slot) -> None:
         """Create a shortcut whose handler is a bound method (not a lambda),
@@ -293,9 +329,15 @@ class MainWindow(QMainWindow):
         page_count = doc.page_count
         doc.close()
 
-        self._close_document()
+        # same path already open?  just switch to that tab
+        for i in range(self.tabs.count()):
+            tab = self.tabs.widget(i)
+            if isinstance(tab, DocumentTab) and tab.doc_path == path:
+                self.tabs.setCurrentIndex(i)
+                return True
+
         try:
-            self.view = PDFView(path, parent=self, password=password)
+            tab = DocumentTab(path, password=password)
         except ValueError:
             QMessageBox.critical(self, "Open", "Wrong password.")
             return False
@@ -303,52 +345,120 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Open", f"Could not render PDF:\n{exc}")
             return False
 
-        self.doc_path = path
-        self.setCentralWidget(self.view)
-        self.sidebar = Sidebar(self.view.doc, self.view.pool, self)
-        self.sidebar.goto_page_requested.connect(self._goto)
+        index = self.tabs.addTab(tab, tab.title)
+        # left dock: created once, its widget follows the active tab
+        if not hasattr(self, "side_dock") or self.side_dock is None:
+            self.side_dock = QDockWidget("Pages", self)
+            self.side_dock.setObjectName("sideDock")
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.side_dock)
+        self.tabs.setCurrentIndex(index)
+
         self.search_dock.widget().setVisible(True)
-
-        # left dock
-        self.side_dock = QDockWidget("Pages", self)
-        self.side_dock.setObjectName("sideDock")
-        self.side_dock.setWidget(self.sidebar)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.side_dock)
-        self.side_dock.setVisible(self.act_sidebar.isChecked())
-
-        # wiring
-        self.view.page_changed.connect(self._on_page_changed)
-        self.view.zoom_changed.connect(self._on_zoom_changed)
-        self.view.hit_changed.connect(self._on_hit_changed)
-        self.view.selection_changed.connect(self._update_status)
 
         self.page_spin.setMaximum(page_count)
         self.page_spin.setValue(1)
         self.page_label.setText(f"/ {page_count}")
 
-        self._set_zoom(1.0)
         self._set_fit("width")
         self.setWindowTitle(f"{os.path.basename(path)} — {APP_NAME}")
         self.status_left.setText(f"Loaded: {path}")
         self._remember_file(path)
         self._update_status()
-        self.view.setFocus(Qt.FocusReason.OtherFocusReason)
+        tab.view.setFocus(Qt.FocusReason.OtherFocusReason)
         return True
 
-    def _close_document(self) -> None:
-        if self.search_thread is not None and self.search_thread.isRunning():
-            self.search_thread.quit()
-            self.search_thread.wait(2000)
-        if self.view is not None:
-            self.view.shutdown()
-            self.view.deleteLater()
-            self.view = None
-        if self.sidebar is not None:
-            self.sidebar.deleteLater()
-            self.sidebar = None
+    # --------------------------------------------------------- tab lifecycle
+    def _connect_tab(self, tab: DocumentTab) -> None:
+        tab.view.page_changed.connect(self._on_page_changed)
+        tab.view.zoom_changed.connect(self._on_zoom_changed)
+        tab.view.hit_changed.connect(self._on_hit_changed)
+        tab.view.selection_changed.connect(self._update_status)
+        tab.sidebar.goto_page_requested.connect(self._goto)
+        self._connected_tab = tab
+
+    def _disconnect_tab(self, tab: DocumentTab) -> None:
+        try:
+            tab.view.page_changed.disconnect(self._on_page_changed)
+            tab.view.zoom_changed.disconnect(self._on_zoom_changed)
+            tab.view.hit_changed.disconnect(self._on_hit_changed)
+            tab.view.selection_changed.disconnect(self._update_status)
+            tab.sidebar.goto_page_requested.disconnect(self._goto)
+        except TypeError:
+            pass
+        if self._connected_tab is tab:
+            self._connected_tab = None
+
+    def _on_tab_changed(self, index: int) -> None:
+        if self._connected_tab is not None:
+            self._disconnect_tab(self._connected_tab)
+        tab = self.tabs.widget(index)
+        if not isinstance(tab, DocumentTab):
+            return
+        # hand the side dock to the newly active tab
         if hasattr(self, "side_dock") and self.side_dock is not None:
-            self.side_dock.deleteLater()
-            self.side_dock = None
+            self.side_dock.setWidget(tab.sidebar)
+            self.side_dock.setVisible(self.act_sidebar.isChecked())
+        self._connect_tab(tab)
+
+        view = tab.view
+        self.page_spin.blockSignals(True)
+        self.page_spin.setMaximum(view.page_count)
+        self.page_spin.setValue(view.current_page + 1)
+        self.page_spin.blockSignals(False)
+        self.page_label.setText(f"/ {view.page_count}")
+        self.zoom_label.setText(f"{int(round(view.zoom * 100))}%")
+        # search results belong to the previous document
+        self.results.clear()
+        self.hit_label.setText("")
+        self.setWindowTitle(f"{os.path.basename(tab.doc_path)} — {APP_NAME}")
+        self._update_status()
+
+    def _close_tab(self, index: int) -> None:
+        if index < 0 or index >= self.tabs.count():
+            return
+        tab = self.tabs.widget(index)
+        self.tabs.removeTab(index)
+        if isinstance(tab, DocumentTab):
+            self._disconnect_tab(tab)
+            tab.shutdown()
+            tab.deleteLater()
+        if self.tabs.count() == 0:
+            self._enter_empty_state()
+
+    def _enter_empty_state(self) -> None:
+        self.page_spin.setMaximum(1)
+        self.page_spin.setValue(1)
+        self.page_label.setText("/ 0")
+        self.zoom_label.setText("100%")
+        self.results.clear()
+        self.hit_label.setText("")
+        self.status_left.setText("No document")
+        self.status_right.setText("")
+        self.setWindowTitle(f"{APP_NAME} — Advanced PDF Reader")
+        if hasattr(self, "side_dock") and self.side_dock is not None:
+            self.side_dock.setVisible(False)
+
+    def _close_document(self) -> None:
+        """Close the active document tab (kept for compatibility)."""
+        if self._active_tab() is not None:
+            self._close_tab(self.tabs.currentIndex())
+
+    def _close_active_tab(self) -> None:
+        self._close_document()
+
+    def _next_tab(self) -> None:
+        count = self.tabs.count()
+        if count > 1:
+            self.tabs.setCurrentIndex((self.tabs.currentIndex() + 1) % count)
+
+    def _prev_tab(self) -> None:
+        count = self.tabs.count()
+        if count > 1:
+            self.tabs.setCurrentIndex((self.tabs.currentIndex() - 1) % count)
+
+    def _close_all_tabs(self) -> None:
+        while self.tabs.count() > 0:
+            self._close_tab(self.tabs.count() - 1)
 
     # ------------------------------------------------------------- zoom
     def _set_zoom(self, zoom: float) -> None:
@@ -442,6 +552,8 @@ class MainWindow(QMainWindow):
         self.search_worker.done.connect(self._on_search_done)
         self.search_worker.done.connect(self.search_thread.quit)
         self.search_thread.start()
+        # search hits belong to the document they were run on
+        self._search_tab = self._active_tab()
 
     def _on_search_progress(self, done: int, total: int) -> None:
         self.search_progress.setRange(0, max(1, total))
@@ -457,13 +569,13 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, hit.page)
             self.results.addItem(item)
 
-        if self.view:
-            total = self.view.set_search_hits(hits)
+        if self._search_tab is not None and self.tabs.indexOf(self._search_tab) != -1:
+            total = self._search_tab.view.set_search_hits(hits)
             if hits:
                 self._step_hit(+1)
                 self.status_left.setText(f"{len(hits)} page(s) matched, {total} hit(s)")
             else:
-                self.view.clear_search()
+                self._search_tab.view.clear_search()
                 self.status_left.setText("No results")
 
     def _on_result_clicked(self, item: QListWidgetItem) -> None:
@@ -522,7 +634,10 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("windowState", self.saveState())
-        self._close_document()
+        self._close_all_tabs()
+        if self.search_thread is not None and self.search_thread.isRunning():
+            self.search_thread.quit()
+            self.search_thread.wait(2000)
         super().closeEvent(event)
 
     # ------------------------------------------------------- drag & drop
@@ -536,7 +651,6 @@ class MainWindow(QMainWindow):
             path = url.toLocalFile()
             if path.lower().endswith(".pdf"):
                 self.open_document(path)
-                break
         event.acceptProposedAction()
 
 
