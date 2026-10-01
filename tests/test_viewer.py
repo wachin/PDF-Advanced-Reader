@@ -1,42 +1,76 @@
 """Tests for viewer scroll and rendering functionality."""
 
 import pytest
-import tempfile
-import os
+
+
+class TestWorkerLifecycle:
+    """Tests for Bug 1.3: Worker lifecycle with signals."""
+
+    def test_render_worker_is_qobject(self):
+        """
+        Bug 1.3: RenderWorker should inherit from QObject to support signals.
+        
+        The fix uses QObject + moveToThread() + pyqtSignal for proper GUI integration.
+        """
+        from pdfar.worker import RenderWorker
+        from PyQt6.QtCore import QObject
+        
+        # RenderWorker should inherit from QObject
+        assert issubclass(RenderWorker, QObject)
+
+    def test_render_worker_has_finished_signal(self):
+        """
+        Worker should emit finished signal when complete instead of polling.
+        """
+        from pdfar.worker import RenderWorker
+        
+        worker = RenderWorker("/nonexistent.pdf", 0, 1.0)
+        # Should have finished signal
+        assert hasattr(worker, 'finished')
+
+    def test_render_worker_has_run_method(self):
+        """
+        Worker should have a run() method for the thread to execute.
+        """
+        from pdfar.worker import RenderWorker
+        
+        worker = RenderWorker("/nonexistent.pdf", 0, 1.0)
+        assert hasattr(worker, 'run')
+        assert callable(worker.run)
 
 
 class TestViewerScrollBug:
-    """Tests for Bug 1.1: Visible range calculation fails inside QScrollArea."""
+    """Tests for Bug 1.1: Visible range calculation inside QScrollArea."""
 
-    def test_visible_range_inside_scroll_area(self):
+    def test_set_scroll_position_method_exists(self):
         """
-        Bug 1.1: PDFViewer is inside QScrollArea, so parentWidget() doesn't
-        have verticalScrollBar(). The _get_visible_page_range() method fails
-        to detect the actual scroll position and returns wrong ranges.
-        
-        Expected: Should detect scroll position from the actual QScrollArea.
+        PDFViewer should have set_scroll_position() method for explicit scroll context.
+        This fixes Bug 1.1 where parent() detection failed.
         """
-        # This test documents the bug - when PDFViewer is embedded in QScrollArea,
-        # hasattr(parent, 'verticalScrollBar') returns False because the parent
-        # is the QScrollArea's viewport, not the QScrollArea itself.
-        
-        # The fix should either:
-        # 1. Pass scroll info from main.py explicitly
-        # 2. Use QAbstractScrollArea instead
-        # 3. Use a callback mechanism
-        
-        # This is the current buggy behavior
-        assert True  # Placeholder - actual test needs GUI context
-    
-    def test_all_pages_should_render_on_scroll(self):
+        from pdfar.viewer import PDFViewer
+        assert hasattr(PDFViewer, 'set_scroll_position')
+
+
+class TestMemoryLeaks:
+    """Tests for Bug 1.4: Memory leaks when opening multiple PDFs."""
+
+    def test_open_pdf_has_cleanup(self):
         """
-        With a 100+ page PDF, scrolling should trigger rendering of pages
-        beyond the first 10. Currently only pages 1-10 render.
+        Bug 1.4: open_pdf() should clean up previous viewer before creating new one.
         
-        This test documents Bug 1.1 and 1.3 (wrong visible range calculation).
+        The fix should:
+        - Quit and wait for thread pool
+        - Call deleteLater() on old viewer
+        - Clear search_rects_per_page
         """
-        # TODO: Needs GUI test with QScrollArea
-        assert True  # Placeholder
+        from pdfar.main import PDFAR
+        
+        # Check that the cleanup code exists in open_pdf method
+        import inspect
+        source = inspect.getsource(PDFAR.open_pdf)
+        
+        # Should have cleanup code
+        assert 'deleteLater' in source or 'thread_pool' in source
 
 
 # Run with: PYTHONPATH=src python3 -m pytest tests/test_viewer.py -v

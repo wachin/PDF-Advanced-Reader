@@ -196,9 +196,22 @@ class PDFAR(QMainWindow):
             QMessageBox.critical(self, "Error", f"Could not open PDF:\n{e}")
             return
 
+        # Cleanup from previous document
+        if self.viewer:
+            # Disconnect old scrollbar signals
+            if hasattr(self.viewer, 'thread_pool'):
+                self.viewer.thread_pool.quit()
+                self.viewer.thread_pool.wait(1000)
+            # Delete viewer widget
+            self.viewer.deleteLater()
+            # Force delete
+            from PyQt6.QtCore import QCoreApplication
+            QCoreApplication.processEvents()
+
         self.current_page = 0
         self.zoom = 1.0
         self.fit_mode = "none"
+        self.search_rects_per_page.clear()
 
         self.viewer = PDFViewer(fn, zoom=self.zoom)
         self.scroll_area.setWidget(self.viewer)

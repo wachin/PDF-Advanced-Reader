@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 import fitz
-import concurrent.futures
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QPainter, QBrush, QColor, QPen, QPixmap, QImage
 from PyQt6.QtWidgets import QLabel, QWidget, QVBoxLayout
 
@@ -63,18 +62,13 @@ class PDFViewer(QWidget):
         self.zoom = zoom
         self.cache = PageCache(max_size=30)
         self.highlights: Dict[int, List[fitz.Rect]] = {}
-        self.active_workers: Dict[int, RenderWorker] = {}
         self.page_widgets: Dict[int, PageWidget] = {}
         self.layout = QVBoxLayout(self)
         self.layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.layout.setSpacing(10)
 
-        # Use ThreadPoolExecutor for async rendering
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
-
-        self.render_timer = QTimer()
-        self.render_timer.setSingleShot(True)
-        self.render_timer.timeout.connect(self._check_workers)
+        # Use QThread + QObject worker pattern instead of ThreadPoolExecutor
+        self.thread_pool = QThread()
 
         self.scroll_timer = QTimer()
         self.scroll_timer.setSingleShot(True)
@@ -197,25 +191,19 @@ class PDFViewer(QWidget):
             widget.state = PageState.QUEUED
 
         worker = RenderWorker(self.doc_path, page_index, self.zoom)
-        self.active_workers[page_index] = worker
-        self.executor.submit(worker.run)
+        # Move worker to background thread
+        worker.moveToThread(self.thread_pool)
+        # Connect signals/slots
+        worker.finished.connect(self._on_render_finished)
+        worker.finished.connect(worker.deleteLater)
+        self.thread_pool.started.connect(worker.run)
+        # Start the thread
+        self.thread_pool.start()
 
-        # Start checking for workers if not already running
-        if not self.render_timer.isActive():
-            self.render_timer.start(50)
-
-    def _check_workers(self):
-        """Check completed workers and update UI."""
-        done_workers = [
-            idx for idx, w in self.active_workers.items() if w.is_finished()
-        ]
-
-        for idx in done_workers:
-            worker = self.active_workers.pop(idx)
-            self._apply_render_result(idx, worker)
-
-        if self.active_workers:
-            self.render_timer.start(50)
+    def _on_render_finished(self, page_index: int, raw_data: bytes, width: int,
+                            height: int, success: bool, error_msg: str):
+        """Handle render completion signal from worker."""
+        self._apply_render_result(page_index, raw_data, width, height, success)
 
     def _render_pages_batch(self, pages: List[int], priority: int = 2):
         """Render multiple pages with batching to avoid thread pool issues."""
@@ -225,13 +213,14 @@ class PDFViewer(QWidget):
                 if widget.state != PageState.READY:
                     widget.state = PageState.QUEUED
             worker = RenderWorker(self.doc_path, page_index, self.zoom)
-            self.active_workers[page_index] = worker
-            self.executor.submit(worker.run)
+            worker.moveToThread(self.thread_pool)
+            worker.finished.connect(self._on_render_finished)
+            worker.finished.connect(worker.deleteLater)
+            self.thread_pool.started.connect(worker.run)
+            self.thread_pool.start()
 
-        if not self.render_timer.isActive():
-            self.render_timer.start(50)
-
-    def _apply_render_result(self, page_index: int, worker: RenderWorker):
+    def _apply_render_result(self, page_index: int, raw_data: bytes, width: int,
+                             height: int, success: bool):
         """Apply render result to page widget."""
         if page_index not in self.page_widgets:
             return
@@ -240,21 +229,21 @@ class PDFViewer(QWidget):
         if widget.state == PageState.READY:
             return
 
-        if not worker.success:
+        if not success:
             widget.set_error()
             return
 
         # Allow for small dimension differences due to rounding
-        width_diff = abs(widget.width - worker.width)
-        height_diff = abs(widget.height - worker.height)
-        if worker.raw_data and width_diff <= 2 and height_diff <= 2:
+        width_diff = abs(widget.width - width)
+        height_diff = abs(widget.height - height)
+        if raw_data and width_diff <= 2 and height_diff <= 2:
             try:
                 pm = QPixmap()
-                pm.loadFromData(worker.raw_data, "PNG")
+                pm.loadFromData(raw_data, "PNG")
                 # Update widget dimensions to match rendered image
-                widget.width = worker.width
-                widget.height = worker.height
-                widget.label.setFixedSize(worker.width, worker.height)
+                widget.width = width
+                widget.height = height
+                widget.label.setFixedSize(width, height)
 
                 # Apply highlights if present
                 if page_index in self.highlights and self.highlights[page_index]:
