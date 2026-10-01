@@ -1,0 +1,8 @@
+# Pinned deterministic rule set for CI.
+# Kept conservative (classic ruff defaults): runtime errors + pyflakes.
+# Stricter rule families (UP, B, S, ...) can be adopted incrementally.
+line-length = 100
+target-version = "py39"
+
+[lint]
+select = ["E4", "E7", "E9", "F"]

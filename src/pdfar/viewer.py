@@ -250,8 +250,6 @@ class PDFView(QAbstractScrollArea):
 
         vsx = self.horizontalScrollBar().value()
         vsy = self.verticalScrollBar().value()
-        vw = self.viewport().width()
-        vh = self.viewport().height()
 
         first, last = self.visible_range()
         for i in range(first, last + 1):

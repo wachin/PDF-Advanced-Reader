@@ -4,8 +4,6 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import re
-
 import pytest
 
 from pdfar.search import (

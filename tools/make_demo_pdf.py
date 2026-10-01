@@ -7,7 +7,6 @@ Usage: python3 tools/make_demo_pdf.py [out.pdf] [--pages N]
 from __future__ import annotations
 
 import argparse
-import sys
 
 try:
     import pymupdf as fitz
