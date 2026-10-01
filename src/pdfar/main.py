@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from typing import Dict, List, Optional
 
@@ -53,9 +54,15 @@ class SearchWorker(QObject):
             if p.mode == 'PHRASE':
                 matched = query in cmp_text
             elif p.mode == 'AND':
-                matched = all(term in cmp_text for term in terms)
+                if p.whole_words:
+                    matched = all(re.search(r'\b' + re.escape(term) + r'\b', cmp_text) for term in terms)
+                else:
+                    matched = all(term in cmp_text for term in terms)
             elif p.mode == 'OR':
-                matched = any(term in cmp_text for term in terms)
+                if p.whole_words:
+                    matched = any(re.search(r'\b' + re.escape(term) + r'\b', cmp_text) for term in terms)
+                else:
+                    matched = any(term in cmp_text for term in terms)
 
             if matched:
                 snippet = _make_snippet(text, p.query, p.case_sensitive)
@@ -196,7 +203,13 @@ class PDFAR(QMainWindow):
         self.viewer = PDFViewer(fn, zoom=self.zoom)
         self.scroll_area.setWidget(self.viewer)
         
-        self.scroll_area.verticalScrollBar().valueChanged.connect(
+        scroll_bar = self.scroll_area.verticalScrollBar()
+        scroll_bar.valueChanged.connect(
+            lambda val: self.viewer.set_scroll_position(
+                val, self.scroll_area.viewport().height()
+            )
+        )
+        scroll_bar.valueChanged.connect(
             lambda: self.viewer.scroll_timer.start(50)
         )
         

@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Tuple
 import fitz
 import concurrent.futures
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QPainter, QBrush, QColor, QPen, QPixmap, QImage
 from PyQt6.QtWidgets import QLabel, QWidget, QVBoxLayout
 
@@ -53,6 +53,9 @@ class PageWidget:
 class PDFViewer(QWidget):
     """PDF viewer with async rendering and viewport-based loading."""
 
+    # Signal to notify parent when scroll position changes
+    scroll_changed = pyqtSignal(int)  # emits new vertical scroll position
+
     def __init__(self, doc_path: str, zoom: float = 1.0):
         super().__init__()
         self.doc_path = doc_path
@@ -77,11 +80,19 @@ class PDFViewer(QWidget):
         self.scroll_timer.setSingleShot(True)
         self.scroll_timer.timeout.connect(self._on_scroll)
 
+        # Track page heights for position calculations
+        self.page_heights: List[int] = []
+        self.page_tops: List[int] = []  # Cumulative top position of each page
+
         self._init_all_pages()
         self._preload_visible()
 
     def _init_all_pages(self):
         """Initialize all pages with geometry placeholders."""
+        self.page_heights.clear()
+        self.page_tops.clear()
+        cumulative_height = 0
+
         for i in range(self.doc.page_count):
             page = self.doc.load_page(i)
             w = int(page.rect.width * self.zoom)
@@ -91,6 +102,11 @@ class PDFViewer(QWidget):
             page_widget.label.setText(f"Page {i + 1}")
             self.layout.addWidget(page_widget.label)
             self.page_widgets[i] = page_widget
+
+            # Store page geometry for position calculations
+            self.page_heights.append(h)
+            self.page_tops.append(cumulative_height)
+            cumulative_height += h + 10  # 10px spacing between pages
 
     def _preload_visible(self):
         """Render first 10 pages immediately for quick display."""
@@ -123,31 +139,52 @@ class PDFViewer(QWidget):
                     self._apply_highlights(widget.current_pixmap, i)
                     widget.label.setPixmap(widget.current_pixmap)
 
+    def set_scroll_position(self, scroll_pos: int, viewport_height: int):
+        """
+        Set scroll position from parent (QScrollArea). This is called by the
+        parent widget to provide scroll context for visible range calculation.
+        
+        This fixes Bug 1.1 where _get_visible_page_range() couldn't detect
+        scroll position when PDFViewer was inside QScrollArea.
+        """
+        self._scroll_pos = scroll_pos
+        self._viewport_height = viewport_height
+        self.scroll_changed.emit(scroll_pos)
+
     def _get_visible_page_range(self) -> Tuple[int, int]:
         """Determine which pages are visible in viewport."""
         if not self.page_widgets:
             return (0, 0)
 
-        total_height = sum(w.height for w in self.page_widgets.values())
-        viewport_h = self.height() if self.parentWidget() else 800
-        scroll_pos = 0
-        if self.parentWidget():
-            parent = self.parentWidget()
-            if hasattr(parent, 'verticalScrollBar'):
-                scroll_pos = parent.verticalScrollBar().value()
+        # Use stored scroll position from parent widget (set via set_scroll_position)
+        scroll_pos = getattr(self, '_scroll_pos', 0)
+        viewport_h = getattr(self, '_viewport_height', self.height())
 
-        current_y = 0
         first_visible = 0
         last_visible = 0
 
         for i in range(self.doc.page_count):
-            if i in self.page_widgets:
-                widget = self.page_widgets[i]
-                if current_y < scroll_pos + viewport_h:
+            # Use pre-calculated page positions
+            page_top = self.page_tops[i]
+            page_height = self.page_heights[i]
+            page_bottom = page_top + page_height
+
+            # Check if page is within viewport
+            if page_top < scroll_pos + viewport_h and page_bottom > scroll_pos:
+                first_visible = i
+                last_visible = i
+                break
+
+        # If no page found in viewport, find the last page that overlaps
+        if last_visible == 0:
+            for i in range(self.doc.page_count - 1, -1, -1):
+                page_top = self.page_tops[i]
+                page_height = self.page_heights[i]
+                page_bottom = page_top + page_height
+                if page_top < scroll_pos + viewport_h:
+                    first_visible = max(0, i - 5)  # Include 5 pages before
                     last_visible = i
-                    if current_y + widget.height > scroll_pos:
-                        first_visible = i
-                current_y += widget.height + 10
+                    break
 
         return (first_visible, last_visible + 1)
 
