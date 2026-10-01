@@ -193,8 +193,13 @@ class PDFAR(QMainWindow):
         self.zoom = 1.0
         self.fit_mode = "none"
 
-        self.viewer = PDFViewer(self.doc, zoom=self.zoom)
+        self.viewer = PDFViewer(fn, zoom=self.zoom)
         self.scroll_area.setWidget(self.viewer)
+        
+        self.scroll_area.verticalScrollBar().valueChanged.connect(
+            lambda: self.viewer.scroll_timer.start(50)
+        )
+        
         self._update_zoom_label()
 
         self.status.showMessage(f"Loaded: {fn} — {self.doc.page_count} pages", 5000)
@@ -207,6 +212,7 @@ class PDFAR(QMainWindow):
         if w:
             self.scroll_area.ensureWidgetVisible(w, xMargin=0, yMargin=20)
         self.current_page = page_index
+        self.viewer._render_page(page_index, priority=0)
 
     def goto_result(self, item: QListWidgetItem):
         page = item.data(Qt.ItemDataRole.UserRole)
