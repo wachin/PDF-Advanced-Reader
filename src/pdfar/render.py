@@ -45,10 +45,11 @@ class RenderResult:
     ok: bool
     error: str = ""
     rotation: int = 0
+    clip: Optional[Tuple[float, float, float, float]] = None
 
     @property
     def key(self):
-        return (self.page, round(self.zoom, 4), self.rotation, self.tag)
+        return (self.page, round(self.zoom, 4), self.rotation, self.tag, self.clip)
 
 
 @dataclass(order=True)
@@ -60,6 +61,7 @@ class _Job:
     tag: str = field(compare=False)
     alpha: bool = field(compare=False)
     rotation: int = field(default=0, compare=False)
+    clip: Optional[Tuple[float, float, float, float]] = field(default=None, compare=False)
     cancelled: bool = field(default=False, compare=False)
 
 
@@ -95,17 +97,23 @@ class RenderPool(QObject):
 
     # ------------------------------------------------------------------ API
     def request(self, page: int, zoom: float, priority: int = 5, tag: str = "view",
-                alpha: bool = False, rotation: int = 0) -> bool:
-        """Queue a render job.  Returns False if the job was already in flight."""
+                alpha: bool = False, rotation: int = 0,
+                clip: Optional[Tuple[float, float, float, float]] = None) -> bool:
+        """Queue a render job.  Returns False if the job was already in flight.
+
+        ``clip`` optionally restricts rendering to ``(x0, y0, x1, y1)`` in page
+        points — used for viewport tiling of large pages.  The job key
+        includes the clip, so duplicate tile requests are dropped.
+        """
         rotation = int(rotation or 0) % 360
-        key = (page, round(zoom, 4), rotation, tag)
+        key = (page, round(zoom, 4), rotation, tag, clip)
         with self._cv:
             if self._closed:
                 return False
             if key in self._inflight:
                 return False
             self._inflight.add(key)
-            heapq.heappush(self._heap, _Job(priority, next(self._seq), page, float(zoom), tag, alpha, rotation))
+            heapq.heappush(self._heap, _Job(priority, next(self._seq), page, float(zoom), tag, alpha, rotation, clip))
             self._cv.notify()
         return True
 
@@ -164,7 +172,7 @@ class RenderPool(QObject):
 
     def _finish_key(self, job: _Job) -> None:
         with self._cv:
-            self._inflight.discard((job.page, round(job.zoom, 4), job.rotation, job.tag))
+            self._inflight.discard((job.page, round(job.zoom, 4), job.rotation, job.tag, job.clip))
 
     def _run_job(self, tls, job: _Job) -> RenderResult:
         try:
@@ -184,7 +192,12 @@ class RenderPool(QObject):
             mat = fitz.Matrix(job.zoom, job.zoom)
             if job.rotation:
                 mat = mat.prerotate(job.rotation)
-            pix = page.get_pixmap(matrix=mat, alpha=job.alpha, annots=True)
+            # clip to a sub-rect of the page (viewport tiling); unsafe for
+            # rotated matrices, so tiled pages must be rendered at rotation 0.
+            clip = None
+            if job.clip is not None and not job.rotation:
+                clip = fitz.Rect(*job.clip)
+            pix = page.get_pixmap(matrix=mat, alpha=job.alpha, annots=True, clip=clip)
             return RenderResult(
                 page=job.page,
                 zoom=job.zoom,
@@ -194,6 +207,7 @@ class RenderPool(QObject):
                 height=pix.height,
                 ok=True,
                 rotation=job.rotation,
+                clip=job.clip,
             )
         except Exception as exc:  # pragma: no cover - defensive
-            return RenderResult(job.page, job.zoom, job.tag, None, 0, 0, False, str(exc), job.rotation)
+            return RenderResult(job.page, job.zoom, job.tag, None, 0, 0, False, str(exc), job.rotation, None)

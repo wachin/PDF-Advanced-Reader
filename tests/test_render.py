@@ -126,3 +126,49 @@ def test_rotation_is_applied(qapp, sample_pdf):
         assert by_rot[0].width != by_rot[90].width or by_rot[0].height != by_rot[90].height
     finally:
         pool.shutdown(wait=True)
+
+
+def test_clip_renders_subregion(qapp, tmp_path):
+    """A clipped render returns a smaller image than the full page."""
+    doc = fitz.open()
+    page = doc.new_page(width=400, height=400)   # 400x400 pt
+    page.draw_rect(fitz.Rect(0, 0, 400, 400), color=(0, 0, 0), fill=(1, 1, 1))
+    path = str(tmp_path / "clip.pdf")
+    doc.save(path)
+    doc.close()
+
+    pool = RenderPool(path, workers=1)
+    collector = Collector()
+    pool.result_ready.connect(collector.on_result)
+    try:
+        # full page at zoom 1 -> 400x400 px
+        pool.request(0, 1.0, priority=0)
+        # top-left half clip (0..200 pt) -> 200x200 px
+        pool.request(0, 1.0, priority=0, clip=(0, 0, 200, 200))
+        assert wait_until(qapp, lambda: len(collector.results) >= 2)
+        full = next(r for r in collector.results if r.clip is None)
+        clipped = next(r for r in collector.results if r.clip is not None)
+        assert (full.width, full.height) == (400, 400)
+        assert (clipped.width, clipped.height) == (200, 200)
+        assert clipped.clip == (0, 0, 200, 200)
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_clip_with_different_zoom_has_distinct_key(qapp, tmp_path):
+    doc = fitz.open()
+    doc.new_page(width=300, height=300)
+    path = str(tmp_path / "clip_zoom.pdf")
+    doc.save(path)
+    doc.close()
+
+    pool = RenderPool(path, workers=1)
+    collector = Collector()
+    pool.result_ready.connect(collector.on_result)
+    try:
+        assert pool.request(0, 1.0, clip=(0, 0, 100, 100)) is True
+        assert pool.request(0, 1.0, clip=(0, 0, 100, 100)) is False   # dup
+        assert pool.request(0, 2.0, clip=(0, 0, 100, 100)) is True    # different zoom
+        assert wait_until(qapp, lambda: len(collector.results) >= 2)
+    finally:
+        pool.shutdown(wait=True)
