@@ -51,13 +51,38 @@ The analysis conclusions are already documented in
 
 ---
 
+## ⚠️ Important: about `external/LibreOffice-Getting-Started-Guides-PDF-BackUp`
+
+The `external/LibreOffice-Getting-Started-Guides-PDF-BackUp/` directory is
+**NOT a library of this project** — it is **not compiled, not imported, not
+linked** with PDF-Advanced-Reader, and **no files inside it are modified**.
+
+**Purpose:** it is the user's backup repo of the LibreOffice "Getting Started"
+PDF guides (downloaded from https://books.libreoffice.org/en/). It is there
+**purely as test material**. It contains large, heavy PDF files — most notably:
+
+- `external/LibreOffice-Getting-Started-Guides-PDF-BackUp/GS262-GettingStarted.pdf`
+
+This big PDF is used to **test PDF-Advanced-Reader's performance** with large /
+scanned-style documents (fast loading, smooth scrolling, tiled rendering), in
+line with the Okular parity goal. It **has been verified to work** in PDFAR.
+
+**How to apply:** use the PDFs here as a source of large documents for
+performance/loading/scroll testing. Do **not** compile, import into
+`src/pdfar/`, or modify anything inside this directory. It coexists with
+`external/okular/` (also reference-only, see above).
+
+---
+
 ## Project structure
 
 ```
 PDF-Advanced-Reader/
 ├── src/pdfar/          # Application code (Python/PyQt6/PyMuPDF)
 ├── tests/              # pytest tests
-├── external/okular/    # ⚠️ REFERENCE ONLY — not project code
+├── external/           # ⚠️ REFERENCE / TEST material — not project code
+│   ├── okular/                                        # Okular source (study)
+│   └── LibreOffice-Getting-Started-Guides-PDF-BackUp/ # PDFs para pruebas (use)
 ├── debian/             # Debian packaging
 └── run.py              # Entry point: python3 run.py
 ```
