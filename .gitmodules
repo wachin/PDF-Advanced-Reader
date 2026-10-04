@@ -1,3 +1,6 @@
 [submodule "external/okular"]
 	path = external/okular
 	url = https://github.com/KDE/okular
+[submodule "external/LibreOffice-Getting-Started-Guides-PDF-BackUp"]
+	path = external/LibreOffice-Getting-Started-Guides-PDF-BackUp
+	url = https://github.com/wachin/LibreOffice-Getting-Started-Guides-PDF-BackUp
