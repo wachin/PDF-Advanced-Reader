@@ -1,0 +1,3 @@
+[submodule "external/okular"]
+	path = external/okular
+	url = https://github.com/KDE/okular
