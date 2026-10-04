@@ -8,6 +8,18 @@ and time — especially for high-resolution scanned PDFs.  Okular switches to a
 ``TilesManager`` that renders *only the visible portions* of the page at the
 requested size.
 
+Credits / Creditos / 致谢
+------------------------
+This tiled-rendering technique is directly inspired by **Okular** — the KDE
+PDF/document viewer (https://apps.kde.org/okular/). The tiling strategy was
+designed by the KDE Okular developers ("Okular" by KDE, GPL-2.0+ / GPL-3.0+,
+https://invent.kde.org/graphics/okular). PDF-Advanced-Reader (PDFAR,
+GPL-3.0+, https://github.com/wachin/PDF-Advanced-Reader) implements the same
+*ideas* (never render a huge whole-page bitmap on large pages; render only
+the visible tiles) on top of PyMuPDF. Ideas and algorithms are not
+copyrighted; this original Python implementation is PDFAR's own. Okular —
+copyright by its respective authors (c) KDE.
+
 This module is pure geometry (no Qt, no PyMuPDF), so it is trivially
 testable.  It answers:
 

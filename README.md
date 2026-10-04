@@ -111,6 +111,22 @@ python3 compile_ts.py
 
 ---
 
+## 🙏 Acknowledgements
+
+This project owes a great debt to **Okular** (https://apps.kde.org/okular/), the
+mature KDE document viewer (GPL-2.0+ / GPL-3.0+, by KDE and its contributors,
+https://invent.kde.org/graphics/okular).
+
+In particular, the tiled-rendering strategy that lets PDF-Advanced-Reader
+display heavy, scanned PDFs smoothly at high zoom (render only the visible
+tiles of a large page instead of one giant bitmap) was **directly inspired by
+Okular's `TilesManager`** (see `core/document.cpp` in the Okular source). PDFAR
+studied Okular's architecture and re-implemented the same *ideas* from scratch
+in Python/PyQt6/PyMuPDF. Without Okular's proven approach, we would not have
+solved this — thank you to the Okular developers.
+
+---
+
 ## 📄 License
 
 **GPL-3.0** — See [LICENSE](LICENSE) for details.
