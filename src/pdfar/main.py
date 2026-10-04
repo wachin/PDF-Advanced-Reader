@@ -679,14 +679,26 @@ class MainWindow(QMainWindow):
         geo = self.settings.value("geometry")
         if geo is not None:
             self.restoreGeometry(geo)
-        state = self.settings.value("windowState")
-        if state is not None:
-            self.restoreState(state)
+        # NOTE: we deliberately do NOT restore the Qt windowState. saveState()
+        # persists dock/toolbar/tabbar visibility, and a previous session saved
+        # while the UI was collapsed (e.g. presentation mode) makes the window
+        # look completely empty on next launch. Only the geometry is restored;
+        # the toolbar and docks start visible every run.
+        self.toolbar.setVisible(True)
+        if hasattr(self, "side_dock") and self.side_dock is not None:
+            self.side_dock.setVisible(True)
+        if hasattr(self, "search_dock") and self.search_dock is not None:
+            self.search_dock.setVisible(True)
+        self.tabs.setVisible(True)
+        if hasattr(self.tabs, "tabBar"):
+            self.tabs.tabBar().show()
+            if self.tabs.cornerWidget() is not None:
+                self.tabs.cornerWidget().show()
         self._rebuild_recent_menu()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self.settings.setValue("geometry", self.saveGeometry())
-        self.settings.setValue("windowState", self.saveState())
+        # windowState is intentionally not saved to avoid restoring a hidden UI.
         self._close_all_tabs()
         if self.search_thread is not None and self.search_thread.isRunning():
             self.search_thread.quit()

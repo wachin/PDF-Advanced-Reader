@@ -58,6 +58,24 @@ def test_open_document_wires_everything(qapp, sample_pdf):
         qapp.processEvents()
 
 
+def test_window_starts_with_ui_visible(qapp):
+    """Regression: a previously-saved Qt windowState could leave the toolbar
+    and docks hidden, so the window opened looking completely empty."""
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        assert win.toolbar.isVisible()
+        assert win.tabs.isVisible()
+        assert win.search_dock.isVisible()
+        # the central tab area is the main document pane
+        assert win.tabs.count() == 0
+    finally:
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
 def test_search_through_the_dock(qapp, sample_pdf):
     """1.x search never ran at all (the worker was never started)."""
     win = MainWindow()
