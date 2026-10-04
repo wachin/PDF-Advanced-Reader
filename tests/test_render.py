@@ -172,3 +172,52 @@ def test_clip_with_different_zoom_has_distinct_key(qapp, tmp_path):
         assert wait_until(qapp, lambda: len(collector.results) >= 2)
     finally:
         pool.shutdown(wait=True)
+
+
+def test_cancel_if_marks_queued_jobs(qapp, tmp_path):
+    """cancel_if() cancels queued jobs matching the predicate (Okular's
+    cancelRenderingBecauseOf), but leaves non-matching jobs intact."""
+    doc = fitz.open()
+    doc.new_page(width=200, height=200)
+    path = str(tmp_path / "cancel.pdf")
+    doc.save(path)
+    doc.close()
+
+    import threading
+    barrier = threading.Event()
+
+    # A single worker thread: jobs stay queued until the worker is free.
+    pool = RenderPool(path, workers=1)
+
+    class SlowCollector(Collector):
+        def __init__(self, event):
+            super().__init__()
+            self._event = event
+
+        def on_result(self, result):
+            # let the worker finish the FIRST job, then hold it briefly
+            super().on_result(result)
+            if len(self.results) == 1:
+                self._event.wait(2.0)
+
+    collector = SlowCollector(barrier)
+    pool.result_ready.connect(collector.on_result)
+
+    try:
+        # queue page 0 (will run first) then pages 2..4 (sit queued)
+        assert pool.request(0, 1.0, priority=0) is True
+        for p in (2, 3, 4):
+            assert pool.request(p, 1.0, priority=1) is True
+
+        # cancel the queued far pages (keep only page 2)
+        n = pool.cancel_if(lambda job: job.page in (3, 4))
+        assert n == 2, f"expected 2 cancelled, got {n}"
+
+        # release the first job so the worker drains the heap
+        barrier.set()
+        # only page 0 and page 2 should be delivered; 3 and 4 were cancelled
+        assert wait_until(qapp, lambda: len(collector.results) >= 2)
+        delivered = {r.page for r in collector.results}
+        assert delivered == {0, 2}, f"unexpected delivered pages: {delivered}"
+    finally:
+        pool.shutdown(wait=True)

@@ -417,3 +417,44 @@ def test_small_page_no_tiles(qapp, sample_pdf):
         view.shutdown()
         view.deleteLater()
         qapp.processEvents()
+
+
+# ------------------------------------------ stale-render cancellation (Okular)
+def test_request_visible_cancels_stale_renders(qapp, big_pdf):
+    """_request_visible must tell the pool to cancel renders of pages that
+    left the viewport (Okular's cancelRenderingBecauseOf), so a fast scroll
+    doesn't waste worker threads on pages the user won't see."""
+    view = PDFView(big_pdf)     # 40 pages
+    view.resize(400, 300)
+    view.show()
+    qapp.processEvents()
+    try:
+        captured_pred = {}
+        orig = view.pool.cancel_if
+        def spy(pred):
+            captured_pred["pred"] = pred
+            return orig(pred)
+        view.pool.cancel_if = spy
+
+        # visible at top => keep range 0..8; pages 30/35 must be cancellable
+        view.verticalScrollBar().setValue(0)
+        view._request_visible()
+        pred = captured_pred["pred"]
+        assert pred is not None
+
+        # build job-like objects to test the predicate
+        class FakeJob:
+            def __init__(self, page, tag="view"):
+                self.page = page
+                self.tag = tag
+                self.cancelled = False
+
+        assert pred(FakeJob(35)) is True, "far page 35 should be cancelled"
+        assert pred(FakeJob(30)) is True, "far page 30 should be cancelled"
+        assert pred(FakeJob(0)) is False, "near page 0 must be kept"
+        assert pred(FakeJob(8)) is False, "keep edge page 8 must be kept"
+    finally:
+        view.pool.cancel_if = orig
+        view.shutdown()
+        view.deleteLater()
+        qapp.processEvents()

@@ -217,11 +217,22 @@ class PDFView(QAbstractScrollArea):
         first, last = self.visible_range()
         # Okular preloads around the viewport; the visible pages request their
         # visible tiles (or whole page), and near pages are preloaded whole.
+        # Also cancel queued renders for pages that have moved far from the
+        # viewport (base: scroll fast -> do not waste threads on stale pages).
         margin = 512  # px around the viewport to preload (Okular)
         vsx = self.horizontalScrollBar().value()
         vsy = self.verticalScrollBar().value()
         vw = self.viewport().width()
         vh = self.viewport().height()
+
+        KEEP = 8  # pages of slack either side of the visible range
+        keep_first = max(0, first - KEEP)
+        keep_last = min(self.page_count - 1, last + KEEP)
+        self.pool.cancel_if(
+            lambda job: job.tag == "view"
+            and (job.page < keep_first or job.page > keep_last)
+        )
+
         for i in range(max(0, first - 1), min(self.page_count, last + 2)):
             self._request_visible_for_page(i, priority=0, margin=margin,
                                            vsx=vsx, vsy=vsy, vw=vw, vh=vh)

@@ -121,6 +121,25 @@ class RenderPool(QObject):
         with self._cv:
             return len(self._heap) + len(self._inflight)
 
+    def cancel_if(self, pred) -> int:
+        """Cancel queued render jobs matching ``pred``.
+
+        Modelled on Okular's ``Document::cancelRenderingBecauseOf``: when the
+        viewport moves fast, renders for pages that are no longer near the
+        viewport are pointless — cancel them so the pool spends its threads on
+        pages that matter.  Only *queued* (not yet started) jobs can be
+        cancelled; an in-flight PyMuPDF render cannot be aborted mid-way.
+        Returns the number of cancelled jobs.
+        """
+        cancelled = 0
+        with self._cv:
+            for job in self._heap:
+                if not job.cancelled and pred(job):
+                    job.cancelled = True
+                    cancelled += 1
+            # marking does not change the heap order, so no re-heapify needed
+        return cancelled
+
     def is_running(self) -> bool:
         """True while the pool still accepts render jobs (not shut down)."""
         with self._cv:
