@@ -240,6 +240,10 @@ class PDFView(QAbstractScrollArea):
             self._request_page(i, priority=2)
         for i in range(min(self.page_count, last + 2), min(self.page_count, last + 8)):
             self._request_page(i, priority=3)
+        # extract words in the background too, so text-layer interactions
+        # (selection/copy) don't ever block the GUI thread on first visit
+        for i in range(max(0, first - 1), min(self.page_count, last + 2)):
+            self._request_page_words(i, priority=2)
 
     def _grid_for_page(self, index: int, view_w: int, view_h: int) -> TileGrid:
         """Cached TileGrid for a page; None if the page shouldn't be tiled."""
@@ -284,7 +288,13 @@ class PDFView(QAbstractScrollArea):
 
     def _on_result(self, result: object) -> None:
         """Render result arrives here (queued to the GUI thread)."""
-        if not isinstance(result, RenderResult) or result.tag != "view":
+        if not isinstance(result, RenderResult) or result.tag not in ("view", "text"):
+            return
+        if result.tag == "text":
+            if result.ok and result.words is not None:
+                self._words[result.page] = result.words
+            return
+        if result.tag != "view":
             return
         # Drop results that belong to a zoom/rotation we have left behind.
         if abs(result.zoom - self.zoom) > 1e-4 or result.rotation != self.rotation:
@@ -407,7 +417,22 @@ class PDFView(QAbstractScrollArea):
                                    max(1, int((x1 - x0) * z)), max(1, int((y1 - y0) * z))), SEL_COLOR)
 
     # ------------------------------------------------------- text layer
-    def _page_words(self, index: int) -> List[Tuple[float, float, float, float, str]]:
+    def _request_page_words(self, index: int, priority: int = 3) -> None:
+        """Extract a page's words on a worker thread (Okular-style).
+
+        If the words are already cached, this is a no-op.  Off the GUI thread,
+        so visiting a new page never blocks the UI on get_text('words').
+        """
+        if index not in self._words:
+            self.pool.request_words(index, priority=priority)
+
+    def _page_words_sync(self, index: int) -> List[Tuple[float, float, float, float, str]]:
+        """Blocking fallback that loads and caches a page's words (GUI thread).
+
+        Only used when the async extraction has not finished and code genuinely
+        needs the words right now (e.g. a selection interaction).  The async
+        preload in _request_visible usually makes this a no-op for visible pages.
+        """
         words = self._words.get(index)
         if words is None:
             try:
@@ -416,6 +441,14 @@ class PDFView(QAbstractScrollArea):
             except Exception:
                 words = []
             self._words[index] = words
+        return words
+
+    def _page_words(self, index: int) -> List[Tuple[float, float, float, float, str]]:
+        words = self._words.get(index)
+        if words is None:
+            # async path is preferred; sync fallback keeps selection working.
+            self._request_page_words(index)
+            return self._page_words_sync(index)
         return words
 
     def _word_rect_view(self, page: int, word: Tuple[float, float, float, float, str]):

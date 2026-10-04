@@ -174,6 +174,40 @@ def test_clip_with_different_zoom_has_distinct_key(qapp, tmp_path):
         pool.shutdown(wait=True)
 
 
+def test_request_words_delivers_text(qapp, sample_pdf):
+    """request_words extracts the page's words on a worker thread and delivers
+    them in RenderResult.words with tag='text' (no pixmap)."""
+    pool = RenderPool(sample_pdf, workers=1)
+    collector = Collector()
+    pool.result_ready.connect(collector.on_result)
+    try:
+        assert pool.request_words(0) is True
+        assert wait_until(qapp, lambda: len(collector.results) >= 1), \
+            "word extraction result never arrived"
+        res = collector.results[0]
+        assert isinstance(res, RenderResult)
+        assert res.tag == "text"
+        assert res.ok and res.png is None
+        assert res.words is not None
+        texts = [w[4] for w in res.words]
+        assert "Hello" in texts and "world" in texts
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_request_words_deduplicated(qapp, sample_pdf):
+    """Two request_words for the same page collapse into one in-flight job."""
+    pool = RenderPool(sample_pdf, workers=1)
+    collector = Collector()
+    pool.result_ready.connect(collector.on_result)
+    try:
+        assert pool.request_words(0) is True
+        assert pool.request_words(0) is False   # already in flight
+        assert wait_until(qapp, lambda: len(collector.results) >= 1)
+    finally:
+        pool.shutdown(wait=True)
+
+
 def test_cancel_if_marks_queued_jobs(qapp, tmp_path):
     """cancel_if() cancels queued jobs matching the predicate (Okular's
     cancelRenderingBecauseOf), but leaves non-matching jobs intact."""

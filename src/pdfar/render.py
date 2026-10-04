@@ -23,7 +23,7 @@ import heapq
 import itertools
 import threading
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
@@ -46,6 +46,7 @@ class RenderResult:
     error: str = ""
     rotation: int = 0
     clip: Optional[Tuple[float, float, float, float]] = None
+    words: Optional[List[Tuple[float, float, float, float, str]]] = None
 
     @property
     def key(self):
@@ -116,6 +117,17 @@ class RenderPool(QObject):
             heapq.heappush(self._heap, _Job(priority, next(self._seq), page, float(zoom), tag, alpha, rotation, clip))
             self._cv.notify()
         return True
+
+    def request_words(self, page: int, priority: int = 5, tag: str = "text") -> bool:
+        """Queue a text-extraction job for *page*.
+
+        The word list is delivered on ``result_ready`` as ``RenderResult.words``
+        with ``tag="text"``.  Extraction runs on a worker thread so the GUI
+        thread never blocks opening the page's text layer (Okular extracts
+        ``TextPage`` in background).
+        """
+        return self.request(page, 1.0, priority=priority, tag=tag, alpha=False,
+                            rotation=0, clip=None)
 
     def pending(self) -> int:
         with self._cv:
@@ -208,6 +220,21 @@ class RenderPool(QObject):
                 tls.doc = doc
                 tls.path = self.doc_path
             page = doc.load_page(job.page)
+            if job.tag == "text":
+                # text extraction: no pixmap, just the word rectangles
+                raw = page.get_text("words") or []
+                return RenderResult(
+                    page=job.page,
+                    zoom=job.zoom,
+                    tag=job.tag,
+                    png=None,
+                    width=0,
+                    height=0,
+                    ok=True,
+                    rotation=0,
+                    clip=None,
+                    words=[(w[0], w[1], w[2], w[3], w[4]) for w in raw],
+                )
             mat = fitz.Matrix(job.zoom, job.zoom)
             if job.rotation:
                 mat = mat.prerotate(job.rotation)

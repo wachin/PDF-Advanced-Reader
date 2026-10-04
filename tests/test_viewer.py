@@ -458,3 +458,24 @@ def test_request_visible_cancels_stale_renders(qapp, big_pdf):
         view.shutdown()
         view.deleteLater()
         qapp.processEvents()
+
+
+# ------------------------------------------- async text extraction (Okular)
+def test_view_preloads_words_asynchronously(qapp, sample_pdf):
+    """Opening the view should prefetch the visible page's words on a worker
+    thread; once received, _words is populated without a blocking GUI call."""
+    view = PDFView(sample_pdf)
+    view.resize(500, 400)
+    view.show()
+    qapp.processEvents()
+    try:
+        # _request_visible (called on show) should have queued word extraction
+        assert view._words.get(0) is None
+        ok = wait_until(qapp, lambda: view._words.get(0) is not None)
+        assert ok, "words for page 0 never arrived asynchronously"
+        texts = [w[4] for w in view._words[0]]
+        assert "PDFAR" in texts or "Hello" in texts or "world" in texts
+    finally:
+        view.shutdown()
+        view.deleteLater()
+        qapp.processEvents()
