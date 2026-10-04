@@ -1,113 +1,113 @@
-# Investigación: Arquitectura de Okular — Carga de documentos y scroll
+# Research: Okular Architecture — Document Loading and Scrolling
 
-> **Fuente:** código fuente en `external/okular/` (solo lectura, ver AGENTS.md).
-> **Objetivo:** replicar estas técnicas en PDF-Advanced-Reader (Python/PyQt6/PyMuPDF)
-> para que PDFs con páginas escaneadas (pesadas) se abran rápido y el scroll
-> sea fluido, igual que en Okular.
+> **Source:** source code in `external/okular/` (read-only, see AGENTS.md).
+> **Goal:** replicate these techniques in PDF-Advanced-Reader (Python/PyQt6/PyMuPDF)
+> so that PDFs with scanned (heavy) pages open fast and scroll smoothly,
+> just like in Okular.
 
 ---
 
-## 1. Carga instantánea: solo metadatos al abrir
+## 1. Instant loading: only metadata on open
 
-**Okular NO renderiza nada al abrir un PDF.**
+**Okular does NOT render anything when opening a PDF.**
 
-`generators/poppler/generator_pdf.cpp` → `PDFGenerator::loadPages()` (línea 880):
+`generators/poppler/generator_pdf.cpp` → `PDFGenerator::loadPages()` (line 880):
 
-- Al abrir el documento solo lee **metadatos por página**:
-  - `p->pageSizeF()` — dimensiones
-  - `p->orientation()` — rotación
-  - anotaciones, links, form fields, duración, label
-- **Nunca** llama a `get_pixmap()` / render durante la apertura.
-- El tamaño de página se usa para crear **placeholders geométricos**
+- When opening the document it only reads **per-page metadata**:
+  - `p->pageSizeF()` — dimensions
+  - `p->orientation()` — rotation
+  - annotations, links, form fields, duration, label
+- It **never** calls `get_pixmap()` / render during opening.
+- The page size is used to create **geometric placeholders**
   (`new Okular::Page(i, w, h, orientation)`).
 
-**Equivalente en PDFAR:** esto ya lo hacemos bien — `PDFViewer._init_all_pages()`
-crea todos los widgets con `page.rect` × zoom. El costo de apertura es solo
-leer el xref del PDF, no renderizar.
+**PDFAR equivalent:** we already do this correctly — `PDFViewer._init_all_pages()`
+creates all widgets with `page.rect` × zoom. The opening cost is only
+reading the PDF's xref, not rendering.
 
 ---
 
-## 2. Render bajo demanda dirigido por el viewport
+## 2. Viewport-driven on-demand rendering
 
-`part/pageview.cpp` → `PageView::requestVisiblePixmaps()` (~línea 4950).
-Se invoca en cada cambio de viewport (scroll, zoom, resize):
+`part/pageview.cpp` → `PageView::requestVisiblePixmaps()` (~line 4950).
+It is invoked on every viewport change (scroll, zoom, resize):
 
-1. Calcula `viewportRect` desde los scrollbars **propios**
+1. Computes `viewportRect` from the widget's **own** scrollbars
    (`QAbstractScrollArea`: `horizontalScrollBar()->value()`,
    `verticalScrollBar()->value()`, `viewport()->width/height()`).
-2. Itera todos los items de página y selecciona los que **intersectan** el
+2. Iterates all page items and selects those that **intersect** the
    viewport (`viewportRect.intersected(i->croppedGeometry())`).
-3. Solo para páginas visibles (o en la zona de preload) emite
+3. Only for visible pages (or in the preload zone) it emits
    `PixmapRequest` → `d->document->requestPixmaps(requestedPixmaps)`.
 
-**Clave:** no hay "renderizar primeras 10 páginas" fijo. Se renderiza
-exactamente lo que el usuario está viendo.
+**Key point:** there is no fixed "render first 10 pages". It renders
+exactly what the user is looking at.
 
 ---
 
-## 3. Preload con margen de 512 px (no N páginas fijas)
+## 3. Preload with a 512 px margin (not a fixed N pages)
 
-En `requestVisiblePixmaps()`:
+In `requestVisiblePixmaps()`:
 
 ```cpp
 // Margin (in pixels) around the viewport to preload
 const int pixelsToExpand = 512;
 ```
 
-- Cada página visible expande su rect con **512 px extra** para pedir tiles
-  alrededor de lo visible.
-- Para preload de páginas completas: `pagesToPreload = viewColumns()`
-  (normalmente 1–2 páginas antes y después de las visibles), y la ventana de
-  viewport se expande `±pixelsToExpand` verticalmente
+- Each visible page expands its rect with **512 extra px** to request tiles
+  around what is visible.
+- For full-page preload: `pagesToPreload = viewColumns()`
+  (normally 1–2 pages before and after the visible ones), and the
+  viewport window is expanded `±pixelsToExpand` vertically
   (`viewportRect.adjusted(0, -pixelsToExpand, 0, pixelsToExpand)`).
-- Depende del nivel de memoria configurado
+- It depends on the configured memory level
   (`Okular::Settings::memoryLevel()`):
-  - `Low` → sin preload
-  - `Normal` → 1–2 páginas alrededor
-  - `Greedy` → todas las páginas
+  - `Low` → no preload
+  - `Normal` → 1–2 surrounding pages
+  - `Greedy` → all pages
 
-**Lección para PDFAR:** nuestro `PREFETCH_BACK=2 / PREFETCH_FORWARD=8` en
-páginas es arbitrario; Okular usa **píxeles** (512 px ≈ media pantalla) y
-limita preload según la memoria disponible.
-
----
-
-## 4. Cola de requests con prioridad + cancelación
-
-`core/document.cpp` → `DocumentPrivate::sendGeneratorPixmapRequest()` (línea 1324):
-
-- Los `PixmapRequest` se apilan en `m_pixmapRequestsStack` y se procesan
-  **en orden de prioridad** (priority 0 = visible, mayor = preload lejano).
-- Antes de renderizar un request decide:
-  - ¿Ya existe el pixmap? (`page()->hasPixmap(...)`) → descarta.
-  - ¿Ya se está generando? (`tilesManager->isRequesting(...)`) → descarta.
-  - ¿Es preload y no cabe en cache? (`qAbs(page - currentViewportPage) >= maxDistance`) → descarta.
-- **Cancelación de renders obsoletos:**
-  `shouldCancelRenderingBecauseOf()` (línea 3169) + `cancelRenderingBecauseOf()`
-  — si un render en curso ya no es relevante (p. ej. scroll rápido), se cancela
-  a favor del request nuevo.
-- Tras lanzar un render, agenda el siguiente con
-  `QTimer::singleShot(30, ...)` — un pequeño rate-limit que evita saturar.
+**Lesson for PDFAR:** our `PREFETCH_BACK=2 / PREFETCH_FORWARD=8` in
+pages is arbitrary; Okular uses **pixels** (512 px ≈ half a screen) and
+limits preload according to available memory.
 
 ---
 
-## 5. Un QThread dedicado por render, nunca bloquea la GUI
+## 4. Priority request queue + cancellation
 
-`core/generator_p.h` (línea 109) → `PixmapGenerationThread : public QThread`:
+`core/document.cpp` → `DocumentPrivate::sendGeneratorPixmapRequest()` (line 1324):
 
-- Cada render de página corre en su **propio QThread**
-  (`startGeneration()` → `start()` → `run()` llama `mGenerator->image(mRequest)`).
-- El resultado llega a los observers por señales
-  (`DocumentObserver::pageChanged`), siempre en el hilo GUI.
-- El generador PDF declara `setFeature(Threaded)` y `setFeature(TiledRendering)`
-  (`generator_pdf.cpp:675,687`) — el preload solo funciona si el generador es
+- `PixmapRequest` objects are stacked in `m_pixmapRequestsStack` and processed
+  **in priority order** (priority 0 = visible, higher = farther preload).
+- Before rendering a request it decides:
+  - Does the pixmap already exist? (`page()->hasPixmap(...)`) → discard.
+  - Is it already being generated? (`tilesManager->isRequesting(...)`) → discard.
+  - Is it a preload that doesn't fit in cache? (`qAbs(page - currentViewportPage) >= maxDistance`) → discard.
+- **Cancellation of obsolete renders:**
+  `shouldCancelRenderingBecauseOf()` (line 3169) + `cancelRenderingBecauseOf()`
+  — if an in-flight render is no longer relevant (e.g. fast scrolling), it is
+  cancelled in favor of the new request.
+- After launching a render, it schedules the next one with
+  `QTimer::singleShot(30, ...)` — a small rate-limit that avoids saturation.
+
+---
+
+## 5. One dedicated QThread per render, never blocks the GUI
+
+`core/generator_p.h` (line 109) → `PixmapGenerationThread : public QThread`:
+
+- Each page render runs in its **own QThread**
+  (`startGeneration()` → `start()` → `run()` calls `mGenerator->image(mRequest)`).
+- The result reaches the observers via signals
+  (`DocumentObserver::pageChanged`), always on the GUI thread.
+- The PDF generator declares `setFeature(Threaded)` and `setFeature(TiledRendering)`
+  (`generator_pdf.cpp:675,687`) — preload only works if the generator is
   Threaded (`document.cpp:1369`).
 
 ---
 
-## 6. Tiled rendering para páginas grandes (¡clave para escaneos!)
+## 6. Tiled rendering for large pages (key for scans!)
 
-`document.cpp` (~línea 1404):
+`document.cpp` (~line 1404):
 
 ```cpp
 // If the requested area is above 4*screenSize pixels, and we're not
@@ -118,86 +118,85 @@ else if (!tilesManager && m_generator->hasFeature(Generator::TiledRendering)
     // if the image is too big. start using tiles
 ```
 
-- Si el bitmap de la página completa supera **4× el tamaño de la pantalla**
-  (típico en escaneos a alta resolución con zoom), no se renderiza la página
-  entera: entra el `TilesManager` (`core/tilesmanager_p.h`).
-- Se renderizan **solo los tiles visibles** (`NormalizedRect` del viewport
-  expandido 512 px) en el tamaño pedido.
-- `Tile` = rect normalizado + QPixmap + flag de validez; los tiles se
-  reutilizan mientras el zoom no cambie.
+- If the full-page bitmap exceeds **4× the screen size**
+  (typical in high-resolution scans with zoom), the whole page is not rendered:
+  the `TilesManager` kicks in (`core/tilesmanager_p.h`).
+- **Only the visible tiles** are rendered (`NormalizedRect` of the viewport
+  expanded by 512 px) at the requested size.
+- `Tile` = normalized rect + QPixmap + validity flag; tiles are
+  reused as long as the zoom doesn't change.
 
-**Esto es exactamente por qué los PDFs escaneados "se ven bien al hacer
-scroll" en Okular:** nunca renderiza una página de 20000 px de alto, solo
-los trozos de ~screen-size que ves.
+**This is exactly why scanned PDFs "look good while scrolling" in Okular:**
+it never renders a 20000 px-tall page, only the ~screen-size chunks you see.
 
 ---
 
-## 7. Cache de memoria con límite dinámico
+## 7. Memory cache with a dynamic limit
 
 `core/document.cpp`:
 
-- `calculateMemoryToFree()` (línea ~253): límite de cache =
-  `getTotalMemory() / 3` y además considera **memoria libre y swap**
+- `calculateMemoryToFree()` (line ~253): cache limit =
+  `getTotalMemory() / 3` and it also considers **free memory and swap**
   (`qMin(qMax(freeMemory, getTotalMemory()/2), freeMemory + freeSwap)`).
-- `cleanupPixmapMemory()`: desaloja del cache los pixmaps de
-  **menor prioridad y más lejanos del viewport**
-  (`searchLowestPriorityPixmap(true)`), hasta liberar lo necesario.
-- La prioridad de cada pixmap se actualiza con la distancia al viewport
-  actual en cada cambio de página.
+- `cleanupPixmapMemory()`: evicts from cache the pixmaps with
+  **lowest priority and farthest from the viewport**
+  (`searchLowestPriorityPixmap(true)`), until enough memory is freed.
+- Each pixmap's priority is updated with its distance to the current
+  viewport on every page change.
 
-**Lección:** el cache de PDFAR (fijo: 30 páginas) debería ser por **bytes**
-con límite proporcional a la RAM, desalojando primero lo más lejos.
+**Lesson:** PDFAR's cache (fixed: 30 pages) should be **byte-based**
+with a limit proportional to RAM, evicting the farthest pages first.
 
 ---
 
-## 8. Scroll: QAbstractScrollArea + scrollContentsBy
+## 8. Scrolling: QAbstractScrollArea + scrollContentsBy
 
 `part/pageview.cpp`:
 
-- `PageView` hereda de `QAbstractScrollArea` — el scroll es **propio del
-  widget**, no depende del padre (mismo diagnóstico que hicimos para el Bug 1.1).
-- `PageView::scrollContentsBy(dx, dy)` (línea 3509) es mínimo: solo
-  `viewport()->scroll()` + repinta regiones dañadas. **No renderiza nada ahí.**
-- El render lo dispara `requestVisiblePixmaps()` vía eventos de viewport
-  (`slotViewport()`), con `QScroller` para física de scroll suave
-  (`d->scroller = QScroller::scroller(viewport())`, línea 406).
+- `PageView` inherits from `QAbstractScrollArea` — the scroll is **owned by
+  the widget**, it doesn't depend on the parent (same diagnosis we made for Bug 1.1).
+- `PageView::scrollContentsBy(dx, dy)` (line 3509) is minimal: just
+  `viewport()->scroll()` + repaints damaged regions. **It renders nothing there.**
+- Rendering is triggered by `requestVisiblePixmaps()` via viewport events
+  (`slotViewport()`), with `QScroller` for smooth scroll physics
+  (`d->scroller = QScroller::scroller(viewport())`, line 406).
 
 ---
 
-## 9. Rotación y trabajos paralelos de imagen
+## 9. Rotation and parallel image jobs
 
-`core/pagecontroller.cpp`: rotaciones de imágenes se encolan en un
-`ThreadWeaver::Queue` (pool de hilos KDE), resultados por señal
-`rotationFinished(page, okularPage)`.
-
----
-
-## Resumen: qué debe adoptar PDF-Advanced-Reader
-
-| # | Técnica Okular | Estado en PDFAR | Acción propuesta |
-|---|----------------|-----------------|------------------|
-| 1 | Apertura = solo metadatos | ✅ Ya la tenemos (placeholders) | Mantener |
-| 2 | Render dirigido por viewport real (intersección con viewportRect) | ⚠️ Parcial (`_get_visible_page_range` con posiciones cacheadas) | Calcular intersección real viewport↔página |
-| 3 | Preload en **píxeles** (512 px) limitado por memoria | ❌ Fijo en nº de páginas (2 atrás/8 delante) | Convertir a margen en px + nivel de memoria |
-| 4 | Cola de requests con prioridad + cancelación de renders obsoletos | ❌ No hay cancelación | Implementar cola con prioridad y cancel flag |
-| 5 | Render async en hilo separado, resultado por señal a GUI | ⚠️ Tenemos ThreadPoolExecutor + QTimer.singleShot | Validar que la GUI nunca recibe updates desde otro hilo |
-| 6 | **Tiles** cuando página > 4× pantalla | ❌ No existe | Render por tiles para zooms altos/escaneos |
-| 7 | Cache por **bytes** con límite = RAM/3 y desalojo por prioridad | ⚠️ Cache fijo de 30 páginas | Cache con límite de memoria en MB |
-| 8 | QAbstractScrollArea con scroll propio | ⚠️ Usamos QScrollArea contenedora | Migrar PDFViewer a QAbstractScrollArea |
-| 9 | `scrollContentsBy()` no renderiza; render en evento de viewport | ⚠️ Renderizamos en el timer de scroll | Separar: scroll → solo pintar; viewport-change → pedir pixmaps |
+`core/pagecontroller.cpp`: image rotations are queued in a
+`ThreadWeaver::Queue` (KDE thread pool), results delivered via the
+`rotationFinished(page, okularPage)` signal.
 
 ---
 
-## Referencias exactas (para volver a consultar)
+## Summary: what PDF-Advanced-Reader should adopt
 
-| Tema | Archivo | Líneas aprox. |
-|------|---------|---------------|
-| Apertura sin render | `generators/poppler/generator_pdf.cpp` | `loadPages()` 880–935 |
-| Requests por viewport | `part/pageview.cpp` | `requestVisiblePixmaps()` ~4950–5130 |
-| Preload 512 px | `part/pageview.cpp` | 4970, 5077–5080 |
-| Cola de requests | `core/document.cpp` | `sendGeneratorPixmapRequest()` 1324–1430 |
-| Cancelación | `core/document.cpp` | 3169–3252 |
+| # | Okular technique | Status in PDFAR | Proposed action |
+|---|------------------|-----------------|-----------------|
+| 1 | Opening = metadata only | ✅ Already done (placeholders) | Keep |
+| 2 | Rendering driven by the real viewport (intersection with viewportRect) | ⚠️ Partial (`_get_visible_page_range` with cached positions) | Compute real viewport↔page intersection |
+| 3 | Preload in **pixels** (512 px) limited by memory | ❌ Fixed page count (2 back/8 forward) | Convert to px margin + memory level |
+| 4 | Priority request queue + cancellation of obsolete renders | ❌ No cancellation | Implement priority queue with cancel flag |
+| 5 | Async render in a separate thread, result delivered to GUI via signal | ⚠️ We have ThreadPoolExecutor + QTimer.singleShot | Verify the GUI never receives updates from another thread |
+| 6 | **Tiles** when page > 4× screen | ❌ Doesn't exist | Tile-based rendering for high zoom/scans |
+| 7 | **Byte-based** cache with limit = RAM/3 and priority-based eviction | ⚠️ Fixed 30-page cache | Cache with memory limit in MB |
+| 8 | QAbstractScrollArea with its own scroll | ⚠️ We use a wrapping QScrollArea | Migrate PDFViewer to QAbstractScrollArea |
+| 9 | `scrollContentsBy()` doesn't render; render on viewport event | ⚠️ We render in the scroll timer | Separate: scroll → paint only; viewport-change → request pixmaps |
+
+---
+
+## Exact references (for future consultation)
+
+| Topic | File | Approx. lines |
+|-------|------|---------------|
+| Open without rendering | `generators/poppler/generator_pdf.cpp` | `loadPages()` 880–935 |
+| Viewport-driven requests | `part/pageview.cpp` | `requestVisiblePixmaps()` ~4950–5130 |
+| 512 px preload | `part/pageview.cpp` | 4970, 5077–5080 |
+| Request queue | `core/document.cpp` | `sendGeneratorPixmapRequest()` 1324–1430 |
+| Cancellation | `core/document.cpp` | 3169–3252 |
 | Tiles switch-on | `core/document.cpp` | ~1404 |
-| Threads de render | `core/generator_p.h/.cpp` | 109–146 / 56–60 |
-| Cache memoria | `core/document.cpp` | 253–330 |
+| Render threads | `core/generator_p.h/.cpp` | 109–146 / 56–60 |
+| Memory cache | `core/document.cpp` | 253–330 |
 | Scroll handling | `part/pageview.cpp` | `scrollContentsBy()` 3509, QScroller 406 |
