@@ -82,7 +82,7 @@ PDF-Advanced-Reader/
 ├── tests/              # pytest tests
 ├── external/           # ⚠️ REFERENCE / TEST material — not project code
 │   ├── okular/                                        # Okular source (study)
-│   └── LibreOffice-Getting-Started-Guides-PDF-BackUp/ # PDFs para pruebas (use)
+│   └── LibreOffice-Getting-Started-Guides-PDF-BackUp/ # PDFs for testing (use)
 ├── debian/             # Debian packaging
 └── run.py              # Entry point: python3 run.py
 ```
