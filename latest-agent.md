@@ -5,6 +5,7 @@
     Using model: deepseek-ai/DeepSeek-V4-Flash-0731
     Base URL: https://inference.dahl.global/v1
     API key: dah…C5WZ
+qwen --resume 25e82b01-0473-4520-91e6-3b5fa9e74802
 
     
 
