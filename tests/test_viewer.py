@@ -365,3 +365,55 @@ def test_visible_range_is_sane(qapp, big_pdf):
         view.shutdown()
         view.deleteLater()
         qapp.processEvents()
+
+
+# -------------------------------------------------------------- tiled view
+def test_large_page_uses_tiles(qapp, tmp_path):
+    """A page far larger than the viewport renders as tiles, not a giant
+    whole-page bitmap (Okular strategy)."""
+    doc = fitz.open()
+    # 1200x1600 pt page, zoomed to 2x => 2400x3200 px (~7.7M px)
+    page = doc.new_page(width=1200, height=1600)
+    page.draw_rect(fitz.Rect(0, 0, 1200, 1600), color=(1, 1, 1), fill=(1, 1, 1))
+    page.draw_rect(fitz.Rect(50, 50, 350, 350), color=(0, 0, 0), fill=(0, 0, 0))
+    path = str(tmp_path / "tiled.pdf")
+    doc.save(path)
+    doc.close()
+
+    view = PDFView(path)
+    view.resize(400, 300)
+    view.show()
+    try:
+        view.set_zoom(2.0)
+        first, last = view.visible_range()
+        # the visible-first tile requests must have been queued
+        assert first == 0
+        ok = wait_until(qapp, lambda: any(img is not None for dx in view._tiles.values()
+                                          for img in dx.values()), timeout=15)
+        assert ok, "no tile was ever rendered"
+
+        # the full-page bitmap must NOT have been produced (that's the point)
+        assert view.cache.get(0, view.zoom, view.rotation) is None, \
+            "whole-page render should not happen on a tiled page"
+        # the visible tiles were recorded
+        assert len(view._tiles[0]) >= 1
+    finally:
+        view.shutdown()
+        view.deleteLater()
+        qapp.processEvents()
+
+
+def test_small_page_no_tiles(qapp, sample_pdf):
+    """A normal page is rendered whole, never tiled."""
+    view = PDFView(sample_pdf)
+    view.resize(500, 400)
+    view.show()
+    qapp.processEvents()
+    try:
+        wait_page(view, qapp, 0)
+        assert view._tiles.get(0) in (None, {})
+        assert view.cache.get(0, view.zoom, view.rotation) is not None
+    finally:
+        view.shutdown()
+        view.deleteLater()
+        qapp.processEvents()

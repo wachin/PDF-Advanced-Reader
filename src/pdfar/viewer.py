@@ -33,6 +33,7 @@ from .cache import PageCache
 from .geometry import display_size, map_rect, normalize_rotation
 from .render import RenderPool, RenderResult
 from .search import SearchHit
+from .tiles import Tile, TileGrid, TILE_SIZE
 
 PAD = 16          # outer margin (content coords)
 GAP = 12          # vertical gap between pages
@@ -82,6 +83,13 @@ class PDFView(QAbstractScrollArea):
         self.pool = RenderPool(doc_path, workers=min(4, max(2, (QThread.idealThreadCount() or 2))),
                                password=password)
         self.pool.result_ready.connect(self._on_result)
+
+        # Tiled rendering (Okular large-page strategy): a page that would be
+        # rendered far larger than the viewport is split into square tiles and
+        # only the visible ones are rendered.  Tiles are stored here (GUI
+        # thread writes/reads), separate from PageCache which holds full pages.
+        self._tiles: Dict[int, Dict[Tuple[int, int], QImage]] = {}
+        self._tile_grids: Dict[int, TileGrid] = {}
 
         # layout
         self._disp_sizes: List[Tuple[float, float]] = []
@@ -207,12 +215,55 @@ class PDFView(QAbstractScrollArea):
         if not self.page_count:
             return
         first, last = self.visible_range()
-        for i in range(first, last + 1):
-            self._request_page(i, priority=0)
-        for i in range(max(0, first - 3), first):
+        # Okular preloads around the viewport; the visible pages request their
+        # visible tiles (or whole page), and near pages are preloaded whole.
+        margin = 512  # px around the viewport to preload (Okular)
+        vsx = self.horizontalScrollBar().value()
+        vsy = self.verticalScrollBar().value()
+        vw = self.viewport().width()
+        vh = self.viewport().height()
+        for i in range(max(0, first - 1), min(self.page_count, last + 2)):
+            self._request_visible_for_page(i, priority=0, margin=margin,
+                                           vsx=vsx, vsy=vsy, vw=vw, vh=vh)
+        for i in range(max(0, first - 3), max(0, first - 1)):
             self._request_page(i, priority=2)
-        for i in range(last + 1, min(self.page_count, last + 8)):
+        for i in range(min(self.page_count, last + 2), min(self.page_count, last + 8)):
             self._request_page(i, priority=3)
+
+    def _grid_for_page(self, index: int, view_w: int, view_h: int) -> TileGrid:
+        """Cached TileGrid for a page; None if the page shouldn't be tiled."""
+        dw, dh = self._disp_sizes[index]
+        grid = self._tile_grids.get(index)
+        if grid is None or grid.view_w != view_w or grid.view_h != view_h:
+            grid = TileGrid(dw, dh, view_w, view_h)
+            self._tile_grids[index] = grid
+        return grid
+
+    def _request_visible_for_page(self, index: int, priority: int, margin: int,
+                                  vsx: int, vsy: int, vw: int, vh: int) -> None:
+        """Request the visible tiles of a (potentially tiled) page."""
+        grid = self._grid_for_page(index, vw, vh)
+        if not grid.active or self.rotation:
+            self._request_page(index, priority=priority)
+            return
+        # position of the page in view coordinates
+        px, py = self._page_origin(index)
+        dw, dh = self._disp_sizes[index]
+        y0 = max(vsy - margin, py)
+        y1 = min(vsy + vh + margin, py + dh)
+        x0 = max(vsx - margin, px)
+        x1 = min(vsx + vw + margin, px + dw)
+        for tile in grid.tiles_for_region(x0 - px, y0 - py, x1 - px, y1 - py):
+            self._request_tile(index, grid, tile, priority=priority)
+
+    def _request_tile(self, index: int, grid: TileGrid, tile: Tile, priority: int) -> None:
+        """Request a single tile if it isn't cached or already in flight."""
+        tiles = self._tiles.setdefault(index, {})
+        if (tile.row, tile.col) in tiles:
+            return
+        clip = grid.clip_points(tile, self.zoom)
+        self.pool.request(index, self.zoom, priority=priority, tag="view",
+                          alpha=False, rotation=0, clip=clip)
 
     def _request_page(self, index: int, priority: int = 2, tag: str = "view") -> None:
         if self.cache.get(index, self.zoom, self.rotation, tag) is not None:
@@ -234,9 +285,29 @@ class PDFView(QAbstractScrollArea):
         img = QImage()
         if not img.loadFromData(result.png, "PNG"):
             return
-        self.cache.put(result.page, result.zoom, img, result.rotation)
-        self._errors.pop(result.page, None)
+        if result.clip is not None:
+            # A tile: store it for painter once the tile grid is present.
+            grid = self._tile_grids.get(result.page)
+            if grid is not None:
+                # map clip back to a tile-ish origin within the page display
+                tiles = self._tiles.setdefault(result.page, {})
+                tiles[self._tile_key_from_clip(grid, result.clip)] = img
+            self._errors.pop(result.page, None)
+        else:
+            self.cache.put(result.page, result.zoom, img, result.rotation)
+            # a full page arrived; clear any stale tiles for it
+            self._tiles.pop(result.page, None)
+            self._errors.pop(result.page, None)
         self.viewport().update()
+
+    def _tile_key_from_clip(self, grid: TileGrid, clip: Tuple[float, float, float, float]):
+        """Derive a (row, col) key from a clip rect (page points)."""
+        z = max(1e-6, self.zoom)
+        dx = clip[0] * z   # display x origin of the clipped region
+        dy = clip[1] * z
+        col = int(dx // grid.tile_size)
+        row = int(dy // grid.tile_size)
+        return (row, col)
 
     # ------------------------------------------------------------- paint
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
@@ -267,19 +338,40 @@ class PDFView(QAbstractScrollArea):
             painter.setPen(QPen(PAGE_BORDER, 1))
             painter.drawRect(target)
 
-            img = self.cache.get(i, self.zoom, self.rotation)
-            if img is not None and not img.isNull():
-                painter.drawImage(target, img)
+            tiles = self._tiles.get(i)
+            if tiles is not None and tiles:  # page is being rendered as tiles
+                dw, dh = self._disp_sizes[i]
+                for (row, col), tile_img in tiles.items():
+                    dx = col * TILE_SIZE
+                    dy = row * TILE_SIZE
+                    tw = min(TILE_SIZE, dw - dx)
+                    th = min(TILE_SIZE, dh - dy)
+                    self._paint_tile_visible(painter, tile_img, x + dx, y + dy, tw, th, target)
             else:
-                painter.setPen(PLACEHOLDER_FG)
-                err = self._errors.get(i)
-                msg = f"Page {i + 1}\n" + (f"error: {err}" if err else "rendering…")
-                painter.drawText(target, Qt.AlignmentFlag.AlignCenter, msg)
-                self._request_page(i, priority=1)
+                img = self.cache.get(i, self.zoom, self.rotation)
+                if img is not None and not img.isNull():
+                    painter.drawImage(target, img)
+                else:
+                    painter.setPen(PLACEHOLDER_FG)
+                    err = self._errors.get(i)
+                    msg = f"Page {i + 1}\n" + (f"error: {err}" if err else "rendering…")
+                    painter.drawText(target, Qt.AlignmentFlag.AlignCenter, msg)
+                    self._request_page(i, priority=1)
 
             self._paint_overlays(painter, i, x, y)
 
         painter.end()
+
+    def _paint_tile_visible(self, painter: QPainter, tile_img: QImage,
+                            tx: float, ty: float, tw: float, th: float,
+                            visible: QRect) -> None:
+        """Paint a single tile, intersecting it with the visible rect first."""
+        tile_rect = QRect(int(round(tx)), int(round(ty)), int(round(tw)), int(round(th)))
+        if not tile_rect.intersects(visible):
+            return
+        if tile_img.isNull():
+            return  # empty/placeholder: caller already drew the background
+        painter.drawImage(tile_rect, tile_img)
 
     def _paint_overlays(self, painter: QPainter, page: int, x: float, y: float) -> None:
         z = self.zoom
@@ -483,6 +575,8 @@ class PDFView(QAbstractScrollArea):
 
         old_zoom = self.zoom
         self.zoom = zoom
+        self._tiles.clear()
+        self._tile_grids.clear()
         self._relayout()
 
         if anchor_ref is not None:
@@ -532,6 +626,8 @@ class PDFView(QAbstractScrollArea):
             return
         self.rotation = rotation
         self.cache.clear()          # cached bitmaps are rotation-specific
+        self._tiles.clear()         # tiles only render at rotation 0
+        self._tile_grids.clear()
         self._relayout()
         self._request_visible()
         self.viewport().update()

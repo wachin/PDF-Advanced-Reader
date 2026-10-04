@@ -23,7 +23,7 @@ import heapq
 import itertools
 import threading
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
 
 try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
