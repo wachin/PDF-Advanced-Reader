@@ -513,3 +513,63 @@ def test_touch_scroller_is_installed(qapp, sample_pdf):
         view.shutdown()
         view.deleteLater()
         qapp.processEvents()
+
+
+# ------------------------------------------- memory level (Okular)
+def test_memory_level_default_and_set(qapp, sample_pdf):
+    """The preload memory level defaults to 'normal' and can be changed."""
+    from pdfar.viewer import DEFAULT_MEMORY_LEVEL, MEMORY_LEVELS
+    view = PDFView(sample_pdf)
+    try:
+        assert DEFAULT_MEMORY_LEVEL == "normal"
+        assert view.memory_level == "normal"
+        assert set(MEMORY_LEVELS) == {"low", "normal", "greedy"}
+        view.set_memory_level("greedy")
+        assert view.memory_level == "greedy"
+        view.set_memory_level("nonsense")     # invalid -> default
+        assert view.memory_level == "normal"
+    finally:
+        view.shutdown()
+        view.deleteLater()
+        qapp.processEvents()
+
+
+def test_memory_level_controls_preload(qapp, big_pdf):
+    """'greedy' preloads the whole document, 'low' only what is visible."""
+    view = PDFView(big_pdf)                    # 40 pages
+    view.resize(400, 300)
+    view.show()
+    qapp.processEvents()
+
+    def requested(level):
+        view.memory_level = level
+        view.cache.clear()                     # force every page to re-request
+        seen = set()
+        orig = view.pool.request
+
+        def spy(page, zoom, priority=5, tag="view", alpha=False,
+                rotation=0, clip=None):
+            seen.add(page)
+            return orig(page, zoom, priority=priority, tag=tag,
+                        alpha=alpha, rotation=rotation, clip=clip)
+
+        view.pool.request = spy
+        try:
+            view._request_visible()
+        finally:
+            view.pool.request = orig
+        return seen
+
+    try:
+        low = requested("low")
+        normal = requested("normal")
+        greedy = requested("greedy")
+        last = view.page_count - 1
+        assert last in greedy, "greedy should preload the whole document"
+        assert last not in low
+        assert last not in normal
+        assert len(low) <= len(normal) < len(greedy)
+    finally:
+        view.shutdown()
+        view.deleteLater()
+        qapp.processEvents()

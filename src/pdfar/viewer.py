@@ -40,6 +40,22 @@ GAP = 12          # vertical gap between pages
 MIN_ZOOM = 0.05
 MAX_ZOOM = 10.0
 
+# Memory levels (Okular): how much the view preloads around the viewport.
+#   "low"    -> render only what is visible (least memory)
+#   "normal" -> a few pages around the viewport (default)
+#   "greedy" -> preload the whole document (most fluid, most memory)
+MEMORY_LEVELS = ("low", "normal", "greedy")
+DEFAULT_MEMORY_LEVEL = "normal"
+# level -> (around, back, forward, tile_margin_px)
+#   around : extra pages each side of the visible range, requested at priority 0
+#   back   : pages preloaded before the visible range (None = all)
+#   forward: pages preloaded after the visible range (None = all)
+_MEMORY = {
+    "low": (0, 0, 0, 0),
+    "normal": (1, 3, 8, 512),
+    "greedy": (1, None, None, 512),
+}
+
 BG_COLOR = QColor(46, 46, 46)
 PAGE_BORDER = QColor(20, 20, 20)
 PLACEHOLDER_BG = QColor(238, 238, 238)
@@ -78,6 +94,7 @@ class PDFView(QAbstractScrollArea):
         self.rotation = 0
         self.fit_mode = "none"          # 'none' | 'width' | 'page'
         self.current_page = 0
+        self.memory_level = DEFAULT_MEMORY_LEVEL
 
         self.cache = PageCache()
         self.pool = RenderPool(doc_path, workers=min(4, max(2, (QThread.idealThreadCount() or 2))),
@@ -224,35 +241,63 @@ class PDFView(QAbstractScrollArea):
         first, last = self.visible_range()
         # keep the cache viewport-aware so it evicts far pages first (Okular)
         self.cache.set_center(self.current_page)
-        # Okular preloads around the viewport; the visible pages request their
-        # visible tiles (or whole page), and near pages are preloaded whole.
-        # Also cancel queued renders for pages that have moved far from the
-        # viewport (base: scroll fast -> do not waste threads on stale pages).
-        margin = 512  # px around the viewport to preload (Okular)
+
+        around, back, fwd, margin = _MEMORY.get(
+            self.memory_level, _MEMORY[DEFAULT_MEMORY_LEVEL])
         vsx = self.horizontalScrollBar().value()
         vsy = self.verticalScrollBar().value()
         vw = self.viewport().width()
         vh = self.viewport().height()
 
-        KEEP = 8  # pages of slack either side of the visible range
-        keep_first = max(0, first - KEEP)
-        keep_last = min(self.page_count - 1, last + KEEP)
+        vis_lo = max(0, first - around)
+        vis_hi = min(self.page_count, last + 1 + around)   # exclusive
+
+        # cancel queued renders for pages far outside what we now care about
+        # (base: scroll fast -> do not waste threads on stale pages)
+        if back is None:                                   # greedy: keep all
+            keep_first, keep_last = 0, self.page_count - 1
+        else:
+            slack = max(around, back, fwd)
+            keep_first = max(0, first - slack)
+            keep_last = min(self.page_count - 1, last + slack)
         self.pool.cancel_if(
             lambda job: job.tag == "view"
             and (job.page < keep_first or job.page > keep_last)
         )
 
-        for i in range(max(0, first - 1), min(self.page_count, last + 2)):
+        # visible pages (+ "around"): request their tiles / whole page
+        for i in range(vis_lo, vis_hi):
             self._request_visible_for_page(i, priority=0, margin=margin,
                                            vsx=vsx, vsy=vsy, vw=vw, vh=vh)
-        for i in range(max(0, first - 3), max(0, first - 1)):
-            self._request_page(i, priority=2)
-        for i in range(min(self.page_count, last + 2), min(self.page_count, last + 8)):
-            self._request_page(i, priority=3)
+
+        # preload (level-dependent)
+        if back is None:                                   # greedy: whole doc
+            for i in range(self.page_count):
+                if i < vis_lo or i >= vis_hi:
+                    self._request_page(i, priority=3)
+        else:
+            for i in range(max(0, first - back), vis_lo):
+                self._request_page(i, priority=2)
+            for i in range(vis_hi, min(self.page_count, last + fwd)):
+                self._request_page(i, priority=3)
+
         # extract words in the background too, so text-layer interactions
         # (selection/copy) don't ever block the GUI thread on first visit
-        for i in range(max(0, first - 1), min(self.page_count, last + 2)):
+        for i in range(vis_lo, vis_hi):
             self._request_page_words(i, priority=2)
+
+    def set_memory_level(self, level: str) -> None:
+        """Set the preload memory level (Okular-style).
+
+        One of ``"low"`` (render only what is visible), ``"normal"`` (a few
+        pages around the viewport) or ``"greedy"`` (preload the whole
+        document).  Unknown values fall back to the default.
+        """
+        level = level if level in MEMORY_LEVELS else DEFAULT_MEMORY_LEVEL
+        if level == self.memory_level:
+            return
+        self.memory_level = level
+        self._request_visible()
 
     def _grid_for_page(self, index: int, view_w: int, view_h: int) -> TileGrid:
         """Cached TileGrid for a page; None if the page shouldn't be tiled."""
