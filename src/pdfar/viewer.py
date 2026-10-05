@@ -215,6 +215,8 @@ class PDFView(QAbstractScrollArea):
         if not self.page_count:
             return
         first, last = self.visible_range()
+        # keep the cache viewport-aware so it evicts far pages first (Okular)
+        self.cache.set_center(self.current_page)
         # Okular preloads around the viewport; the visible pages request their
         # visible tiles (or whole page), and near pages are preloaded whole.
         # Also cancel queued renders for pages that have moved far from the

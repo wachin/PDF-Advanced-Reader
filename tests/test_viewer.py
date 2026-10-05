@@ -479,3 +479,22 @@ def test_view_preloads_words_asynchronously(qapp, sample_pdf):
         view.shutdown()
         view.deleteLater()
         qapp.processEvents()
+
+
+# ----------------------------------------- viewport-aware cache (Okular)
+def test_cache_center_follows_viewport(qapp, big_pdf):
+    """The view keeps the page cache viewport-aware so it evicts far pages
+    first (Okular's distance-priority cache)."""
+    view = PDFView(big_pdf)
+    view.resize(400, 300)
+    view.show()
+    qapp.processEvents()
+    try:
+        view.goto_page(20)
+        qapp.processEvents()
+        assert view.current_page == 20
+        assert view.cache._center == 20
+    finally:
+        view.shutdown()
+        view.deleteLater()
+        qapp.processEvents()
