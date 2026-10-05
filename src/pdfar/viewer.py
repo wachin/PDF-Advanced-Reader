@@ -27,7 +27,7 @@ from PyQt6.QtGui import (
     QColor, QImage, QKeyEvent, QMouseEvent, QPaintEvent, QPainter,
     QPen, QWheelEvent, QGuiApplication, QResizeEvent,
 )
-from PyQt6.QtWidgets import QAbstractScrollArea, QFrame
+from PyQt6.QtWidgets import QAbstractScrollArea, QFrame, QScroller
 
 from .cache import PageCache
 from .geometry import display_size, map_rect, normalize_rotation
@@ -120,6 +120,13 @@ class PDFView(QAbstractScrollArea):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+
+        # Kinetic/smooth scrolling on touch devices, like Okular's
+        # QScroller::scroller(viewport()).  We grab the TouchGesture only:
+        # LeftMouseButtonGesture would hijack left-drag and break text
+        # selection.  On a plain mouse this has no effect.
+        self._scroller = QScroller.scroller(self.viewport())
+        QScroller.grabGesture(self.viewport(), QScroller.ScrollerGestureType.TouchGesture)
 
         self._relayout()
         self._request_visible()

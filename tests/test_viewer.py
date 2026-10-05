@@ -498,3 +498,18 @@ def test_cache_center_follows_viewport(qapp, big_pdf):
         view.shutdown()
         view.deleteLater()
         qapp.processEvents()
+
+
+# --------------------------------------------- kinetic scroll (Okular)
+def test_touch_scroller_is_installed(qapp, sample_pdf):
+    """Okular-style QScroller is installed on the viewport (TouchGesture)."""
+    from PyQt6.QtWidgets import QScroller
+    view = PDFView(sample_pdf)
+    try:
+        assert isinstance(view._scroller, QScroller)
+        # the scroller instance is bound to the viewport
+        assert QScroller.scroller(view.viewport()) is view._scroller
+    finally:
+        view.shutdown()
+        view.deleteLater()
+        qapp.processEvents()
