@@ -30,6 +30,7 @@ try:
 except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtGui import QImage
 
 
 @dataclass
@@ -39,18 +40,32 @@ class RenderResult:
     page: int
     zoom: float
     tag: str
-    png: Optional[bytes]
-    width: int
-    height: int
-    ok: bool
+    png: Optional[bytes] = None
+    width: int = 0
+    height: int = 0
+    ok: bool = True
     error: str = ""
     rotation: int = 0
     clip: Optional[Tuple[float, float, float, float]] = None
     words: Optional[List[Tuple[float, float, float, float, str]]] = None
+    samples: Optional[bytes] = None
+    stride: int = 0
+    alpha: bool = False
 
     @property
     def key(self):
         return (self.page, round(self.zoom, 4), self.rotation, self.tag, self.clip)
+
+    def to_qimage(self) -> QImage:
+        """Convert result to a QImage. Zero-copy buffer conversion when raw samples are available."""
+        if self.samples is not None and self.width > 0 and self.height > 0:
+            fmt = QImage.Format.Format_RGBA8888 if self.alpha else QImage.Format.Format_RGB888
+            return QImage(self.samples, self.width, self.height, self.stride, fmt).copy()
+        if self.png:
+            img = QImage()
+            img.loadFromData(self.png, "PNG")
+            return img
+        return QImage()
 
 
 @dataclass(order=True)
@@ -244,16 +259,22 @@ class RenderPool(QObject):
             if job.clip is not None and not job.rotation:
                 clip = fitz.Rect(*job.clip)
             pix = page.get_pixmap(matrix=mat, alpha=job.alpha, annots=True, clip=clip)
+            # Return raw pixel samples to avoid PNG encode/decode overhead.
+            # The GUI thread will construct a QImage directly from the buffer.
+            samples = bytes(pix.samples)
             return RenderResult(
                 page=job.page,
                 zoom=job.zoom,
                 tag=job.tag,
-                png=pix.tobytes("png"),
+                png=None,  # Not using PNG anymore
                 width=pix.width,
                 height=pix.height,
                 ok=True,
                 rotation=job.rotation,
                 clip=job.clip,
+                samples=samples,
+                stride=pix.stride,
+                alpha=pix.alpha,
             )
         except Exception as exc:  # pragma: no cover - defensive
             return RenderResult(job.page, job.zoom, job.tag, None, 0, 0, False, str(exc), job.rotation, None)

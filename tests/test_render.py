@@ -48,9 +48,9 @@ def test_results_are_delivered_to_gui_thread(qapp, sample_pdf):
             "render result never reached the GUI thread"
         res = collector.results[0]
         assert isinstance(res, RenderResult)
-        assert res.ok and res.png and res.width > 0 and res.height > 0
-        img = QImage()
-        assert img.loadFromData(res.png, "PNG")
+        assert res.ok and (res.samples or res.png) and res.width > 0 and res.height > 0
+        img = res.to_qimage()
+        assert not img.isNull()
     finally:
         pool.shutdown(wait=True)
 

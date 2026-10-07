@@ -110,18 +110,76 @@ class Sidebar(QWidget):
         self._build_annotations()
         self.pool.result_ready.connect(self._on_render)
 
+        # Lazy thumbnail loading: only render visible items in the thumbnail view
+        self.thumbs.verticalScrollBar().valueChanged.connect(self._request_visible_thumbs)
+        self.tabs.currentChanged.connect(self._on_sidebar_tab_changed)
+        self._request_visible_thumbs()
+
     # ------------------------------------------------------------------
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._request_visible_thumbs()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._request_visible_thumbs()
+
+    def _on_sidebar_tab_changed(self, index: int) -> None:
+        if self.tabs.tabText(index) == "Thumbnails":
+            self._request_visible_thumbs()
+
+    def _request_visible_thumbs(self) -> None:
+        """Request thumbnails only for items currently visible in the sidebar widget."""
+        if not self.thumbs.count():
+            return
+
+        # If thumbnails tab or sidebar is not visible, only queue a tiny initial batch
+        if not self.isVisible() or self.tabs.currentWidget() != self.thumbs:
+            start, end = 0, min(self.thumbs.count() - 1, 4)
+        else:
+            vp_rect = self.thumbs.viewport().rect()
+            start_idx = None
+            end_idx = None
+
+            # Find range of items intersecting the viewport
+            for i in range(self.thumbs.count()):
+                item = self.thumbs.item(i)
+                if item and self.thumbs.visualItemRect(item).intersects(vp_rect):
+                    if start_idx is None:
+                        start_idx = i
+                    end_idx = i
+
+            if start_idx is None:
+                start_idx, end_idx = 0, min(self.thumbs.count() - 1, 5)
+
+            start = max(0, start_idx - 2)
+            end = min(self.thumbs.count() - 1, end_idx + 5)
+
+        # Cancel thumbnail jobs outside the visible area
+        self.pool.cancel_if(
+            lambda job: job.tag == "thumb" and (job.page < start or job.page > end)
+        )
+
+        # Queue visible thumbnails with low priority (priority 8)
+        for i in range(start, end + 1):
+            item = self.thumbs.item(i)
+            if item is not None and item.icon().isNull():
+                zoom = self._thumb_zoom.get(i, 0.2)
+                self.pool.request(i, zoom, priority=8, tag="thumb")
+
     def _build_thumbs(self) -> None:
         for i in range(self.doc.page_count):
             item = QListWidgetItem(f"{i + 1}")
             item.setData(Qt.ItemDataRole.UserRole, i)
             item.setIcon(QIcon())
             self.thumbs.addItem(item)
-            page = self.doc.load_page(i)
-            w0 = max(1.0, page.rect.width)
+            try:
+                r = self.doc[i].rect
+                w0 = max(1.0, r.width)
+            except Exception:
+                w0 = 595.0
             zoom = THUMB_W / w0
             self._thumb_zoom[i] = zoom
-            self.pool.request(i, zoom, priority=8, tag="thumb")
 
     def _build_outline(self) -> None:
         try:
@@ -151,10 +209,10 @@ class Sidebar(QWidget):
     def _on_render(self, result: object) -> None:
         if not isinstance(result, RenderResult) or result.tag != "thumb":
             return
-        if not result.ok or not result.png:
+        if not result.ok or (result.samples is None and result.png is None):
             return
-        img = QImage()
-        if not img.loadFromData(result.png, "PNG"):
+        img = result.to_qimage()
+        if img.isNull():
             return
         if not (0 <= result.page < self.thumbs.count()):
             return

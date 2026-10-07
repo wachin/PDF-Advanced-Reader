@@ -88,7 +88,7 @@ class PDFView(QAbstractScrollArea):
         self.page_count = self.doc.page_count
         self.page_sizes: List[Tuple[float, float]] = []
         for i in range(self.page_count):
-            r = self.doc.load_page(i).rect
+            r = self.doc[i].rect
             self.page_sizes.append((r.width, r.height))
 
         self.zoom = 1.0
@@ -463,12 +463,12 @@ class PDFView(QAbstractScrollArea):
         # Drop results that belong to a zoom/rotation we have left behind.
         if abs(result.zoom - self.zoom) > 1e-4 or result.rotation != self.rotation:
             return
-        if not result.ok or not result.png:
+        if not result.ok or (result.samples is None and result.png is None):
             self._errors[result.page] = result.error or "render failed"
             self.viewport().update()
             return
-        img = QImage()
-        if not img.loadFromData(result.png, "PNG"):
+        img = result.to_qimage()
+        if img.isNull():
             return
         if result.clip is not None:
             # A tile: store it for painter once the tile grid is present.
