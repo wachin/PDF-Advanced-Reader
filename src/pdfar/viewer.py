@@ -34,6 +34,7 @@ from .geometry import display_size, map_rect, normalize_rotation
 from .render import RenderPool, RenderResult
 from .search import SearchHit
 from .tiles import Tile, TileGrid, TILE_SIZE
+from .annotations import AnnotationManager, HighlightAnnotation, HIGHLIGHT_COLORS
 
 PAD = 16          # outer margin (content coords)
 GAP = 12          # vertical gap between pages
@@ -131,6 +132,11 @@ class PDFView(QAbstractScrollArea):
         self._errors: Dict[int, str] = {}
         self._press_pos = QPoint()
 
+        # Annotations
+        self.annotation_manager = AnnotationManager(doc_path, self.doc, self)
+        self.annotation_manager.annotations_changed.connect(self._on_annotations_changed)
+        self._highlight_color_idx = 0  # Current highlight color index
+
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -162,6 +168,110 @@ class PDFView(QAbstractScrollArea):
             self.doc.close()
         except Exception:
             pass
+
+    def _on_annotations_changed(self) -> None:
+        """Called when annotations change - trigger repaint."""
+        self.viewport().update()
+
+    def create_highlight_from_selection(self, color: Optional[str] = None) -> bool:
+        """Create a highlight annotation from the current text selection.
+
+        Args:
+            color: Optional highlight color (hex). Uses current color if not specified.
+
+        Returns:
+            True if highlight was created, False if no selection.
+        """
+        if not self.has_selection():
+            return False
+
+        if color is None:
+            color = HIGHLIGHT_COLORS[self._highlight_color_idx][1]
+
+        # Collect selection rects grouped by page
+        page_rects: Dict[int, List[tuple]] = {}
+        for page, _idx, word in self._iter_selected_words():
+            rect = self._word_rect_view(page, word)
+            page_rects.setdefault(page, []).append(rect)
+
+        # Merge adjacent rects on the same line for cleaner highlights
+        merged_rects: Dict[int, List[tuple]] = {}
+        for page, rects in page_rects.items():
+            merged_rects[page] = self._merge_selection_rects(rects)
+
+        # Create highlight annotations
+        author = ""  # Could be made configurable
+        for page, rects in merged_rects.items():
+            self.annotation_manager.add_highlight(page, rects, color, author)
+
+        self.clear_selection()
+        return True
+
+    def _merge_selection_rects(self, rects: List[tuple], y_tolerance: float = 2.0) -> List[tuple]:
+        """Merge adjacent selection rectangles on the same line.
+
+        Args:
+            rects: List of (x0, y0, x1, y1) rectangles
+            y_tolerance: Max vertical distance to consider rects on same line
+
+        Returns:
+            List of merged rectangles
+        """
+        if not rects:
+            return []
+
+        # Sort by y then x
+        sorted_rects = sorted(rects, key=lambda r: (r[1], r[0]))
+        merged = []
+        current = list(sorted_rects[0])
+
+        for rect in sorted_rects[1:]:
+            x0, y0, x1, y1 = rect
+            cx0, cy0, cx1, cy1 = current
+
+            # Check if on same line (y overlap within tolerance)
+            if y0 <= cy1 + y_tolerance and y1 >= cy0 - y_tolerance:
+                # Same line - merge horizontally
+                current[0] = min(cx0, x0)
+                current[1] = min(cy0, y0)
+                current[2] = max(cx1, x1)
+                current[3] = max(cy1, y1)
+            else:
+                # New line
+                merged.append(tuple(current))
+                current = [x0, y0, x1, y1]
+
+        merged.append(tuple(current))
+        return merged
+
+    def set_highlight_color(self, color: str) -> None:
+        """Set the current highlight color."""
+        for i, (name, hex_color) in enumerate(HIGHLIGHT_COLORS):
+            if hex_color == color:
+                self._highlight_color_idx = i
+                return
+        # Custom color not in palette
+        self._highlight_color_idx = len(HIGHLIGHT_COLORS)  # Will use custom
+
+    def get_highlight_color(self) -> str:
+        """Get the current highlight color."""
+        if self._highlight_color_idx < len(HIGHLIGHT_COLORS):
+            return HIGHLIGHT_COLORS[self._highlight_color_idx][1]
+        return "#FFFF00"  # default yellow
+
+    def next_highlight_color(self) -> str:
+        """Cycle to the next highlight color and return it."""
+        self._highlight_color_idx = (self._highlight_color_idx + 1) % len(HIGHLIGHT_COLORS)
+        return self.get_highlight_color()
+
+    def prev_highlight_color(self) -> str:
+        """Cycle to the previous highlight color and return it."""
+        self._highlight_color_idx = (self._highlight_color_idx - 1) % len(HIGHLIGHT_COLORS)
+        return self.get_highlight_color()
+
+    def save_annotations(self) -> bool:
+        """Save all annotations to the PDF file."""
+        return self.annotation_manager.save_to_pdf()
 
     # ------------------------------------------------------------- layout
     def _relayout(self) -> None:
@@ -450,6 +560,9 @@ class PDFView(QAbstractScrollArea):
 
     def _paint_overlays(self, painter: QPainter, page: int, x: float, y: float) -> None:
         z = self.zoom
+        # annotations (highlights, etc.) - drawn first, behind search/selection
+        self._paint_annotations(painter, page, x, y)
+
         # search hits
         for rect in self._hit_rects.get(page, ()):
             x0, y0, x1, y1 = map_rect(rect, *self.page_sizes[page], self.rotation)
@@ -469,6 +582,18 @@ class PDFView(QAbstractScrollArea):
             x0, y0, x1, y1 = rect
             painter.fillRect(QRect(int(x + x0 * z), int(y + y0 * z),
                                    max(1, int((x1 - x0) * z)), max(1, int((y1 - y0) * z))), SEL_COLOR)
+
+    def _paint_annotations(self, painter: QPainter, page: int, x: float, y: float) -> None:
+        """Draw annotations (highlights) for a page."""
+        z = self.zoom
+        highlights = self.annotation_manager.get_highlights_for_page(page)
+        for highlight in highlights:
+            color = QColor(highlight.color)
+            color.setAlphaF(highlight.opacity)
+            for rect in highlight.rects:
+                x0, y0, x1, y1 = map_rect(rect, *self.page_sizes[page], self.rotation)
+                painter.fillRect(QRect(int(x + x0 * z), int(y + y0 * z),
+                                       max(1, int((x1 - x0) * z)), max(1, int((y1 - y0) * z))), color)
 
     # ------------------------------------------------------- text layer
     def _request_page_words(self, index: int, priority: int = 3) -> None:
@@ -845,12 +970,23 @@ class PDFView(QAbstractScrollArea):
         key = event.key()
         mods = event.modifiers()
         ctrl = mods & Qt.KeyboardModifier.ControlModifier
+        shift = mods & Qt.KeyboardModifier.ShiftModifier
 
         if ctrl and key == Qt.Key.Key_C:
             self.copy_selection()
             event.accept()
         elif ctrl and key == Qt.Key.Key_A:
             self.select_all()
+            event.accept()
+        elif ctrl and key == Qt.Key.Key_H:
+            # Create highlight from selection
+            if self.create_highlight_from_selection():
+                event.accept()
+            else:
+                super().keyPressEvent(event)
+        elif ctrl and shift and key == Qt.Key.Key_H:
+            # Cycle highlight color
+            color = self.next_highlight_color()
             event.accept()
         elif ctrl and key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
             self.zoom_in()

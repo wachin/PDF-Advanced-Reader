@@ -160,9 +160,9 @@ def test_sidebar_bookmarks_tab(win, tmp_path):
     sidebar = win.sidebar
     assert sidebar is not None
 
-    # Check bookmarks tab exists
+    # Check bookmarks tab exists (now 4 tabs: Thumbnails, Index, Bookmarks, Annotations)
     tab_count = sidebar.tabs.count()
-    assert tab_count == 3  # Thumbnails, Index, Bookmarks
+    assert tab_count == 4
 
     # Find bookmarks tab index
     bookmarks_tab_idx = -1

@@ -107,6 +107,21 @@ class MainWindow(QMainWindow):
         self.act_add_bookmark.setShortcut("Ctrl+B")
         self.act_add_bookmark.triggered.connect(self._add_bookmark)
 
+        self.act_highlight = QAction("Highlight", self)
+        self.act_highlight.setShortcut("Ctrl+H")
+        self.act_highlight.setToolTip("Create highlight from selection (Ctrl+H)")
+        self.act_highlight.triggered.connect(self._create_highlight)
+
+        self.act_next_highlight_color = QAction("Next Highlight Color", self)
+        self.act_next_highlight_color.setShortcut("Ctrl+Shift+H")
+        self.act_next_highlight_color.setToolTip("Cycle highlight color (Ctrl+Shift+H)")
+        self.act_next_highlight_color.triggered.connect(self._cycle_highlight_color)
+
+        self.act_save_annotations = QAction("Save Annotations", self)
+        self.act_save_annotations.setShortcut("Ctrl+S")
+        self.act_save_annotations.setToolTip("Save annotations to PDF (Ctrl+S)")
+        self.act_save_annotations.triggered.connect(self._save_annotations)
+
         self.act_quit = QAction("&Quit", self)
         self.act_quit.setShortcut(QKeySequence.StandardKey.Quit)
         self.act_quit.triggered.connect(self.close)
@@ -185,6 +200,11 @@ class MainWindow(QMainWindow):
         self.act_copy.triggered.connect(self._copy)
         tb.addAction(self.act_copy)
         tb.addSeparator()
+
+        self.act_highlight = QAction("Highlight", self)
+        self.act_highlight.setToolTip("Create highlight from selection (Ctrl+H)")
+        self.act_highlight.triggered.connect(self._create_highlight)
+        tb.addAction(self.act_highlight)
 
         self.act_add_bookmark = QAction("Add Bookmark", self)
         self.act_add_bookmark.setToolTip("Add a bookmark at the current page (Ctrl+B)")
@@ -320,6 +340,9 @@ class MainWindow(QMainWindow):
         self._shortcut("Ctrl+Tab", self._next_tab)
         self._shortcut("Ctrl+Shift+Tab", self._prev_tab)
         self._shortcut("Ctrl+B", self._add_bookmark)
+        self._shortcut("Ctrl+H", self._create_highlight)
+        self._shortcut("Ctrl+Shift+H", self._cycle_highlight_color)
+        self._shortcut("Ctrl+S", self._save_annotations)
 
     def _shortcut(self, sequence: str, slot) -> None:
         """Create a shortcut whose handler is a bound method (not a lambda),
@@ -379,6 +402,31 @@ class MainWindow(QMainWindow):
             return
         page = self.view.current_page
         self.sidebar.add_bookmark_at_current_page(page)
+
+    def _create_highlight(self) -> None:
+        """Create a highlight from the current selection."""
+        if self.view and self.view.has_selection():
+            self.view.create_highlight_from_selection()
+
+    def _cycle_highlight_color(self) -> None:
+        """Cycle to the next highlight color."""
+        if self.view:
+            color = self.view.next_highlight_color()
+            # Update sidebar color combo if annotations tab is visible
+            if self.sidebar and hasattr(self.sidebar, 'ann_color_combo'):
+                for i in range(self.sidebar.ann_color_combo.count()):
+                    if self.sidebar.ann_color_combo.itemData(i) == color:
+                        self.sidebar.ann_color_combo.setCurrentIndex(i)
+                        break
+
+    def _save_annotations(self) -> None:
+        """Save all annotations to the PDF file."""
+        if self.view:
+            success = self.view.save_annotations()
+            if success:
+                self.status_left.setText("Annotations saved to PDF")
+            else:
+                self.status_left.setText("Failed to save annotations")
 
     # ---------------------------------------------------------- document
     def open_dialog(self) -> None:
@@ -458,6 +506,8 @@ class MainWindow(QMainWindow):
         tab.view.hit_changed.connect(self._on_hit_changed)
         tab.view.selection_changed.connect(self._update_status)
         tab.sidebar.goto_page_requested.connect(self._goto)
+        # Connect annotation manager to sidebar
+        tab.sidebar.set_annotation_manager(tab.view.annotation_manager)
         self._connected_tab = tab
 
     def _disconnect_tab(self, tab: DocumentTab) -> None:

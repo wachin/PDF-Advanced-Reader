@@ -1,4 +1,4 @@
-"""Left sidebar: page thumbnails, document outline, and user bookmarks."""
+"""Left sidebar: page thumbnails, document outline, bookmarks, and annotations."""
 
 from __future__ import annotations
 
@@ -9,14 +9,16 @@ try:
 except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QIcon, QImage, QPixmap, QAction
+from PyQt6.QtGui import QIcon, QImage, QPixmap, QAction, QColor
 from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget, QMenu, QInputDialog, QMessageBox,
+    QVBoxLayout, QWidget, QMenu, QInputDialog, QMessageBox, QHBoxLayout,
+    QPushButton, QComboBox,
 )
 
 from .render import RenderPool, RenderResult
 from .bookmarks import BookmarkManager, Bookmark
+from .annotations import AnnotationManager, HighlightAnnotation, HIGHLIGHT_COLORS, AnnotationType
 
 THUMB_W = 120
 
@@ -65,9 +67,47 @@ class Sidebar(QWidget):
         self.bookmarks_tree.itemActivated.connect(self._on_bookmark_activated)
         self.tabs.addTab(self.bookmarks_tree, "Bookmarks")
 
+        # ---- annotations ------------------------------------------------
+        self.annotations_panel = QWidget()
+        ann_layout = QVBoxLayout(self.annotations_panel)
+        ann_layout.setContentsMargins(4, 4, 4, 4)
+
+        # Toolbar for annotations
+        ann_toolbar = QHBoxLayout()
+        self.ann_new_highlight = QPushButton("New Highlight")
+        self.ann_new_highlight.setToolTip("Create highlight from current selection (Ctrl+H)")
+        self.ann_new_highlight.clicked.connect(self._on_new_highlight)
+        ann_toolbar.addWidget(self.ann_new_highlight)
+
+        self.ann_color_combo = QComboBox()
+        for name, hex_color in HIGHLIGHT_COLORS:
+            self.ann_color_combo.addItem(name, hex_color)
+        self.ann_color_combo.setCurrentIndex(0)
+        self.ann_color_combo.setToolTip("Highlight color")
+        self.ann_color_combo.currentIndexChanged.connect(self._on_highlight_color_changed)
+        ann_toolbar.addWidget(self.ann_color_combo)
+
+        self.ann_save_btn = QPushButton("Save to PDF")
+        self.ann_save_btn.setToolTip("Save all annotations to the PDF file")
+        self.ann_save_btn.clicked.connect(self._on_save_annotations)
+        ann_toolbar.addWidget(self.ann_save_btn)
+
+        ann_toolbar.addStretch()
+        ann_layout.addLayout(ann_toolbar)
+
+        self.annotations_tree = QTreeWidget()
+        self.annotations_tree.setHeaderHidden(True)
+        self.annotations_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.annotations_tree.customContextMenuRequested.connect(self._on_annotations_context_menu)
+        self.annotations_tree.itemActivated.connect(self._on_annotation_activated)
+        ann_layout.addWidget(self.annotations_tree)
+
+        self.tabs.addTab(self.annotations_panel, "Annotations")
+
         self._build_thumbs()
         self._build_outline()
         self._build_bookmarks()
+        self._build_annotations()
         self.pool.result_ready.connect(self._on_render)
 
     # ------------------------------------------------------------------
@@ -270,3 +310,125 @@ class Sidebar(QWidget):
             self.pool.result_ready.disconnect(self._on_render)
         except TypeError:
             pass
+
+    # ------------------------------------------------------------------ annotations
+    def _build_annotations(self) -> None:
+        """Build the annotations tree from the annotation manager."""
+        self.annotations_tree.clear()
+
+        # We need access to the view's annotation manager
+        # This will be set by the main window when the tab is activated
+        if not hasattr(self, 'annotation_manager') or self.annotation_manager is None:
+            self.annotations_tree.addTopLevelItem(QTreeWidgetItem(["(no annotations)"]))
+            return
+
+        all_annotations = self.annotation_manager.get_annotations()
+        if not all_annotations:
+            self.annotations_tree.addTopLevelItem(QTreeWidgetItem(["(no annotations)"]))
+            return
+
+        # Group by page
+        from collections import defaultdict
+        by_page = defaultdict(list)
+        for ann in all_annotations:
+            by_page[ann.page].append(ann)
+
+        for page_idx in sorted(by_page.keys()):
+            page_root = QTreeWidgetItem([f"Page {page_idx + 1}"])
+            page_root.setData(0, Qt.ItemDataRole.UserRole, -1)
+            page_root.setExpanded(True)
+
+            for ann in by_page[page_idx]:
+                if ann.type == AnnotationType.HIGHLIGHT:
+                    color_name = next((name for name, hex_c in HIGHLIGHT_COLORS if hex_c == ann.color), "Custom")
+                    text = f"  🖍️ Highlight ({color_name})"
+                    if ann.content:
+                        text += f": {ann.content[:50]}"
+                else:
+                    text = f"  {ann.type.value}: {ann.content[:50]}"
+
+                node = QTreeWidgetItem([text])
+                node.setData(0, Qt.ItemDataRole.UserRole, ann.id)
+                node.setData(0, Qt.ItemDataRole.UserRole + 1, ann.page)
+                node.setData(0, Qt.ItemDataRole.UserRole + 2, ann.type.value)
+
+                # Show color indicator
+                if ann.type == AnnotationType.HIGHLIGHT:
+                    color = QColor(ann.color)
+                    node.setForeground(0, color)
+
+                page_root.addChild(node)
+
+            self.annotations_tree.addTopLevelItem(page_root)
+
+        self.annotations_tree.expandAll()
+
+    def set_annotation_manager(self, annotation_manager: AnnotationManager) -> None:
+        """Set the annotation manager and rebuild the tree."""
+        self.annotation_manager = annotation_manager
+        if hasattr(annotation_manager, 'annotations_changed'):
+            try:
+                annotation_manager.annotations_changed.disconnect(self._build_annotations)
+            except TypeError:
+                pass
+            annotation_manager.annotations_changed.connect(self._build_annotations)
+        self._build_annotations()
+
+    def _on_annotation_activated(self, item: QTreeWidgetItem, _col: int) -> None:
+        """Navigate to the annotation's page on double-click/Enter."""
+        ann_id = item.data(0, Qt.ItemDataRole.UserRole)
+        page = item.data(0, Qt.ItemDataRole.UserRole + 1)
+        if isinstance(page, int) and page >= 0:
+            self.goto_page_requested.emit(page)
+
+    def _on_annotations_context_menu(self, pos) -> None:
+        """Show context menu for annotations."""
+        item = self.annotations_tree.itemAt(pos)
+        if not item:
+            return
+
+        ann_id = item.data(0, Qt.ItemDataRole.UserRole)
+        if not ann_id:
+            return
+
+        menu = QMenu(self)
+        act_delete = menu.addAction("Delete Annotation")
+        act_delete.triggered.connect(lambda: self._delete_annotation(ann_id))
+
+        act_color = menu.addMenu("Change Color")
+        for name, hex_color in HIGHLIGHT_COLORS:
+            color_act = act_color.addAction(name)
+            color_act.triggered.connect(lambda checked, a=ann_id, c=hex_color: self._change_annotation_color(a, c))
+
+        menu.exec(self.annotations_tree.viewport().mapToGlobal(pos))
+
+    def _delete_annotation(self, annotation_id: str) -> None:
+        """Delete an annotation."""
+        if self.annotation_manager:
+            self.annotation_manager.remove_annotation(annotation_id)
+
+    def _change_annotation_color(self, annotation_id: str, color: str) -> None:
+        """Change an annotation's color."""
+        if self.annotation_manager:
+            self.annotation_manager.update_annotation(annotation_id, color=color)
+
+    def _on_new_highlight(self) -> None:
+        """Create a highlight from the current view selection."""
+        # This is called from the sidebar toolbar
+        # The actual creation happens in the view via the main window
+        pass  # Handled by main window
+
+    def _on_highlight_color_changed(self, index: int) -> None:
+        """Handle highlight color change."""
+        if hasattr(self, 'view') and self.view:
+            hex_color = self.ann_color_combo.itemData(index)
+            self.view.set_highlight_color(hex_color)
+
+    def _on_save_annotations(self) -> None:
+        """Save annotations to PDF."""
+        if self.annotation_manager:
+            success = self.annotation_manager.save_to_pdf()
+            if success:
+                QMessageBox.information(self, "Save Annotations", "Annotations saved to PDF.")
+            else:
+                QMessageBox.warning(self, "Save Annotations", "Failed to save annotations.")
