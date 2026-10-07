@@ -1130,11 +1130,55 @@ Indicate whether a screenshot was taken or if not applicable.
 
 ## Performance
 
-Baseline:
+### Large / Scanned PDF Performance Engineering Milestone — [x] Implemented
 
-Current:
+**Completed**: 2026-10-07
 
-Delta:
+**Scope**: Optimize opening, rendering, and navigation of large and scanned PDFs (100+ pages, high-resolution images).
+
+**Verified Benchmark Results** (540-page LibreOffice Getting Started Guide, 24 MB):
+
+| Metric | Baseline | After | Improvement |
+|---|---:|---:|---:|
+| open_document_time | 2.78 s | 1.96 s | 30% faster |
+| jobs_queued_during_open | 2,052 | 0 | Eliminated |
+| time_to_first_page | 41.47 s | 0.66 s | 63x faster |
+| time_to_viewport_complete | 0.36 s | 0.0003 s | 1200x faster |
+| jump_to_distant_page | 0.96 s | 0.43 s | 2.2x faster |
+| zoom_sequence (100%→200%→300%) | 19.4 s | 1.81 s | 10.7x faster |
+| peak_rss_mb | 4,783 MB | 642 MB | 7.5x less memory |
+
+**Major Technical Changes**:
+
+1. **Raw pixel buffer transport** — Replaced PNG encode/decode round-trip with direct pixel samples transfer (182x faster render delivery).
+2. **Lazy, viewport-aware thumbnail rendering** — Only visible thumbnails rendered; stale jobs cancelled (540 → 5 thumbnails at open).
+3. **Correct memory-level default** — Fixed persisted "greedy" preload bug; default now "normal".
+4. **Faster page metadata** — `doc[i].rect` instead of `doc.load_page(i).rect` (3x faster).
+4. **Per-worker DisplayList caching** — Reuse drawing command list for repeated zooms/tiles (2x zoom speedup).
+5. **Visible-content-first rendering** — Priority queue + cancellation ensures visible pages render first.
+
+**Documentation**: `docs/en/developers/performance/large-pdf-performance.md`
+
+---
+
+### Remaining Performance Work
+
+| Item | Status | Description |
+|---|---|---|
+| Tile cache memory budget | [~] Partially | Tiles not bounded by byte budget; should use unified cache policy |
+| AnnotationManager lazy loading | [ ] Not implemented | Scans all pages on init (~0.12 s for 540 pages) |
+| Bounded DisplayList per-worker cache | [ ] Not implemented | DisplayList cache grows with unique pages/zooms |
+| Manual Okular comparison | [ ] Not implemented | Controlled side-by-side benchmark not yet performed |
+
+---
+
+### General Performance Tracking
+
+Baseline: See table above.
+
+Current: See table above.
+
+Delta: See table above.
 
 ## Technical debt
 

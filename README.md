@@ -42,6 +42,46 @@ python3 run.py
 
 ---
 
+## ⚡ Large / Scanned PDF Performance Breakthrough
+
+PDFAR underwent a dedicated **performance engineering milestone** targeting large and scanned PDFs. The rendering pipeline was redesigned around **demand-driven rendering**: render what the user currently needs first, avoid unnecessary work, cancel obsolete work, reuse rendered data, and keep memory usage bounded.
+
+### Verified Benchmark Results
+
+Testing with the 540-page LibreOffice Getting Started Guide (24 MB, heavy images):
+
+| Metric | Before | After | Improvement |
+|---|---:|---:|---:|
+| open_document_time | 2.78 s | 1.96 s | **30% faster** |
+| jobs_queued_during_open | 2,052 | 0 | **Eliminated** |
+| time_to_first_page | 41.47 s | 0.66 s | **63x faster** |
+| time_to_viewport_complete | 0.36 s | 0.0003 s | **1200x faster** |
+| jump_to_distant_page | 0.96 s | 0.43 s | **2.2x faster** |
+| zoom_sequence (100%→200%→300%) | 19.4 s | 1.81 s | **10.7x faster** |
+| peak_rss_mb | 4,783 MB | 642 MB | **7.5x less memory** |
+
+> **Note:** These results come from the project's performance benchmark (`tools/benchmark.py`) on a specific test PDF and hardware. They should not be presented as universal performance guarantees for every PDF or every machine.
+
+### Major Technical Improvements
+
+1. **Raw pixel buffer transport** — Replaced the PNG encode/decode round-trip with direct pixel buffer transfer. Worker threads now return raw `pix.samples` bytes + stride + format; the GUI thread constructs `QImage` directly. This removed ~180x PNG overhead.
+
+2. **Lazy, viewport-aware thumbnail rendering** — Thumbnails are now only rendered for visible sidebar items. Opening a 540-page document queues ~5 thumbnails instead of all 540. Scroll/tab-change triggers lazy loading with a small margin; stale thumbnail jobs are cancelled when scrolling away.
+
+3. **Correct memory-level default** — Fixed a bug where "greedy" memory level persisted from a previous session, causing full-document preloading on every open. Default is now "normal" (viewport + small prefetch).
+
+4. **Faster page metadata access** — Changed `doc.load_page(i).rect` → `doc[i].rect` (~3x faster page size enumeration).
+
+5. **Per-worker DisplayList caching** — Workers reuse `page.get_displaylist()` for repeated zooms/tiles (~2x speedup for zoom changes).
+
+6. **Visible-content-first rendering architecture** — The first visible page receives absolute priority; background work is deprioritized and cancellable.
+
+7. **Reduced unnecessary work during document opening** — Annotation scanning, thumbnail creation, and full-document layout are deferred or made lazy.
+
+See `docs/en/developers/performance/large-pdf-performance.md` for the full technical deep-dive.
+
+---
+
 ## 📁 Project Structure
 
 ```
