@@ -80,6 +80,8 @@ class Annotation:
 class HighlightAnnotation(Annotation):
     """Text highlight annotation."""
     type: AnnotationType = AnnotationType.HIGHLIGHT
+    # Note: notes are stored in the `content` field of the highlight
+    # For backward compatibility and simplicity, we use the same object
 
     @classmethod
     def from_selection(cls, page: int, rects: List[tuple], color: str = "#FFFF00",
@@ -92,6 +94,30 @@ class HighlightAnnotation(Annotation):
             color=color,
             author=author,
         )
+
+    def has_note(self) -> bool:
+        """Check if this highlight has an associated note."""
+        return bool(self.content.strip())
+
+    def set_note(self, text: str) -> None:
+        """Set the note text for this highlight."""
+        self.content = text
+        self.modified = datetime.now().isoformat()
+
+    def get_note(self) -> str:
+        """Get the note text for this highlight."""
+        return self.content
+
+
+@dataclass
+class NoteAnnotation(Annotation):
+    """Standalone note annotation (not associated with a highlight).
+    
+    Anchored to a specific position on a page.
+    """
+    type: AnnotationType = AnnotationType.NOTE
+    # position: (x, y) in PDF points where the note icon appears
+    position: tuple = (0.0, 0.0)
 
 
 class AnnotationManager(QObject):
@@ -250,6 +276,41 @@ class AnnotationManager(QObject):
         """Get all highlights for a specific page."""
         return [a for a in self.get_annotations(page=page, ann_type=AnnotationType.HIGHLIGHT)
                 if isinstance(a, HighlightAnnotation)]
+
+    def get_notes_for_page(self, page: int) -> List[NoteAnnotation]:
+        """Get all standalone notes for a specific page."""
+        return [a for a in self.get_annotations(page=page, ann_type=AnnotationType.NOTE)
+                if isinstance(a, NoteAnnotation)]
+
+    def add_note_to_highlight(self, highlight_id: str, note_text: str) -> Optional[HighlightAnnotation]:
+        """Add or update a note on an existing highlight."""
+        if highlight_id in self._annotations:
+            ann = self._annotations[highlight_id]
+            if ann.type == AnnotationType.HIGHLIGHT:
+                ann.set_note(note_text)
+                self.annotation_modified.emit(ann)
+                self.annotations_changed.emit()
+                return ann
+        return None
+
+    def get_note_for_highlight(self, highlight_id: str) -> Optional[str]:
+        """Get the note text for a highlight."""
+        if highlight_id in self._annotations:
+            ann = self._annotations[highlight_id]
+            if ann.type == AnnotationType.HIGHLIGHT:
+                return ann.get_note()
+        return None
+
+    def remove_note_from_highlight(self, highlight_id: str) -> bool:
+        """Remove the note from a highlight (keeps the highlight)."""
+        if highlight_id in self._annotations:
+            ann = self._annotations[highlight_id]
+            if ann.type == AnnotationType.HIGHLIGHT:
+                ann.set_note("")
+                self.annotation_modified.emit(ann)
+                self.annotations_changed.emit()
+                return True
+        return False
 
     def clear_page_annotations(self, page: int) -> int:
         """Remove all annotations from a page. Returns count removed."""

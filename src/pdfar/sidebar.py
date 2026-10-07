@@ -342,8 +342,8 @@ class Sidebar(QWidget):
                 if ann.type == AnnotationType.HIGHLIGHT:
                     color_name = next((name for name, hex_c in HIGHLIGHT_COLORS if hex_c == ann.color), "Custom")
                     text = f"  🖍️ Highlight ({color_name})"
-                    if ann.content:
-                        text += f": {ann.content[:50]}"
+                    if ann.has_note():
+                        text += f" 💬 {ann.content[:40]}"
                 else:
                     text = f"  {ann.type.value}: {ann.content[:50]}"
 
@@ -388,6 +388,7 @@ class Sidebar(QWidget):
             return
 
         ann_id = item.data(0, Qt.ItemDataRole.UserRole)
+        ann_type = item.data(0, Qt.ItemDataRole.UserRole + 2)
         if not ann_id:
             return
 
@@ -395,12 +396,56 @@ class Sidebar(QWidget):
         act_delete = menu.addAction("Delete Annotation")
         act_delete.triggered.connect(lambda: self._delete_annotation(ann_id))
 
+        if ann_type == "highlight":
+            # Get the highlight to check if it has a note
+            highlight = None
+            if self.annotation_manager and ann_id in self.annotation_manager._annotations:
+                highlight = self.annotation_manager._annotations[ann_id]
+
+            menu.addSeparator()
+
+            if highlight and highlight.has_note():
+                act_edit_note = menu.addAction("Edit Note…")
+                act_edit_note.triggered.connect(lambda: self._edit_note(ann_id))
+                
+                act_remove_note = menu.addAction("Remove Note")
+                act_remove_note.triggered.connect(lambda: self._remove_note(ann_id))
+            else:
+                act_add_note = menu.addAction("Add Note…")
+                act_add_note.triggered.connect(lambda: self._edit_note(ann_id))
+
         act_color = menu.addMenu("Change Color")
         for name, hex_color in HIGHLIGHT_COLORS:
             color_act = act_color.addAction(name)
             color_act.triggered.connect(lambda checked, a=ann_id, c=hex_color: self._change_annotation_color(a, c))
 
         menu.exec(self.annotations_tree.viewport().mapToGlobal(pos))
+
+    def _edit_note(self, annotation_id: str) -> None:
+        """Edit a note for a highlight."""
+        if not self.annotation_manager or annotation_id not in self.annotation_manager._annotations:
+            return
+        ann = self.annotation_manager._annotations[annotation_id]
+        if ann.type != AnnotationType.HIGHLIGHT:
+            return
+
+        current_note = ann.get_note()
+        new_note, ok = QInputDialog.getMultiLineText(
+            self, "Edit Note",
+            f"Note for highlight on page {ann.page + 1}:",
+            current_note
+        )
+        if ok:
+            if new_note.strip():
+                self.annotation_manager.add_note_to_highlight(annotation_id, new_note.strip())
+            else:
+                # Empty note = remove it
+                self.annotation_manager.remove_note_from_highlight(annotation_id)
+
+    def _remove_note(self, annotation_id: str) -> None:
+        """Remove the note from a highlight."""
+        if self.annotation_manager:
+            self.annotation_manager.remove_note_from_highlight(annotation_id)
 
     def _delete_annotation(self, annotation_id: str) -> None:
         """Delete an annotation."""

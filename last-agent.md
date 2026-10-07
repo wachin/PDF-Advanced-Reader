@@ -1,4 +1,5 @@
 
+20261006 OpenCode Desktop with FreeLLMAPI
 
 
 
