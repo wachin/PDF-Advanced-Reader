@@ -28,7 +28,7 @@ class DocumentTab(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.view = PDFView(doc_path, parent=self, password=password)
-        self.sidebar = Sidebar(self.view.doc, self.view.pool, self)
+        self.sidebar = Sidebar(self.view.doc, self.view.pool, doc_path, self)
         layout.addWidget(self.view)
 
     @property
@@ -37,4 +37,5 @@ class DocumentTab(QWidget):
 
     def shutdown(self) -> None:
         """Stop all async work owned by this document.  Safe to call twice."""
+        self.sidebar.shutdown()
         self.view.shutdown()

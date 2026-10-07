@@ -24,7 +24,7 @@ from .i18n import I18n
 from .search import SearchParams, SearchWorker, normalize_space
 from .sidebar import Sidebar
 from .tabs import DocumentTab
-from .viewer import PDFView
+from .viewer import PDFView, MEMORY_LEVELS
 
 
 class MainWindow(QMainWindow):
@@ -36,6 +36,7 @@ class MainWindow(QMainWindow):
         self._connected_tab: Optional[DocumentTab] = None
         self._search_tab: Optional[DocumentTab] = None
         self._presentation = False
+        self.memory_level = "normal"     # preload level applied to new views
         self.search_thread: Optional[QThread] = None
         self.search_worker: Optional[SearchWorker] = None
         self.settings = QSettings(APP_NAME, APP_NAME)
@@ -102,6 +103,10 @@ class MainWindow(QMainWindow):
         self.act_sidebar.setChecked(True)
         self.act_sidebar.triggered.connect(self._toggle_sidebar)
 
+        self.act_add_bookmark = QAction("Add Bookmark", self)
+        self.act_add_bookmark.setShortcut("Ctrl+B")
+        self.act_add_bookmark.triggered.connect(self._add_bookmark)
+
         self.act_quit = QAction("&Quit", self)
         self.act_quit.setShortcut(QKeySequence.StandardKey.Quit)
         self.act_quit.triggered.connect(self.close)
@@ -157,6 +162,17 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.zoom_combo)
         tb.addSeparator()
 
+        tb.addWidget(QLabel("Memory:"))
+        self.mem_combo = QComboBox()
+        self.mem_combo.addItems(["Low", "Normal", "Greedy"])
+        self.mem_combo.setCurrentText("Normal")
+        self.mem_combo.setFixedWidth(96)
+        self.mem_combo.setToolTip("Preload memory level (Okular): how much of "
+                                  "the document to render ahead of the viewport")
+        self.mem_combo.currentTextChanged.connect(self._apply_memory_level)
+        tb.addWidget(self.mem_combo)
+        tb.addSeparator()
+
         self.act_rotl = QAction("Rotate ⟲", self)
         self.act_rotr = QAction("Rotate ⟳", self)
         self.act_rotl.triggered.connect(self._rot_left)
@@ -168,6 +184,12 @@ class MainWindow(QMainWindow):
         self.act_copy = QAction("Copy", self)
         self.act_copy.triggered.connect(self._copy)
         tb.addAction(self.act_copy)
+        tb.addSeparator()
+
+        self.act_add_bookmark = QAction("Add Bookmark", self)
+        self.act_add_bookmark.setToolTip("Add a bookmark at the current page (Ctrl+B)")
+        self.act_add_bookmark.triggered.connect(self._add_bookmark)
+        tb.addAction(self.act_add_bookmark)
         tb.addSeparator()
 
         self.act_find = QAction("Find…", self)
@@ -297,6 +319,7 @@ class MainWindow(QMainWindow):
         self._shortcut("Ctrl+W", self._close_active_tab)
         self._shortcut("Ctrl+Tab", self._next_tab)
         self._shortcut("Ctrl+Shift+Tab", self._prev_tab)
+        self._shortcut("Ctrl+B", self._add_bookmark)
 
     def _shortcut(self, sequence: str, slot) -> None:
         """Create a shortcut whose handler is a bound method (not a lambda),
@@ -350,6 +373,13 @@ class MainWindow(QMainWindow):
     def _hit_next(self) -> None:
         self._step_hit(+1)
 
+    def _add_bookmark(self) -> None:
+        """Add a bookmark at the current page."""
+        if not self.view or not self.sidebar:
+            return
+        page = self.view.current_page
+        self.sidebar.add_bookmark_at_current_page(page)
+
     # ---------------------------------------------------------- document
     def open_dialog(self) -> None:
         start = self.settings.value("lastDir", os.path.expanduser("~"))
@@ -399,6 +429,7 @@ class MainWindow(QMainWindow):
             return False
 
         index = self.tabs.addTab(tab, tab.title)
+        tab.view.set_memory_level(self.memory_level)
         # left dock: created once, its widget follows the active tab
         if not hasattr(self, "side_dock") or self.side_dock is None:
             self.side_dock = QDockWidget("Pages", self)
@@ -532,6 +563,17 @@ class MainWindow(QMainWindow):
             self._set_fit("width")
         elif text.endswith("%"):
             self._set_zoom(int(text[:-1]) / 100.0)
+
+    def _apply_memory_level(self, text: str) -> None:
+        """Apply the chosen preload memory level to the active view and persist
+        it for new documents (Okular-style)."""
+        level = text.strip().lower()
+        if level not in MEMORY_LEVELS:
+            level = "normal"
+        self.memory_level = level
+        self.settings.setValue("memory_level", level)
+        if self.view:
+            self.view.set_memory_level(level)
 
     def _rotate(self, degrees: int) -> None:
         if self.view:
@@ -679,6 +721,12 @@ class MainWindow(QMainWindow):
         geo = self.settings.value("geometry")
         if geo is not None:
             self.restoreGeometry(geo)
+        # restore the preload memory level (Okular) and sync the toolbar combo
+        lvl = self.settings.value("memory_level", "normal")
+        if lvl not in MEMORY_LEVELS:
+            lvl = "normal"
+        self.memory_level = lvl
+        self.mem_combo.setCurrentText(lvl.capitalize())
         # NOTE: we deliberately do NOT restore the Qt windowState. saveState()
         # persists dock/toolbar/tabbar visibility, and a previous session saved
         # while the UI was collapsed (e.g. presentation mode) makes the window

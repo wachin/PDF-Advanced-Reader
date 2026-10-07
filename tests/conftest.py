@@ -12,11 +12,17 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pymupdf as fitz  # noqa: E402
+from PyQt6.QtCore import QSettings  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 
 @pytest.fixture(scope="session")
-def qapp():
+def qapp(tmp_path_factory):
+    # Point QSettings at a throwaway directory so tests never read or write
+    # the developer's real config (and cannot leak state between tests).
+    cfg = tmp_path_factory.mktemp("pdfar-settings")
+    QSettings.setPath(QSettings.Format.NativeFormat,
+                      QSettings.Scope.UserScope, str(cfg))
     app = QApplication.instance() or QApplication([])
     yield app
 
