@@ -492,6 +492,8 @@ class MainWindow(QMainWindow):
         self.page_label.setText(f"/ {page_count}")
 
         self._set_fit("width")
+        # Restore saved view state for this document (after initial fit mode)
+        self._restore_tab_state(tab.view, path)
         self.setWindowTitle(f"{os.path.basename(path)} — {APP_NAME}")
         self.status_left.setText(f"Loaded: {path}")
         self._remember_file(path)
@@ -523,7 +525,9 @@ class MainWindow(QMainWindow):
             self._connected_tab = None
 
     def _on_tab_changed(self, index: int) -> None:
+        # Save state for the previously active tab before switching
         if self._connected_tab is not None:
+            self._save_tab_state(self._connected_tab)
             self._disconnect_tab(self._connected_tab)
         tab = self.tabs.widget(index)
         if not isinstance(tab, DocumentTab):
@@ -533,6 +537,8 @@ class MainWindow(QMainWindow):
             self.side_dock.setWidget(tab.sidebar)
             self.side_dock.setVisible(self.act_sidebar.isChecked())
         self._connect_tab(tab)
+        # Restore saved view state for the newly active tab (immediate for tab switching)
+        self._restore_tab_state(tab.view, tab.doc_path, deferred=False)
 
         view = tab.view
         self.page_spin.blockSignals(True)
@@ -547,10 +553,41 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{os.path.basename(tab.doc_path)} — {APP_NAME}")
         self._update_status()
 
+    def _save_tab_state(self, tab: DocumentTab) -> None:
+        """Save the view state for a document tab."""
+        if not tab or not tab.view:
+            return
+        state = tab.view.get_state()
+        key = f"viewState/{tab.doc_path}"
+        self.settings.setValue(key, state)
+
+    def _restore_tab_state(self, view: 'PDFView', doc_path: str, deferred: bool = True) -> None:
+        """Restore the view state for a document.
+        
+        Args:
+            view: The PDFView to restore state for
+            doc_path: The document path
+            deferred: If True, defer restoration until after initial layout
+                     (use True for initial open, False for tab switching)
+        """
+        key = f"viewState/{doc_path}"
+        state = self.settings.value(key)
+        if state:
+            if deferred:
+                # Defer restoration until after the event loop processes initial layout
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(0, lambda: view.restore_state(state) if view else None)
+            else:
+                # Immediate restoration for tab switching (layout already established)
+                view.restore_state(state)
+
     def _close_tab(self, index: int) -> None:
         if index < 0 or index >= self.tabs.count():
             return
         tab = self.tabs.widget(index)
+        # Save state before closing
+        if isinstance(tab, DocumentTab):
+            self._save_tab_state(tab)
         self.tabs.removeTab(index)
         if isinstance(tab, DocumentTab):
             self._disconnect_tab(tab)

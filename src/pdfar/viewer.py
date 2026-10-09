@@ -785,10 +785,14 @@ class PDFView(QAbstractScrollArea):
         self.page_changed.emit(page)
 
     # ---------------------------------------------------------- zoom/fit
-    def set_zoom(self, zoom: float, anchor: Optional[QPoint] = None) -> None:
+    def set_zoom(self, zoom: float, anchor: Optional[QPoint] = None,
+                 clear_fit_mode: bool = True) -> None:
         zoom = max(MIN_ZOOM, min(MAX_ZOOM, float(zoom)))
         if abs(zoom - self.zoom) < 1e-6:
             return
+        # Explicit zoom clears fit mode unless called from apply_fit
+        if clear_fit_mode:
+            self.fit_mode = "none"
         anchor_ref = None
         if anchor is not None:
             cx = anchor.x() + self.horizontalScrollBar().value()
@@ -808,7 +812,19 @@ class PDFView(QAbstractScrollArea):
             self.verticalScrollBar().setValue(int(max(0, py + v * self.zoom - anchor_widget[1])))
             self.horizontalScrollBar().setValue(int(max(0, px + u * self.zoom - anchor_widget[0])))
         else:
-            self.verticalScrollBar().setValue(int(self.verticalScrollBar().value() * (zoom / old_zoom)))
+            # Preserve current page position: calculate new scroll position
+            # to keep the same page content at the same relative position.
+            if self.page_count > 0 and self.current_page < len(self._page_tops):
+                page_top = self._page_tops[self.current_page]
+                new_vscroll = int(page_top * zoom - self.viewport().height() / 2.0)
+                new_vscroll = max(0, min(new_vscroll, self.verticalScrollBar().maximum()))
+            else:
+                new_vscroll = int(self.verticalScrollBar().value() * (zoom / old_zoom))
+            # Block _update_current_page during zoom change
+            vbar = self.verticalScrollBar()
+            vbar.blockSignals(True)
+            vbar.setValue(new_vscroll)
+            vbar.blockSignals(False)
 
         self.zoom_changed.emit(self.zoom)
         self._request_visible()
@@ -831,6 +847,8 @@ class PDFView(QAbstractScrollArea):
         vh = max(1, self.viewport().height() - 2 * PAD)
         if vw < 50 or vh < 50:
             return          # not laid out yet; resizeEvent will retry
+        # Preserve current page position: calculate zoom, then set scroll
+        # to keep the same page at the same relative position.
         if self.fit_mode == "width":
             base_w = max(p[0] for p in self.page_sizes)
             factor = display_size(base_w, 1, self.rotation)[0]
@@ -839,7 +857,32 @@ class PDFView(QAbstractScrollArea):
             w0, h0 = self.page_sizes[min(self.current_page, self.page_count - 1)]
             dw, dh = display_size(w0, h0, self.rotation)
             zoom = min(vw / max(1.0, dw), vh / max(1.0, dh))
-        self.set_zoom(zoom)
+        # Calculate scroll position to keep current page at same relative position
+        old_zoom = self.zoom
+        if old_zoom > 0 and self.page_count > 0:
+            # Get the top of the current page in content coordinates
+            page_top = self._page_tops[self.current_page] if self.current_page < len(self._page_tops) else 0
+            # New scroll position to keep the same page top at the same relative position
+            new_vscroll = int(page_top * zoom - self.viewport().height() / 2.0)
+            new_vscroll = max(0, min(new_vscroll, self.verticalScrollBar().maximum()))
+        else:
+            new_vscroll = 0
+        # Temporarily block _update_current_page during zoom change
+        self.blockSignals(True)
+        vbar = self.verticalScrollBar()
+        vbar.blockSignals(True)
+        try:
+            self.zoom = zoom
+            self._tiles.clear()
+            self._tile_grids.clear()
+            self._relayout()
+            vbar.setValue(new_vscroll)
+            self.zoom_changed.emit(self.zoom)
+            self._request_visible()
+            self.viewport().update()
+        finally:
+            vbar.blockSignals(False)
+            self.blockSignals(False)
 
     # ----------------------------------------------------------- rotation
     def set_rotation(self, rotation: int) -> None:
@@ -858,6 +901,60 @@ class PDFView(QAbstractScrollArea):
     def rotate_by(self, degrees: int) -> None:
         """Rotate the view relative to the current orientation."""
         self.set_rotation(self.rotation + degrees)
+
+    # --------------------------------------------------------- state persistence
+    def get_state(self) -> dict:
+        """Return a serializable dict with the current view state."""
+        return {
+            "page": self.current_page,
+            "zoom": self.zoom,
+            "rotation": self.rotation,
+            "fit_mode": self.fit_mode,
+            "vscroll": self.verticalScrollBar().value(),
+            "hscroll": self.horizontalScrollBar().value(),
+        }
+
+    def restore_state(self, state: dict) -> None:
+        """Restore view state from a dict returned by get_state()."""
+        if not state:
+            return
+        # Block signals on self and scroll bars to prevent _update_current_page from recalculating page
+        self.blockSignals(True)
+        vbar = self.verticalScrollBar()
+        hbar = self.horizontalScrollBar()
+        vbar.blockSignals(True)
+        hbar.blockSignals(True)
+        try:
+            # Restore fit mode first (affects zoom calculation)
+            fit_mode = state.get("fit_mode", "none")
+            if fit_mode:
+                self.fit_mode = fit_mode
+            # Restore rotation before zoom (rotation affects layout)
+            rotation = state.get("rotation", 0)
+            if rotation != self.rotation:
+                self.set_rotation(rotation)
+            # Restore zoom only if fit_mode is "none" (otherwise fit mode determines zoom)
+            zoom = state.get("zoom", 1.0)
+            if self.fit_mode == "none":
+                self.set_zoom(zoom)
+            # Restore scroll positions first (blocked so _update_current_page not triggered)
+            vscroll = state.get("vscroll", 0)
+            hscroll = state.get("hscroll", 0)
+            if vscroll:
+                vbar.setValue(vscroll)
+            if hscroll:
+                hbar.setValue(hscroll)
+            # Restore page directly
+            page = state.get("page", 0)
+            page = max(0, min(page, self.page_count - 1)) if self.page_count else 0
+            self.current_page = page
+            # Emit page_changed after all state is restored
+            self.page_changed.emit(page)
+            self._request_visible()
+        finally:
+            vbar.blockSignals(False)
+            hbar.blockSignals(False)
+            self.blockSignals(False)
 
     # ---------------------------------------------------------- navigate
     def goto_page(self, index: int, center: bool = True) -> None:
