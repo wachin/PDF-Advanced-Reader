@@ -10,7 +10,7 @@ import pytest
 
 from conftest import build_sample_pdf
 from pdfar.main import MainWindow
-from PyQt6.QtWidgets import QMessageBox
+from PyQt6.QtWidgets import QApplication, QMessageBox
 
 
 @pytest.fixture(autouse=True)
@@ -255,6 +255,3 @@ def test_resume_reading_with_fit_width(win, tmp_path):
 
     # Fit width should be restored
     assert win.view.fit_mode == "width"
-
-
-from PyQt6.QtWidgets import QApplication

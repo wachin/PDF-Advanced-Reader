@@ -10,8 +10,7 @@ import pytest
 
 from conftest import build_sample_pdf
 from pdfar.main import MainWindow
-from pdfar.bookmarks import Bookmark, BookmarkManager
-from pdfar.sidebar import Sidebar
+from pdfar.bookmarks import BookmarkManager
 from PyQt6.QtWidgets import QMessageBox, QInputDialog
 
 

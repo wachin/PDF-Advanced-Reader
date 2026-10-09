@@ -12,7 +12,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pymupdf as fitz
 from PyQt6.QtCore import QObject
-from PyQt6.QtGui import QImage
 
 from pdfar.render import RenderPool, RenderResult
 

@@ -12,9 +12,6 @@ from conftest import build_sample_pdf
 from pdfar.main import MainWindow
 from pdfar.annotations import (
     AnnotationManager,
-    HighlightAnnotation,
-    NoteAnnotation,
-    AnnotationType,
 )
 from PyQt6.QtWidgets import QMessageBox, QInputDialog
 
@@ -55,7 +52,6 @@ def test_highlight_annotation_note_methods(tmp_path):
     mgr = AnnotationManager(p, doc)
 
     hl = mgr.add_highlight(0, [(10.0, 10.0, 50.0, 20.0)], color="#FFFF00")
-    ann_id = hl.id
 
     # Initially no note
     assert not hl.has_note()
@@ -266,7 +262,6 @@ def test_multiple_highlights_different_notes(win, tmp_path):
 
 def test_note_saved_with_highlight_color(win, tmp_path):
     """Test that note is saved along with highlight color."""
-    import pymupdf as fitz
 
     p = build_sample_pdf(tmp_path / "doc.pdf", pages=3)
     win.open_document(p)

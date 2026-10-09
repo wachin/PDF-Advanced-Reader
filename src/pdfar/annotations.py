@@ -17,7 +17,6 @@ try:
 except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 from PyQt6.QtCore import QObject, pyqtSignal
-from PyQt6.QtGui import QColor
 
 
 class AnnotationType(Enum):

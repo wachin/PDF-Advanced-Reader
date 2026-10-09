@@ -34,7 +34,7 @@ from .geometry import display_size, map_rect, normalize_rotation
 from .render import RenderPool, RenderResult
 from .search import SearchHit
 from .tiles import Tile, TileGrid, TILE_SIZE
-from .annotations import AnnotationManager, HighlightAnnotation, HIGHLIGHT_COLORS
+from .annotations import AnnotationManager, HIGHLIGHT_COLORS
 
 PAD = 16          # outer margin (content coords)
 GAP = 12          # vertical gap between pages
@@ -1083,7 +1083,7 @@ class PDFView(QAbstractScrollArea):
                 super().keyPressEvent(event)
         elif ctrl and shift and key == Qt.Key.Key_H:
             # Cycle highlight color
-            color = self.next_highlight_color()
+            self.next_highlight_color()
             event.accept()
         elif ctrl and key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
             self.zoom_in()

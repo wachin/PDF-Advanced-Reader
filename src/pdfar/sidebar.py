@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
 except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QIcon, QImage, QPixmap, QAction, QColor
+from PyQt6.QtGui import QIcon, QPixmap, QColor
 from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget, QMenu, QInputDialog, QMessageBox, QHBoxLayout,
@@ -17,8 +17,8 @@ from PyQt6.QtWidgets import (
 )
 
 from .render import RenderPool, RenderResult
-from .bookmarks import BookmarkManager, Bookmark
-from .annotations import AnnotationManager, HighlightAnnotation, HIGHLIGHT_COLORS, AnnotationType
+from .bookmarks import BookmarkManager
+from .annotations import AnnotationManager, HIGHLIGHT_COLORS, AnnotationType
 
 THUMB_W = 120
 
@@ -434,7 +434,6 @@ class Sidebar(QWidget):
 
     def _on_annotation_activated(self, item: QTreeWidgetItem, _col: int) -> None:
         """Navigate to the annotation's page on double-click/Enter."""
-        ann_id = item.data(0, Qt.ItemDataRole.UserRole)
         page = item.data(0, Qt.ItemDataRole.UserRole + 1)
         if isinstance(page, int) and page >= 0:
             self.goto_page_requested.emit(page)

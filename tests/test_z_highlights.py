@@ -12,7 +12,6 @@ from conftest import build_sample_pdf
 from pdfar.main import MainWindow
 from pdfar.annotations import (
     AnnotationManager,
-    HighlightAnnotation,
     AnnotationType,
     HIGHLIGHT_COLORS,
 )
