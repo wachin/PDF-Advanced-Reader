@@ -476,13 +476,13 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Open", f"Could not render PDF:\n{exc}")
             return False
 
-        index = self.tabs.addTab(tab, tab.title)
-        tab.view.set_memory_level(self.memory_level)
         # left dock: created once, its widget follows the active tab
         if not hasattr(self, "side_dock") or self.side_dock is None:
             self.side_dock = QDockWidget("Pages", self)
             self.side_dock.setObjectName("sideDock")
             self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.side_dock)
+        index = self.tabs.addTab(tab, tab.title)
+        tab.view.set_memory_level(self.memory_level)
         self.tabs.setCurrentIndex(index)
 
         self.search_dock.widget().setVisible(True)
@@ -535,6 +535,7 @@ class MainWindow(QMainWindow):
         # hand the side dock to the newly active tab
         if hasattr(self, "side_dock") and self.side_dock is not None:
             self.side_dock.setWidget(tab.sidebar)
+            tab.sidebar.show()
             self.side_dock.setVisible(self.act_sidebar.isChecked())
         self._connect_tab(tab)
         # Restore saved view state for the newly active tab (immediate for tab switching)

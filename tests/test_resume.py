@@ -174,6 +174,17 @@ def test_resume_reading_scroll_position(win, tmp_path):
     p = build_sample_pdf(tmp_path / "doc.pdf", pages=10)
     win.open_document(p)
 
+    # Wait for document to load and layout to complete
+    def layout_ready():
+        return win.view.verticalScrollBar().maximum() > 0
+    
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        QApplication.processEvents()
+        if layout_ready():
+            break
+        time.sleep(0.05)
+
     # Scroll down
     win.view.verticalScrollBar().setValue(500)
     QApplication.processEvents()
