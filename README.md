@@ -77,13 +77,29 @@ Fixes in 2.0 (there were ten other bugs behind it):
 
 ### Dependencies (Debian/Ubuntu)
 
+**Option 1: System packages (recommended for Debian/Ubuntu)**
+```bash
+sudo apt update
+sudo apt install python3-pyqt6 python3-pymupdf
+```
+
+**Option 2: User install via pip (no virtualenv needed)**
 ```bash
 sudo apt update
 sudo apt install python3-pyqt6          # or: pip3 install --user PyQt6
 pip3 install --user pymupdf             # PyMuPDF
 ```
 
-### Run
+**Option 3: Virtual environment (for development / isolated environments)**
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install PyQt6 pymupdf
+```
+
+> **Note:** `pip install --user` installs packages to `~/.local/lib/python3.x/site-packages/`, available globally for your user — **no virtualenv activation needed**. Use a virtualenv only if you need isolated environments for development.
+
+> **Debian packaging note:** The program works with both the system package `python3-pymupdf` (Debian/Ubuntu repos) and the PyPI package `pymupdf` (via pip). The code uses `import fitz` which works with both the system package `python3-pymupdf` and the PyPI package `pymupdf` since both provide the `fitz` module.
 
 ```bash
 python3 run.py                      # open the file dialog
