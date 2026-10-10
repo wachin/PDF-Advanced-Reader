@@ -124,7 +124,7 @@ pdfar /path/to/file.pdf
 
 ---
 
-## ⚡ Large / Scanned PDF Performance Breakthrough
+## Large / Scanned PDF Performance Breakthrough
 
 PDFAR underwent a dedicated **performance engineering milestone** targeting large and scanned PDFs. The rendering pipeline was redesigned around **demand-driven rendering**: render what the user currently needs first, avoid unnecessary work, cancel obsolete work, reuse rendered data, and keep memory usage bounded.
 
@@ -232,7 +232,7 @@ PDF-Advanced-Reader/
 
 ---
 
-## 🌍 Internationalization
+## Internationalization
 
 PDFAR supports multiple languages through Qt Linguist:
 
@@ -250,7 +250,7 @@ Add a new language:
 
 ---
 
-## 🛠️ Development
+## Development
 
 ### Translate a New String
 
@@ -269,7 +269,7 @@ python3 compile_ts.py
 
 ---
 
-## 🔧 Roadmap
+## Roadmap
 
 - [ ] Thumbnail sidebar navigation
 - [ ] Persistent annotations (saved highlights/notes)
@@ -279,7 +279,7 @@ python3 compile_ts.py
 
 ---
 
-## 🙏 Acknowledgements
+## Acknowledgements
 
 This project owes a great debt to **Okular** (https://apps.kde.org/okular/), the
 mature KDE document viewer (GPL-2.0+ / GPL-3.0+, by KDE and its contributors,
@@ -295,20 +295,20 @@ solved this — thank you to the Okular developers.
 
 ---
 
-## 📄 License
+## License
 
 **GPL-3.0** — See [LICENSE](LICENSE) for details.
 
 ---
 
-## 👤 Author
+## Author
 
 **Washington Indacochea Delgado**  
 Email: linuxfrontier@proton.me
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! Please follow these steps:
 
