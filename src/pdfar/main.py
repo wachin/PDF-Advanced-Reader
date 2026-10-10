@@ -399,34 +399,6 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_rotr)
         tb.addSeparator()
 
-        # Highlight
-        self.act_highlight = QAction("Highlight", self)
-        self.act_highlight.setToolTip("Create highlight from selection (Ctrl+H)")
-        self.act_highlight.triggered.connect(self._create_highlight)
-        tb.addAction(self.act_highlight)
-
-        # Bookmark
-        self.act_add_bookmark = QAction("Add Bookmark", self)
-        self.act_add_bookmark.setToolTip("Add a bookmark at the current page (Ctrl+B)")
-        self.act_add_bookmark.triggered.connect(self._add_bookmark)
-        tb.addAction(self.act_add_bookmark)
-        tb.addSeparator()
-
-        # Find
-        self.act_find = QAction("Find…", self)
-        self.act_find.setShortcut(QKeySequence.StandardKey.Find)
-        self.act_find.triggered.connect(self._focus_search)
-        tb.addAction(self.act_find)
-        tb.addSeparator()
-
-        # Presentation, Sidebar, Dark mode
-        tb.addAction(self.act_presentation)
-        tb.addAction(self.act_sidebar)
-        tb.addSeparator()
-        tb.addAction(self.act_dark_mode)
-        tb.addAction(self.act_properties)
-        tb.addAction(self.act_attachments)
-
     # --------------------------------------------------- presentation mode
     def toggle_presentation(self) -> None:
         """Enter/exit fullscreen presentation: hide all chrome, fit page."""
