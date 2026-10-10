@@ -71,8 +71,6 @@ Fixes in 2.0 (there were ten other bugs behind it):
 | `Ctrl+C` / `Ctrl+A` | Copy selection / select all |
 | `Ctrl+wheel` | Zoom at cursor |
 
-![screenshot](samples/screenshot.png)
-
 ---
 
 ## Quick start
@@ -89,6 +87,13 @@ pip3 install --user pymupdf             # PyMuPDF
 
 ```bash
 python3 run.py                      # open the file dialog
+```
+
+![](images/01-PDFAR.png)
+
+or alternatively, for users who like using the terminal for many things:
+
+```bash
 python3 run.py /path/to/file.pdf    # open a document directly
 ```
 
