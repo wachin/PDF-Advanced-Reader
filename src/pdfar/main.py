@@ -58,6 +58,7 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         self._build_actions()
+        self._build_menubar()
         self._build_toolbar()
         self._build_search_dock()
         self._build_statusbar()
@@ -86,25 +87,120 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------- UI
     def _build_actions(self) -> None:
+        # File menu actions
+        self.act_new = QAction("&New", self)
+        self.act_new.setShortcut(QKeySequence.StandardKey.New)
+        self.act_new.triggered.connect(self.open_dialog)
+
         self.act_open = QAction("&Open…", self)
         self.act_open.setShortcut(QKeySequence.StandardKey.Open)
         self.act_open.triggered.connect(self.open_dialog)
 
+        self.act_save = QAction("&Save", self)
+        self.act_save.setShortcut(QKeySequence.StandardKey.Save)
+        self.act_save.setToolTip("Save document (annotations, bookmarks, etc.)")
+        self.act_save.triggered.connect(self._save_document)
+
+        self.act_save_as = QAction("Save &As…", self)
+        self.act_save_as.setShortcut(QKeySequence.StandardKey.SaveAs)
+        self.act_save_as.triggered.connect(self._save_document_as)
+
+        self.act_print = QAction("&Print…", self)
+        self.act_print.setShortcut(QKeySequence.StandardKey.Print)
+        self.act_print.triggered.connect(self._print_document)
+
+        self.act_quit = QAction("&Quit", self)
+        self.act_quit.setShortcut(QKeySequence.StandardKey.Quit)
+        self.act_quit.triggered.connect(self.close)
+
+        # Edit menu actions
+        self.act_copy = QAction("&Copy", self)
+        self.act_copy.setShortcut(QKeySequence.StandardKey.Copy)
+        self.act_copy.triggered.connect(self._copy)
+
+        self.act_select_all = QAction("Select &All", self)
+        self.act_select_all.setShortcut(QKeySequence.StandardKey.SelectAll)
+        self.act_select_all.triggered.connect(self._select_all)
+
+        # View menu actions
         self.act_presentation = QAction("Presentation", self)
         self.act_presentation.setShortcut("F11")
         self.act_presentation.triggered.connect(self.toggle_presentation)
 
-        self.act_recent = QAction("Recent ▾", self)
-        self.menu_recent = QMenu("Recent files", self)
-        self.act_recent.setMenu(self.menu_recent)
-
         self.act_sidebar = QAction("Sidebar", self)
         self.act_sidebar.setCheckable(True)
         self.act_sidebar.setChecked(True)
+        self.act_sidebar.setShortcut("F9")
+        self.act_sidebar.setToolTip("Toggle sidebar (F9)")
         self.act_sidebar.triggered.connect(self._toggle_sidebar)
+
+        self.act_dark_mode = QAction("Dark Mode", self)
+        self.act_dark_mode.setCheckable(True)
+        self.act_dark_mode.setShortcut("Ctrl+D")
+        self.act_dark_mode.setToolTip("Toggle dark mode (Ctrl+D)")
+        self.act_dark_mode.triggered.connect(self._toggle_dark_mode)
+
+        # Navigation actions
+        self.act_prev = QAction("Previous Page", self)
+        self.act_prev.setShortcut("PgUp")
+        self.act_prev.setToolTip("Previous page (PgUp)")
+        self.act_prev.triggered.connect(self._prev_page)
+
+        self.act_next = QAction("Next Page", self)
+        self.act_next.setShortcut("PgDown")
+        self.act_next.setToolTip("Next page (PgDown)")
+        self.act_next.triggered.connect(self._next_page)
+
+        self.act_first = QAction("First Page", self)
+        self.act_first.setShortcut("Home")
+        self.act_first.setToolTip("First page (Home)")
+        self.act_first.triggered.connect(self._goto_first_page)
+
+        self.act_last = QAction("Last Page", self)
+        self.act_last.setShortcut("End")
+        self.act_last.setToolTip("Last page (End)")
+        self.act_last.triggered.connect(self._goto_last_page)
+
+        # Zoom actions
+        self.act_zin = QAction("Zoom In", self)
+        self.act_zin.setShortcut("Ctrl++")
+        self.act_zin.setToolTip("Zoom in (Ctrl++)")
+        self.act_zin.triggered.connect(self._zoom_in)
+
+        self.act_zout = QAction("Zoom Out", self)
+        self.act_zout.setShortcut("Ctrl+-")
+        self.act_zout.setToolTip("Zoom out (Ctrl+-)")
+        self.act_zout.triggered.connect(self._zoom_out)
+
+        self.act_zoom_100 = QAction("100%", self)
+        self.act_zoom_100.setShortcut("Ctrl+0")
+        self.act_zoom_100.setToolTip("Actual size (Ctrl+0)")
+        self.act_zoom_100.triggered.connect(self._zoom_100)
+
+        self.act_fit_width = QAction("Fit Width", self)
+        self.act_fit_width.setShortcut("Ctrl+1")
+        self.act_fit_width.setToolTip("Fit width (Ctrl+1)")
+        self.act_fit_width.triggered.connect(self._fit_width)
+
+        self.act_fit_page = QAction("Fit Page", self)
+        self.act_fit_page.setShortcut("Ctrl+2")
+        self.act_fit_page.setToolTip("Fit page (Ctrl+2)")
+        self.act_fit_page.triggered.connect(self._fit_page)
+
+        # Tools menu actions
+        self.act_rotate_left = QAction("Rotate Left", self)
+        self.act_rotate_left.setShortcut("Ctrl+Left")
+        self.act_rotate_left.setToolTip("Rotate left (Ctrl+Left)")
+        self.act_rotate_left.triggered.connect(self._rot_left)
+
+        self.act_rotate_right = QAction("Rotate Right", self)
+        self.act_rotate_right.setShortcut("Ctrl+Right")
+        self.act_rotate_right.setToolTip("Rotate right (Ctrl+Right)")
+        self.act_rotate_right.triggered.connect(self._rot_right)
 
         self.act_add_bookmark = QAction("Add Bookmark", self)
         self.act_add_bookmark.setShortcut("Ctrl+B")
+        self.act_add_bookmark.setToolTip("Add bookmark at current page (Ctrl+B)")
         self.act_add_bookmark.triggered.connect(self._add_bookmark)
 
         self.act_highlight = QAction("Highlight", self)
@@ -122,9 +218,35 @@ class MainWindow(QMainWindow):
         self.act_save_annotations.setToolTip("Save annotations to PDF (Ctrl+S)")
         self.act_save_annotations.triggered.connect(self._save_annotations)
 
-        self.act_quit = QAction("&Quit", self)
-        self.act_quit.setShortcut(QKeySequence.StandardKey.Quit)
-        self.act_quit.triggered.connect(self.close)
+        self.act_properties = QAction("Properties", self)
+        self.act_properties.setShortcut("Ctrl+I")
+        self.act_properties.setToolTip("Document Properties (Ctrl+I)")
+        self.act_properties.triggered.connect(self._show_properties)
+
+        self.act_attachments = QAction("Attachments", self)
+        self.act_attachments.setShortcut("Ctrl+Shift+A")
+        self.act_attachments.setToolTip("Show Attachments (Ctrl+Shift+A)")
+        self.act_attachments.triggered.connect(self._show_attachments)
+
+        # Help menu
+        self.act_about = QAction("About", self)
+        self.act_about.triggered.connect(self._show_about)
+
+        self.act_recent = QAction("Recent ▾", self)
+        self.menu_recent = QMenu("Recent files", self)
+        self.act_recent.setMenu(self.menu_recent)
+
+        self.act_sidebar = QAction("Sidebar", self)
+        self.act_sidebar.setCheckable(True)
+        self.act_sidebar.setChecked(True)
+        self.act_sidebar.setShortcut("F9")
+        self.act_sidebar.setToolTip("Toggle sidebar (F9)")
+        self.act_sidebar.triggered.connect(self._toggle_sidebar)
+
+        self.act_presentation = QAction("Presentation", self)
+        self.act_presentation.setShortcut("F11")
+        self.act_presentation.setToolTip("Enter presentation mode (F11)")
+        self.act_presentation.triggered.connect(self.toggle_presentation)
 
         self.act_dark_mode = QAction("Dark Mode", self)
         self.act_dark_mode.setCheckable(True)
@@ -142,6 +264,75 @@ class MainWindow(QMainWindow):
         self.act_attachments.setToolTip("Show Attachments (Ctrl+Shift+A)")
         self.act_attachments.triggered.connect(self._show_attachments)
 
+        self.act_find = QAction("Find", self)
+        self.act_find.setShortcut(QKeySequence.StandardKey.Find)
+        self.act_find.triggered.connect(self._focus_search)
+
+        self.act_open = QAction("&Open…", self)
+        self.act_open.setShortcut(QKeySequence.StandardKey.Open)
+        self.act_open.triggered.connect(self.open_dialog)
+
+    def _build_menubar(self) -> None:
+        """Create the menu bar with File, Edit, View, Tools, Help menus."""
+        menubar = self.menuBar()
+
+        # File menu
+        file_menu = menubar.addMenu("&File")
+        file_menu.addAction(self.act_new)
+        file_menu.addAction(self.act_open)
+        file_menu.addSeparator()
+        file_menu.addAction(self.act_recent)
+        file_menu.addSeparator()
+        file_menu.addAction(self.act_save)
+        file_menu.addAction(self.act_save_as)
+        file_menu.addSeparator()
+        file_menu.addAction(self.act_print)
+        file_menu.addSeparator()
+        file_menu.addAction(self.act_quit)
+
+        # Edit menu
+        edit_menu = menubar.addMenu("&Edit")
+        edit_menu.addAction(self.act_copy)
+        edit_menu.addAction(self.act_select_all)
+
+        # View menu
+        view_menu = menubar.addMenu("&View")
+        view_menu.addAction(self.act_presentation)
+        view_menu.addSeparator()
+        view_menu.addAction(self.act_first)
+        view_menu.addAction(self.act_prev)
+        view_menu.addAction(self.act_next)
+        view_menu.addAction(self.act_last)
+        view_menu.addSeparator()
+        view_menu.addAction(self.act_zoom_100)
+        view_menu.addAction(self.act_fit_width)
+        view_menu.addAction(self.act_fit_page)
+        view_menu.addSeparator()
+        view_menu.addAction(self.act_zin)
+        view_menu.addAction(self.act_zout)
+        view_menu.addSeparator()
+        view_menu.addAction(self.act_sidebar)
+        view_menu.addAction(self.act_dark_mode)
+        view_menu.addAction(self.act_presentation)
+
+        # Tools menu
+        tools_menu = menubar.addMenu("&Tools")
+        tools_menu.addAction(self.act_find)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self.act_highlight)
+        tools_menu.addAction(self.act_next_highlight_color)
+        tools_menu.addAction(self.act_add_bookmark)
+        tools_menu.addAction(self.act_properties)
+        tools_menu.addAction(self.act_attachments)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self.act_rotate_left)
+        tools_menu.addAction(self.act_rotate_right)
+        tools_menu.addAction(self.act_save_annotations)
+
+        # Help menu
+        help_menu = menubar.addMenu("&Help")
+        help_menu.addAction(self.act_about)
+
     def _build_toolbar(self) -> None:
         tb = QToolBar("Main")
         tb.setMovable(False)
@@ -150,19 +341,12 @@ class MainWindow(QMainWindow):
         self.addToolBar(tb)
         self.toolbar = tb
 
-        tb.addAction(self.act_open)
-        tb.addAction(self.act_recent)
-        tb.addSeparator()
-
-        self.act_prev = QAction("◀", self)
-        self.act_prev.setToolTip("Previous page")
-        self.act_next = QAction("▶", self)
-        self.act_next.setToolTip("Next page")
-        self.act_prev.triggered.connect(self._prev_page)
-        self.act_next.triggered.connect(self._next_page)
+        # Navigation
         tb.addAction(self.act_prev)
         tb.addAction(self.act_next)
+        tb.addSeparator()
 
+        # Page navigation
         self.page_spin = QSpinBox()
         self.page_spin.setMinimum(1)
         self.page_spin.setMaximum(1)
@@ -175,12 +359,7 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.page_label)
         tb.addSeparator()
 
-        self.act_zin = QAction("+", self)
-        self.act_zin.setToolTip("Zoom in")
-        self.act_zout = QAction("−", self)
-        self.act_zout.setToolTip("Zoom out")
-        self.act_zin.triggered.connect(self._zoom_in)
-        self.act_zout.triggered.connect(self._zoom_out)
+        # Zoom controls
         tb.addAction(self.act_zout)
         tb.addAction(self.act_zin)
 
@@ -197,6 +376,7 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.zoom_combo)
         tb.addSeparator()
 
+        # Memory level
         tb.addWidget(QLabel("Memory:"))
         self.mem_combo = QComboBox()
         self.mem_combo.addItems(["Low", "Normal", "Greedy"])
@@ -208,6 +388,7 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.mem_combo)
         tb.addSeparator()
 
+        # Rotation
         self.act_rotl = QAction("⟲", self)
         self.act_rotl.setToolTip("Rotate left")
         self.act_rotr = QAction("⟳", self)
@@ -218,27 +399,27 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_rotr)
         tb.addSeparator()
 
-        self.act_copy = QAction("Copy", self)
-        self.act_copy.triggered.connect(self._copy)
-        tb.addAction(self.act_copy)
-        tb.addSeparator()
-
+        # Highlight
         self.act_highlight = QAction("Highlight", self)
         self.act_highlight.setToolTip("Create highlight from selection (Ctrl+H)")
         self.act_highlight.triggered.connect(self._create_highlight)
         tb.addAction(self.act_highlight)
 
+        # Bookmark
         self.act_add_bookmark = QAction("Add Bookmark", self)
         self.act_add_bookmark.setToolTip("Add a bookmark at the current page (Ctrl+B)")
         self.act_add_bookmark.triggered.connect(self._add_bookmark)
         tb.addAction(self.act_add_bookmark)
         tb.addSeparator()
 
+        # Find
         self.act_find = QAction("Find…", self)
         self.act_find.setShortcut(QKeySequence.StandardKey.Find)
         self.act_find.triggered.connect(self._focus_search)
         tb.addAction(self.act_find)
         tb.addSeparator()
+
+        # Presentation, Sidebar, Dark mode
         tb.addAction(self.act_presentation)
         tb.addAction(self.act_sidebar)
         tb.addSeparator()
@@ -456,6 +637,98 @@ class MainWindow(QMainWindow):
                 self.status_left.setText("Annotations saved to PDF")
             else:
                 self.status_left.setText("Failed to save annotations")
+
+    def _save_document(self) -> None:
+        """Save the document (annotations, bookmarks, etc.)"""
+        if self.view:
+            success = self.view.save_annotations()
+            if success:
+                self.status_left.setText("Document saved")
+            else:
+                self.status_left.setText("Failed to save document")
+
+    def _save_document_as(self) -> None:
+        """Save the document to a new location."""
+        if not self.view:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save Document As", "",
+                                              "PDF Files (*.pdf)")
+        if path:
+            try:
+                self.view.doc.save(path)
+                self.status_left.setText(f"Document saved to {path}")
+            except Exception as exc:
+                QMessageBox.critical(self, "Save As", f"Could not save document:\n{exc}")
+
+    def _print_document(self) -> None:
+        """Print the document."""
+        if self.view:
+            QMessageBox.information(self, "Print", "Print functionality not yet implemented")
+
+    def _select_all(self) -> None:
+        """Select all text in the current page."""
+        if self.view:
+            self.view.select_all()
+
+    def _goto_first_page(self) -> None:
+        """Go to the first page."""
+        if self.view:
+            self.view.goto_page(0)
+
+    def _goto_last_page(self) -> None:
+        """Go to the last page."""
+        if self.view:
+            self.view.goto_page(self.view.page_count - 1)
+
+    def _save_document(self) -> None:
+        """Save the document (annotations, bookmarks, etc.)"""
+        if self.view:
+            success = self.view.save_annotations()
+            if success:
+                self.status_left.setText("Document saved")
+            else:
+                self.status_left.setText("Failed to save document")
+
+    def _save_document_as(self) -> None:
+        """Save the document to a new location."""
+        if not self.view:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save Document As", "",
+                                              "PDF Files (*.pdf)")
+        if path:
+            try:
+                self.view.doc.save(path)
+                self.status_left.setText(f"Document saved to {path}")
+            except Exception as exc:
+                QMessageBox.critical(self, "Save As", f"Could not save document:\n{exc}")
+
+    def _print_document(self) -> None:
+        """Print the document."""
+        if self.view:
+            QMessageBox.information(self, "Print", "Print functionality not yet implemented")
+
+    def _select_all(self) -> None:
+        """Select all text in the current page."""
+        if self.view:
+            self.view.select_all()
+
+    def _goto_first_page(self) -> None:
+        """Go to the first page."""
+        if self.view:
+            self.view.goto_page(0)
+
+    def _goto_last_page(self) -> None:
+        """Go to the last page."""
+        if self.view:
+            self.view.goto_page(self.view.page_count - 1)
+
+    def _show_about(self) -> None:
+        """Show the about dialog."""
+        QMessageBox.about(self, "About PDFAR",
+            "PDFAR — Advanced PDF Reader\n\n"
+            "A fast, feature-rich PDF reader for Linux.\n\n"
+            "Built with PyQt6 and PyMuPDF (fitz).\n\n"
+            "Version 2.0.0")
 
     def _toggle_dark_mode(self) -> None:
         """Toggle dark mode on/off."""
