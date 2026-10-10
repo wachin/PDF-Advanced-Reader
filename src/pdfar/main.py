@@ -137,6 +137,11 @@ class MainWindow(QMainWindow):
         self.act_properties.setToolTip("Document Properties (Ctrl+I)")
         self.act_properties.triggered.connect(self._show_properties)
 
+        self.act_attachments = QAction("Attachments", self)
+        self.act_attachments.setShortcut("Ctrl+Shift+A")
+        self.act_attachments.setToolTip("Show Attachments (Ctrl+Shift+A)")
+        self.act_attachments.triggered.connect(self._show_attachments)
+
     def _build_toolbar(self) -> None:
         tb = QToolBar("Main")
         tb.setMovable(False)
@@ -239,6 +244,7 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         tb.addAction(self.act_dark_mode)
         tb.addAction(self.act_properties)
+        tb.addAction(self.act_attachments)
 
     # --------------------------------------------------- presentation mode
     def toggle_presentation(self) -> None:
@@ -365,6 +371,7 @@ class MainWindow(QMainWindow):
         self._shortcut("Ctrl+S", self._save_annotations)
         self._shortcut("Ctrl+D", self._toggle_dark_mode)
         self._shortcut("Ctrl+I", self._show_properties)
+        self._shortcut("Ctrl+Shift+A", self._show_attachments)
 
     def _shortcut(self, sequence: str, slot) -> None:
         """Create a shortcut whose handler is a bound method (not a lambda),
@@ -502,6 +509,19 @@ class MainWindow(QMainWindow):
         buttons.accepted.connect(dlg.accept)
         layout.addWidget(buttons)
         dlg.exec()
+
+    def _show_attachments(self) -> None:
+        """Switch sidebar to Attachments tab."""
+        if not self.sidebar:
+            return
+        # Find the Attachments tab index
+        for i in range(self.sidebar.tabs.count()):
+            if self.sidebar.tabs.tabText(i) == "Attachments":
+                self.sidebar.tabs.setCurrentIndex(i)
+                break
+        # Ensure sidebar is visible
+        self.act_sidebar.setChecked(True)
+        self._toggle_sidebar(True)
 
     def _apply_dark_mode(self, enabled: bool) -> None:
         """Apply dark mode to the entire application UI."""

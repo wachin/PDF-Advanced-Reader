@@ -1,8 +1,8 @@
-"""Left sidebar: page thumbnails, document outline, bookmarks, and annotations."""
+"""Left sidebar: page thumbnails, document outline, bookmarks, annotations, and attachments."""
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
@@ -13,9 +13,8 @@ from PyQt6.QtGui import QIcon, QPixmap, QColor
 from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget, QMenu, QInputDialog, QMessageBox, QHBoxLayout,
-    QPushButton, QComboBox,
+    QPushButton, QComboBox, QFileDialog, QProgressBar,
 )
-
 from .render import RenderPool, RenderResult
 from .bookmarks import BookmarkManager
 from .annotations import AnnotationManager, HIGHLIGHT_COLORS, AnnotationType
@@ -103,6 +102,37 @@ class Sidebar(QWidget):
         ann_layout.addWidget(self.annotations_tree)
 
         self.tabs.addTab(self.annotations_panel, "Annotations")
+
+        # ---- attachments ------------------------------------------------
+        self.attachments_panel = QWidget()
+        att_layout = QVBoxLayout(self.attachments_panel)
+        att_layout.setContentsMargins(4, 4, 4, 4)
+
+        # Toolbar for attachments
+        att_toolbar = QHBoxLayout()
+        self.att_extract_btn = QPushButton("Extract")
+        self.att_extract_btn.setToolTip("Extract selected attachment")
+        self.att_extract_btn.clicked.connect(self._extract_attachment)
+        self.att_extract_btn.setEnabled(False)
+        att_toolbar.addWidget(self.att_extract_btn)
+
+        self.att_extract_all_btn = QPushButton("Extract All")
+        self.att_extract_all_btn.setToolTip("Extract all attachments")
+        self.att_extract_all_btn.clicked.connect(self._extract_all_attachments)
+        att_toolbar.addWidget(self.att_extract_all_btn)
+
+        att_toolbar.addStretch()
+        att_layout.addLayout(att_toolbar)
+
+        self.attachments_tree = QTreeWidget()
+        self.attachments_tree.setHeaderHidden(True)
+        self.attachments_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.attachments_tree.customContextMenuRequested.connect(self._on_attachments_context_menu)
+        self.attachments_tree.itemSelectionChanged.connect(self._on_attachment_selection_changed)
+        self.attachments_tree.itemActivated.connect(self._on_attachment_activated)
+        att_layout.addWidget(self.attachments_tree)
+
+        self.tabs.addTab(self.attachments_panel, "Attachments")
 
         self._build_thumbs()
         self._build_outline()
@@ -361,6 +391,160 @@ class Sidebar(QWidget):
                 return
         self.bookmark_manager.add_user_bookmark(title.strip(), page)
         self._build_bookmarks()
+
+    def _build_attachments(self) -> None:
+        """Build the attachments tree from the PDF's embedded files."""
+        self.attachments_tree.clear()
+        
+        try:
+            emb_count = self.doc.embfile_count()
+        except Exception:
+            emb_count = 0
+        
+        if emb_count == 0:
+            self.attachments_tree.addTopLevelItem(QTreeWidgetItem(["(no attachments)"]))
+            return
+        
+        for i in range(emb_count):
+            try:
+                info = self.doc.embfile_info(i)
+                name = info.get('filename', f'attachment_{i}')
+                size = info.get('size', 0)
+                desc = info.get('desc', '')
+                mimetype = info.get('mimetype', '')
+                
+                # Format size
+                if size < 1024:
+                    size_str = f"{size} B"
+                elif size < 1024 * 1024:
+                    size_str = f"{size / 1024:.1f} KB"
+                else:
+                    size_str = f"{size / (1024 * 1024):.1f} MB"
+                
+                # Create display text
+                display = f"  {name} ({size_str})"
+                if desc:
+                    display += f" - {desc}"
+                if mimetype:
+                    display += f" [{mimetype}]"
+                
+                node = QTreeWidgetItem([display])
+                node.setData(0, Qt.ItemDataRole.UserRole, i)  # attachment index
+                node.setData(0, Qt.ItemDataRole.UserRole + 1, name)  # filename
+                node.setData(0, Qt.ItemDataRole.UserRole + 2, size)  # size
+                node.setData(0, Qt.ItemDataRole.UserRole + 3, mimetype)  # mimetype
+                self.attachments_tree.addTopLevelItem(node)
+            except Exception:
+                pass  # Skip problematic attachments
+        
+        self.attachments_tree.expandAll()
+
+    def _on_attachment_selection_changed(self) -> None:
+        """Enable/disable extract button based on selection."""
+        has_selection = len(self.attachments_tree.selectedItems()) > 0
+        self.att_extract_btn.setEnabled(has_selection)
+        self.att_extract_all_btn.setEnabled(self.attachments_tree.topLevelItemCount() > 0)
+
+    def _on_attachment_activated(self, item: QTreeWidgetItem, _col: int) -> None:
+        """Extract attachment on double-click/Enter."""
+        self._extract_attachment(item)
+
+    def _on_attachments_context_menu(self, pos) -> None:
+        """Show context menu for attachments."""
+        item = self.attachments_tree.itemAt(pos)
+        if not item:
+            return
+        
+        menu = QMenu(self)
+        act_extract = menu.addAction("Extract")
+        act_extract.triggered.connect(lambda: self._extract_attachment(item))
+        
+        menu.addSeparator()
+        
+        act_extract_all = menu.addAction("Extract All")
+        act_extract_all.triggered.connect(self._extract_all_attachments)
+        
+        menu.exec(self.attachments_tree.viewport().mapToGlobal(pos))
+
+    def _extract_attachment(self, item: QTreeWidgetItem) -> None:
+        """Extract a single attachment."""
+        if not self.doc:
+            return
+        
+        idx = item.data(0, Qt.ItemDataRole.UserRole)
+        name = item.data(0, Qt.ItemDataRole.UserRole + 1)
+        if not isinstance(idx, int) or not isinstance(name, str):
+            return
+        
+        # Ask for save location
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "Extract Attachment", name, "All Files (*)"
+        )
+        if not save_path:
+            return
+        
+        try:
+            data = self.doc.embfile_get(idx)
+            with open(save_path, 'wb') as f:
+                f.write(data)
+            QMessageBox.information(self, "Extract Attachment", 
+                f"Attachment '{name}' extracted successfully to:\n{save_path}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Extract Attachment", 
+                f"Failed to extract attachment:\n{exc}")
+
+    def _extract_all_attachments(self) -> None:
+        """Extract all attachments to a directory."""
+        if not self.doc:
+            return
+        
+        try:
+            emb_count = self.doc.embfile_count()
+        except Exception:
+            emb_count = 0
+        
+        if emb_count == 0:
+            return
+        
+        # Ask for directory
+        dir_path = QFileDialog.getExistingDirectory(
+            self, "Extract All Attachments", ""
+        )
+        if not dir_path:
+            return
+        
+        # Progress dialog
+        from PyQt6.QtWidgets import QProgressDialog
+        progress = QProgressDialog("Extracting attachments...", "Cancel", 0, emb_count, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        
+        extracted = 0
+        failed = 0
+        for i in range(emb_count):
+            if progress.wasCanceled():
+                break
+            
+            progress.setValue(i)
+            app = QApplication.instance()
+            if app:
+                app.processEvents()
+            
+            try:
+                info = self.doc.embfile_info(i)
+                name = info.get('filename', f'attachment_{i}')
+                data = self.doc.embfile_get(i)
+                save_path = f"{dir_path}/{name}"
+                with open(save_path, 'wb') as f:
+                    f.write(data)
+                extracted += 1
+            except Exception:
+                failed += 1
+        
+        progress.setValue(emb_count)
+        QMessageBox.information(self, "Extract All Attachments",
+            f"Extracted: {extracted}\nFailed: {failed}\nSaved to: {dir_path}")
 
     def shutdown(self) -> None:
         """Disconnect signals and clean up."""
