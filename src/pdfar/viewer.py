@@ -66,6 +66,20 @@ HIT_COLOR = QColor(255, 213, 79, 120)
 HIT_CURRENT = QColor(255, 143, 0, 170)
 SEL_COLOR = QColor(63, 145, 255, 110)
 
+# Light theme colors (default)
+LIGHT_BG_COLOR = QColor(46, 46, 46)
+LIGHT_PAGE_BORDER = QColor(20, 20, 20)
+LIGHT_PLACEHOLDER_BG = QColor(238, 238, 238)
+LIGHT_PLACEHOLDER_FG = QColor(120, 120, 120)
+LIGHT_SHADOW = QColor(0, 0, 0, 90)
+
+# Dark theme colors
+DARK_BG_COLOR = QColor(30, 30, 30)
+DARK_PAGE_BORDER = QColor(50, 50, 50)
+DARK_PLACEHOLDER_BG = QColor(50, 50, 50)
+DARK_PLACEHOLDER_FG = QColor(180, 180, 180)
+DARK_SHADOW = QColor(0, 0, 0, 120)
+
 
 class PDFView(QAbstractScrollArea):
     """Continuous-scroll PDF view."""
@@ -96,6 +110,7 @@ class PDFView(QAbstractScrollArea):
         self.fit_mode = "none"          # 'none' | 'width' | 'page'
         self.current_page = 0
         self.memory_level = DEFAULT_MEMORY_LEVEL
+        self.dark_mode = False
 
         self.cache = PageCache()
         self.pool = RenderPool(doc_path, workers=min(4, max(2, (QThread.idealThreadCount() or 2))),
@@ -272,6 +287,33 @@ class PDFView(QAbstractScrollArea):
     def save_annotations(self) -> bool:
         """Save all annotations to the PDF file."""
         return self.annotation_manager.save_to_pdf()
+
+    def set_dark_mode(self, enabled: bool) -> None:
+        """Enable or disable dark mode."""
+        if self.dark_mode == enabled:
+            return
+        self.dark_mode = enabled
+        self._apply_theme()
+        self.viewport().update()
+
+    def _apply_theme(self) -> None:
+        """Apply theme colors to the widget."""
+        if self.dark_mode:
+            self.setStyleSheet(f"""
+                QAbstractScrollArea {{
+                    background-color: {DARK_BG_COLOR.name()};
+                }}
+                QScrollBar:vertical, QScrollBar:horizontal {{
+                    background: {DARK_BG_COLOR.name()};
+                    border: none;
+                }}
+                QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
+                    background: {DARK_PAGE_BORDER.name()};
+                    min-height: 20px;
+                }}
+            """)
+        else:
+            self.setStyleSheet("")
 
     # ------------------------------------------------------------- layout
     def _relayout(self) -> None:
@@ -497,9 +539,11 @@ class PDFView(QAbstractScrollArea):
     # ------------------------------------------------------------- paint
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
         painter = QPainter(self.viewport())
-        painter.fillRect(event.rect(), BG_COLOR)
+        # Use theme-aware background color
+        bg_color = DARK_BG_COLOR if self.dark_mode else BG_COLOR
+        painter.fillRect(event.rect(), bg_color)
         if not self.page_count:
-            painter.setPen(QColor(200, 200, 200))
+            painter.setPen(QColor(180, 180, 180) if self.dark_mode else QColor(200, 200, 200))
             painter.drawText(self.viewport().rect(), Qt.AlignmentFlag.AlignCenter, "Empty document")
             painter.end()
             return
@@ -517,10 +561,14 @@ class PDFView(QAbstractScrollArea):
             if not target.intersects(event.rect()):
                 continue
 
-            # drop shadow + border
-            painter.fillRect(target.adjusted(3, 3, 3, 3), SHADOW)
-            painter.fillRect(target, PLACEHOLDER_BG)
-            painter.setPen(QPen(PAGE_BORDER, 1))
+            # drop shadow + border - use theme-aware colors
+            shadow_color = DARK_SHADOW if self.dark_mode else SHADOW
+            placeholder_bg = DARK_PLACEHOLDER_BG if self.dark_mode else PLACEHOLDER_BG
+            page_border = DARK_PAGE_BORDER if self.dark_mode else PAGE_BORDER
+
+            painter.fillRect(target.adjusted(3, 3, 3, 3), shadow_color)
+            painter.fillRect(target, placeholder_bg)
+            painter.setPen(QPen(page_border, 1))
             painter.drawRect(target)
 
             tiles = self._tiles.get(i)
@@ -537,7 +585,8 @@ class PDFView(QAbstractScrollArea):
                 if img is not None and not img.isNull():
                     painter.drawImage(target, img)
                 else:
-                    painter.setPen(PLACEHOLDER_FG)
+                    placeholder_fg = DARK_PLACEHOLDER_FG if self.dark_mode else PLACEHOLDER_FG
+                    painter.setPen(placeholder_fg)
                     err = self._errors.get(i)
                     msg = f"Page {i + 1}\n" + (f"error: {err}" if err else "rendering…")
                     painter.drawText(target, Qt.AlignmentFlag.AlignCenter, msg)

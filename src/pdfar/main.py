@@ -126,6 +126,12 @@ class MainWindow(QMainWindow):
         self.act_quit.setShortcut(QKeySequence.StandardKey.Quit)
         self.act_quit.triggered.connect(self.close)
 
+        self.act_dark_mode = QAction("Dark Mode", self)
+        self.act_dark_mode.setCheckable(True)
+        self.act_dark_mode.setShortcut("Ctrl+D")
+        self.act_dark_mode.setToolTip("Toggle dark mode (Ctrl+D)")
+        self.act_dark_mode.triggered.connect(self._toggle_dark_mode)
+
     def _build_toolbar(self) -> None:
         tb = QToolBar("Main")
         tb.setMovable(False)
@@ -225,6 +231,8 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         tb.addAction(self.act_presentation)
         tb.addAction(self.act_sidebar)
+        tb.addSeparator()
+        tb.addAction(self.act_dark_mode)
 
     # --------------------------------------------------- presentation mode
     def toggle_presentation(self) -> None:
@@ -349,6 +357,7 @@ class MainWindow(QMainWindow):
         self._shortcut("Ctrl+H", self._create_highlight)
         self._shortcut("Ctrl+Shift+H", self._cycle_highlight_color)
         self._shortcut("Ctrl+S", self._save_annotations)
+        self._shortcut("Ctrl+D", self._toggle_dark_mode)
 
     def _shortcut(self, sequence: str, slot) -> None:
         """Create a shortcut whose handler is a bound method (not a lambda),
@@ -433,6 +442,210 @@ class MainWindow(QMainWindow):
                 self.status_left.setText("Annotations saved to PDF")
             else:
                 self.status_left.setText("Failed to save annotations")
+
+    def _toggle_dark_mode(self) -> None:
+        """Toggle dark mode on/off."""
+        if self.view:
+            dark_mode = not self.view.dark_mode
+            self.view.set_dark_mode(dark_mode)
+            self.act_dark_mode.setChecked(dark_mode)
+            self.settings.setValue("dark_mode", dark_mode)
+            # Apply to all open tabs
+            for i in range(self.tabs.count()):
+                tab = self.tabs.widget(i)
+                if isinstance(tab, DocumentTab):
+                    tab.view.set_dark_mode(dark_mode)
+            # Apply theme to entire application
+            self._apply_dark_mode(dark_mode)
+
+    def _apply_dark_mode(self, enabled: bool) -> None:
+        """Apply dark mode to the entire application UI."""
+        if enabled:
+            self.setStyleSheet("""
+                QMainWindow {
+                    background-color: #1e1e1e;
+                    color: #e0e0e0;
+                }
+                QToolBar {
+                    background-color: #2d2d2d;
+                    border: none;
+                    color: #e0e0e0;
+                }
+                QToolButton {
+                    background-color: transparent;
+                    color: #e0e0e0;
+                    border: none;
+                    padding: 4px 8px;
+                }
+                QToolButton:hover {
+                    background-color: #3d3d3d;
+                }
+                QToolButton:pressed {
+                    background-color: #4d4d4d;
+                }
+                QMenuBar {
+                    background-color: #2d2d2d;
+                    color: #e0e0e0;
+                }
+                QMenuBar::item:selected {
+                    background-color: #3d3d3d;
+                }
+                QMenu {
+                    background-color: #2d2d2d;
+                    color: #e0e0e0;
+                    border: 1px solid #3d3d3d;
+                }
+                QMenu::item:selected {
+                    background-color: #3d3d3d;
+                }
+                QDockWidget {
+                    background-color: #2d2d2d;
+                    color: #e0e0e0;
+                    titlebar-close-icon: url(none);
+                    titlebar-normal-icon: url(none);
+                }
+                QDockWidget::title {
+                    background-color: #2d2d2d;
+                    color: #e0e0e0;
+                    padding: 4px;
+                }
+                QTabWidget::pane {
+                    border: 1px solid #3d3d3d;
+                    background-color: #1e1e1e;
+                }
+                QTabBar::tab {
+                    background-color: #2d2d2d;
+                    color: #e0e0e0;
+                    padding: 6px 12px;
+                    border: 1px solid #3d3d3d;
+                }
+                QTabBar::tab:selected {
+                    background-color: #1e1e1e;
+                    border-bottom-color: #1e1e1e;
+                }
+                QTabBar::tab:hover {
+                    background-color: #3d3d3d;
+                }
+                QDockWidget > QWidget {
+                    background-color: #1e1e1e;
+                    color: #e0e0e0;
+                }
+                QListWidget, QTreeWidget {
+                    background-color: #1e1e1e;
+                    color: #e0e0e0;
+                    border: 1px solid #3d3d3d;
+                    outline: none;
+                }
+                QListWidget::item:hover, QTreeWidget::item:hover {
+                    background-color: #3d3d3d;
+                }
+                QListWidget::item:selected, QTreeWidget::item:selected {
+                    background-color: #0078d7;
+                    color: white;
+                }
+                QComboBox {
+                    background-color: #2d2d2d;
+                    color: #e0e0e0;
+                    border: 1px solid #3d3d3d;
+                    padding: 4px 8px;
+                }
+                QComboBox:hover {
+                    border-color: #0078d7;
+                }
+                QComboBox::drop-down {
+                    border: none;
+                }
+                QComboBox QAbstractItemView {
+                    background-color: #2d2d2d;
+                    color: #e0e0e0;
+                    selection-background-color: #0078d7;
+                    border: 1px solid #3d3d3d;
+                }
+                QSpinBox, QLineEdit {
+                    background-color: #2d2d2d;
+                    color: #e0e0e0;
+                    border: 1px solid #3d3d3d;
+                    padding: 4px 8px;
+                }
+                QSpinBox:hover, QLineEdit:hover {
+                    border-color: #0078d7;
+                }
+                QLabel {
+                    color: #e0e0e0;
+                }
+                QStatusBar {
+                    background-color: #2d2d2d;
+                    color: #e0e0e0;
+                }
+                QProgressBar {
+                    background-color: #2d2d2d;
+                    color: #e0e0e0;
+                    border: 1px solid #3d3d3d;
+                    text-align: center;
+                }
+                QProgressBar::chunk {
+                    background-color: #0078d7;
+                }
+                QScrollBar:vertical, QScrollBar:horizontal {
+                    background-color: #1e1e1e;
+                    border: none;
+                    width: 12px;
+                    height: 12px;
+                }
+                QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+                    background-color: #505050;
+                    min-height: 20px;
+                    border-radius: 6px;
+                }
+                QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
+                    background-color: #606060;
+                }
+                QScrollBar::add-line, QScrollBar::sub-line {
+                    background: none;
+                    height: 0px;
+                }
+                QScrollBar::add-page, QScrollBar::sub-page {
+                    background: none;
+                }
+                QMessageBox {
+                    background-color: #2d2d2d;
+                    color: #e0e0e0;
+                }
+                QMessageBox QLabel {
+                    color: #e0e0e0;
+                }
+                QDialog {
+                    background-color: #2d2d2d;
+                    color: #e0e0e0;
+                }
+                QCheckBox, QRadioButton {
+                    color: #e0e0e0;
+                    spacing: 8px;
+                }
+                QCheckBox::indicator, QRadioButton::indicator {
+                    width: 16px;
+                    height: 16px;
+                }
+                QTabWidget::pane {
+                    border: 1px solid #3d3d3d;
+                    background-color: #1e1e1e;
+                }
+                QTabBar::tab {
+                    background-color: #2d2d2d;
+                    color: #e0e0e0;
+                    padding: 6px 12px;
+                    border: 1px solid #3d3d3d;
+                }
+                QTabBar::tab:selected {
+                    background-color: #1e1e1e;
+                    border-bottom-color: #1e1e1e;
+                }
+                QTabBar::tab:hover {
+                    background-color: #3d3d3d;
+                }
+            """)
+        else:
+            self.setStyleSheet("")
 
     # ---------------------------------------------------------- document
     def open_dialog(self) -> None:
@@ -821,6 +1034,9 @@ class MainWindow(QMainWindow):
             lvl = "normal"
         self.memory_level = lvl
         self.mem_combo.setCurrentText(lvl.capitalize())
+        # restore dark mode
+        dark = self.settings.value("dark_mode", False, type=bool)
+        self.act_dark_mode.setChecked(dark)
         # NOTE: we deliberately do NOT restore the Qt windowState. saveState()
         # persists dock/toolbar/tabbar visibility, and a previous session saved
         # while the UI was collapsed (e.g. presentation mode) makes the window
