@@ -132,6 +132,11 @@ class MainWindow(QMainWindow):
         self.act_dark_mode.setToolTip("Toggle dark mode (Ctrl+D)")
         self.act_dark_mode.triggered.connect(self._toggle_dark_mode)
 
+        self.act_properties = QAction("Properties", self)
+        self.act_properties.setShortcut("Ctrl+I")
+        self.act_properties.setToolTip("Document Properties (Ctrl+I)")
+        self.act_properties.triggered.connect(self._show_properties)
+
     def _build_toolbar(self) -> None:
         tb = QToolBar("Main")
         tb.setMovable(False)
@@ -233,6 +238,7 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_sidebar)
         tb.addSeparator()
         tb.addAction(self.act_dark_mode)
+        tb.addAction(self.act_properties)
 
     # --------------------------------------------------- presentation mode
     def toggle_presentation(self) -> None:
@@ -358,6 +364,7 @@ class MainWindow(QMainWindow):
         self._shortcut("Ctrl+Shift+H", self._cycle_highlight_color)
         self._shortcut("Ctrl+S", self._save_annotations)
         self._shortcut("Ctrl+D", self._toggle_dark_mode)
+        self._shortcut("Ctrl+I", self._show_properties)
 
     def _shortcut(self, sequence: str, slot) -> None:
         """Create a shortcut whose handler is a bound method (not a lambda),
@@ -457,6 +464,44 @@ class MainWindow(QMainWindow):
                     tab.view.set_dark_mode(dark_mode)
             # Apply theme to entire application
             self._apply_dark_mode(dark_mode)
+
+    def _show_properties(self) -> None:
+        """Show document properties dialog."""
+        if not self.view:
+            return
+        try:
+            doc = fitz.open(self.view.doc_path)
+            meta = doc.metadata or {}
+            page_count = doc.page_count
+            page = doc[0]
+            page_size = page.rect
+            doc.close()
+        except Exception as exc:
+            QMessageBox.critical(self, "Properties", f"Could not read document:\n{exc}")
+            return
+
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QFormLayout, QLabel, QDialogButtonBox
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Document Properties")
+        dlg.setMinimumWidth(400)
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+        form.addRow("Title:", QLabel(meta.get("title") or "(none)"))
+        form.addRow("Author:", QLabel(meta.get("author") or "(none)"))
+        form.addRow("Subject:", QLabel(meta.get("subject") or "(none)"))
+        form.addRow("Keywords:", QLabel(meta.get("keywords") or "(none)"))
+        form.addRow("Creator:", QLabel(meta.get("creator") or "(none)"))
+        form.addRow("Producer:", QLabel(meta.get("producer") or "(none)"))
+        form.addRow("Creation Date:", QLabel(meta.get("creationDate") or "(none)"))
+        form.addRow("Modification Date:", QLabel(meta.get("modDate") or "(none)"))
+        form.addRow("Pages:", QLabel(str(page_count)))
+        form.addRow("Page Size:", QLabel(f"{page_size.width:.1f} × {page_size.height:.1f} pts"))
+        form.addRow("File:", QLabel(self.view.doc_path))
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        buttons.accepted.connect(dlg.accept)
+        layout.addWidget(buttons)
+        dlg.exec()
 
     def _apply_dark_mode(self, enabled: bool) -> None:
         """Apply dark mode to the entire application UI."""
@@ -642,6 +687,55 @@ class MainWindow(QMainWindow):
                 }
                 QTabBar::tab:hover {
                     background-color: #3d3d3d;
+                }
+                /* Toolbar-specific styles for dark mode */
+                QToolBar::separator {
+                    background-color: #3d3d3d;
+                    width: 1px;
+                    height: 20px;
+                    margin: 4px 4px;
+                }
+                QToolBar::handle {
+                    background-color: #3d3d3d;
+                }
+                /* Overflow button (the >> button when toolbar overflows) */
+                QToolBar::overflow-button {
+                    background-color: #2d2d2d;
+                    color: #ffffff;
+                    border: 1px solid #3d3d3d;
+                    padding: 4px 8px;
+                    border-radius: 4px;
+                }
+                QToolBar::overflow-button:hover {
+                    background-color: #3d3d3d;
+                    color: #ffffff;
+                }
+                QToolBar::overflow-button:pressed {
+                    background-color: #4d4d4d;
+                    color: #ffffff;
+                }
+                /* Style toolbar buttons that have menus (used for overflow) */
+                QToolBar QToolButton:has-menu {
+                    color: #e0e0e0;
+                    border: none;
+                    padding: 4px 8px;
+                }
+                QToolBar QToolButton:has-menu:hover {
+                    background-color: #3d3d3d;
+                    color: #ffffff;
+                }
+                QToolBar QToolButton:has-menu:pressed {
+                    background-color: #4d4d4d;
+                    color: #ffffff;
+                }
+                /* Ensure toolbar buttons don't have unwanted borders */
+                QToolBar QToolButton {
+                    border: none;
+                    margin: 2px 2px;
+                }
+                /* Ensure the overflow button text is visible */
+                QToolBar::overflow-button::menu-indicator {
+                    image: none;
                 }
             """)
         else:
