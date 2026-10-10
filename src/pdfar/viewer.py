@@ -314,6 +314,9 @@ class PDFView(QAbstractScrollArea):
             """)
         else:
             self.setStyleSheet("")
+        # Ensure scrollbars don't inherit main window's stylesheet
+        self.verticalScrollBar().setStyleSheet("")
+        self.horizontalScrollBar().setStyleSheet("")
 
     # ------------------------------------------------------------- layout
     def _relayout(self) -> None:
