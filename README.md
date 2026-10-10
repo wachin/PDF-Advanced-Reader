@@ -89,6 +89,8 @@ pip3 install --user pymupdf             # PyMuPDF
 python3 run.py                      # open the file dialog
 ```
 
+And in the next screenshot, the program shows three PDFs open in three tabs; in one of them, the word "LibreOffice" is being searched for—a word that appears on many pages of that PDF.
+
 ![](images/01-PDFAR.png)
 
 or alternatively, for users who like using the terminal for many things:
