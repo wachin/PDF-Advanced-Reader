@@ -73,39 +73,35 @@ Fixes in 2.0 (there were ten other bugs behind it):
 
 ---
 
-## Quick start
+# Quick start
 
-### Dependencies (Debian/Ubuntu)
+## Dependencies (Debian/Ubuntu)
 
-**Option 1: System packages (recommended for Debian/Ubuntu)**
+### **Option 1: System packages (recommended for Debian/Ubuntu)**
+
 ```bash
 sudo apt update
 sudo apt install python3-pyqt6 python3-pymupdf
 ```
 
-**Option 2: User install via pip (no virtualenv needed)**
+### **Option 2: User install via pip (no virtualenv "venv" needed)**
+
 ```bash
 sudo apt update
 sudo apt install python3-pyqt6          # or: pip3 install --user PyQt6
 pip3 install --user pymupdf             # PyMuPDF
 ```
 
-**Option 3: Virtual environment (for development / isolated environments)**
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install PyQt6 pymupdf
-```
+> **Note:** `pip install --user` installs packages to `~/.local/lib/python3.x/site-packages/`, available globally for your user — **no virtualenv activation needed**. 
 
-> **Note:** `pip install --user` installs packages to `~/.local/lib/python3.x/site-packages/`, available globally for your user — **no virtualenv activation needed**. Use a virtualenv only if you need isolated environments for development.
-
-> **Debian packaging note:** The program works with both the system package `python3-pymupdf` (Debian/Ubuntu repos) and the PyPI package `pymupdf` (via pip). The code uses `import fitz` which works with both the system package `python3-pymupdf` and the PyPI package `pymupdf` since both provide the `fitz` module.
+#### Run without venv
 
 ```bash
-python3 run.py                      # open the file dialog
+python3 run.py          
 ```
 
-And in the next screenshot, the program shows three PDFs open in three tabs; in one of them, the word "LibreOffice" is being searched for—a word that appears on many pages of that PDF:
+The next screenshot, the program shows three PDFs open in three tabs; in one of them, the word "LibreOffice" is being searched for—a word that appears on many pages of that PDF:
+
 
 ![](images/01-PDFAR.png)
 
@@ -114,6 +110,26 @@ or alternatively, for users who like using the terminal for many things:
 ```bash
 python3 run.py /path/to/file.pdf    # open a document directly
 ```
+
+**Option 3: Virtual environment (OPTIONAL if you need for development / isolated environments)**
+
+Use a virtualenv only if you need isolated environments for development:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install PyQt6 pymupdf
+```
+
+####  Run in venv
+
+```bash
+python3 run.py          
+```
+
+### Debian packaging note
+
+The program works with both the system package `python3-pymupdf` (Debian/Ubuntu repos) and the PyPI package `pymupdf` (via pip). The code uses `import fitz` which works with both the system package `python3-pymupdf` and the PyPI package `pymupdf` since both provide the `fitz` module.
 
 ### Install as a package (optional)
 

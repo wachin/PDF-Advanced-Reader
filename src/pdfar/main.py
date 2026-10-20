@@ -11,7 +11,7 @@ try:
 except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 from PyQt6.QtCore import QSettings, QThread, Qt
-from PyQt6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QKeySequence, QShortcut
+from PyQt6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QKeySequence, QShortcut, QIcon
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
@@ -56,6 +56,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME} — Advanced PDF Reader")
         self.resize(1280, 860)
         self.setAcceptDrops(True)
+
+        # Set window icon
+        self.setWindowIcon(QIcon("assets/icons/icon.svg"))
 
         self._build_actions()
         self._build_menubar()

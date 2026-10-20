@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- PDFAR Icon -->
+<svg width="64" height="64" viewBox="0 0 64 64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background ring -->
+  <path d="M32 2a24 24 0 1 1 0 48A 24 24 0 0 1 32 2z"/>
+  <!-- Page background -->
+  <rect x="8" y="8" width="48" height="48" fill="#1e1e1e"/>
+  <!-- Page border -->
+  <rect x="10" y="10" width="40" height="40" fill="none" stroke="#666" stroke-width="1"/>
+  <!-- Page content area -->
+  <rect x="12" y="12" width="36" height="36" fill="#1a1a1e">
+  </rect>
+  <!-- Highlighted area (simulating highlighted text) -->
+  <rect x="15" y="15" width="20" height="12" fill="#ff6b6b" opacity="0.3"/>
+  <!-- Text placeholder -->
+  <rect x="15" y="22" width="18" height="8" fill="none" style="opacity:0.3"/>
+  <!-- Ring/glow effect -->
+  <circle cx="32" cy="32" r="28" fill="none" stroke="#667ee7" stroke-width="2"/>
+</svg>
