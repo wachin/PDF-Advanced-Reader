@@ -15,14 +15,19 @@ from PyQt6.QtCore import QObject, pyqtSignal
 Rect = Tuple[float, float, float, float]
 
 MAX_HITS = 5000
+MAX_REGEX_HITS = 10000
+REGEX_TIMEOUT_MS = 5000
 
 
 @dataclass
 class SearchParams:
     query: str
-    mode: str = "AND"          # 'AND' | 'OR' | 'PHRASE'
+    mode: str = "AND"          # 'AND' | 'OR' | 'PHRASE' | 'REGEX'
     case_sensitive: bool = False
     whole_words: bool = False
+    # Regex-specific options
+    regex_timeout_ms: int = 5000
+    max_regex_hits: int = 10000
 
 
 @dataclass
@@ -39,7 +44,18 @@ def normalize_space(s: str) -> str:
 def _terms_for(params: SearchParams) -> List[str]:
     if params.mode == "PHRASE":
         return [params.query]
+    if params.mode == "REGEX":
+        return [params.query]  # Return the full query as a single regex pattern
     return [t for t in re.split(r"\s+", params.query) if t]
+
+
+def _compile_regex(params: SearchParams) -> re.Pattern:
+    """Compile regex pattern with appropriate flags."""
+    flags = 0 if params.case_sensitive else re.IGNORECASE
+    try:
+        return re.compile(params.query, flags)
+    except re.error as e:
+        raise ValueError(f"Invalid regex: {e}")
 
 
 def _word_pattern(term: str) -> re.Pattern:
@@ -51,6 +67,14 @@ def page_matches(text: str, params: SearchParams, terms: List[str]) -> bool:
     """Return True when *text* satisfies the search parameters."""
     if not terms:
         return False
+    
+    if params.mode == "REGEX":
+        try:
+            pattern = _compile_regex(params)
+            return pattern.search(text) is not None
+        except ValueError:
+            return False
+    
     cmp_text = text if params.case_sensitive else text.lower()
     t = terms if params.case_sensitive else [x.lower() for x in terms]
 
@@ -105,25 +129,49 @@ class SearchWorker(QObject):
 
         try:
             total = doc.page_count
+            hit_count = 0
+            max_hits = params.max_regex_hits if params.mode == "REGEX" else MAX_HITS
+            
             for i in range(total):
                 if i % 5 == 0 or i == total - 1:
                     self.progress.emit(i + 1, total)
+                
+                if hit_count >= max_hits:
+                    break
+                    
                 page = doc.load_page(i)
                 text = page.get_text("text") or ""
                 if not page_matches(text, params, terms):
                     continue
 
                 rects: List[Rect] = []
-                for term in terms:
+                if params.mode == "REGEX":
+                    # For regex, find all matches on the page
                     try:
-                        found = page.search_for(term, match_case=params.case_sensitive) or []
-                    except TypeError:  # older PyMuPDF
-                        found = page.search_for(term) or []
-                    for r in found:
-                        rects.append((r.x0, r.y0, r.x1, r.y1))
+                        pattern = _compile_regex(params)
+                        text = page.get_text("text") or ""
+                        for match in pattern.finditer(text):
+                            # Get the matched text and find its location on the page
+                            match_text = match.group()
+                            found = page.search_for(match_text, match_case=params.case_sensitive) or []
+                            for r in found:
+                                rects.append((r.x0, r.y0, r.x1, r.y1))
+                    except Exception:
+                        pass  # Skip problematic pages
+                else:
+                    for term in terms:
+                        try:
+                            found = page.search_for(term, match_case=params.case_sensitive) or []
+                        except TypeError:  # older PyMuPDF
+                            found = page.search_for(term) or []
+                        for r in found:
+                            rects.append((r.x0, r.y0, r.x1, r.y1))
+
                 hits.append(SearchHit(page=i, snippet=make_snippet(text, terms, params.case_sensitive),
                                       rects=rects))
-                if len(hits) >= MAX_HITS:
+                hit_count += 1
+                
+                if hit_count >= max_hits:
                     break
         finally:
             doc.close()

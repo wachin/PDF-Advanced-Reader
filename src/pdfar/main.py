@@ -461,7 +461,8 @@ class MainWindow(QMainWindow):
         v.addLayout(row)
 
         self.mode = QComboBox()
-        self.mode.addItems(["AND", "OR", "PHRASE"])
+        self.mode.addItems(["AND", "OR", "PHRASE", "REGEX"])
+        self.mode.setToolTip("AND: all terms must match; OR: any term matches; PHRASE: exact phrase; REGEX: regular expression")
         v.addWidget(self.mode)
 
         opts = QHBoxLayout()
@@ -1294,9 +1295,15 @@ class MainWindow(QMainWindow):
         query = normalize_space(self.query_edit.text())
         if not query:
             return
-        params = SearchParams(query=query, mode=self.mode.currentText(),
-                              case_sensitive=self.cb_case.isChecked(),
-                              whole_words=self.cb_whole.isChecked())
+        mode = self.mode.currentText()
+        params = SearchParams(
+            query=query,
+            mode=mode,
+            case_sensitive=self.cb_case.isChecked(),
+            whole_words=self.cb_whole.isChecked(),
+            regex_timeout_ms=5000,
+            max_regex_hits=10000,
+        )
 
         self.results.clear()
         self.btn_search.setEnabled(False)

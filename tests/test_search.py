@@ -1,6 +1,7 @@
 """Tests for search matching and the background search worker."""
 
 import os
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -9,6 +10,7 @@ import pytest
 from pdfar.search import (
     SearchHit, SearchParams, SearchWorker, make_snippet, normalize_space, page_matches,
 )
+from PyQt6.QtWidgets import QApplication
 
 
 @pytest.mark.parametrize("text,params,expected", [
@@ -83,3 +85,51 @@ def test_worker_rects_are_page_bounded(sample_pdf):
     for x0, y0, x1, y1 in hits[0].rects:
         assert 0 <= x0 <= x1 <= size.width + 1
         assert 0 <= y0 <= y1 <= size.height + 1
+
+
+def test_regex_matching():
+    """Test regex matching functionality."""
+    text = "The quick brown fox jumps over the lazy dog"
+    # Test basic regex matching
+    assert page_matches(text, SearchParams(r"quick.*fox", mode="REGEX"), ["quick.*fox"]) is True
+    # Case insensitive by default
+    assert page_matches(text, SearchParams(r"QUICK.*FOX", mode="REGEX"), ["QUICK.*FOX"]) is True
+    # Case sensitive
+    assert page_matches(text, SearchParams("quick.*fox", mode="REGEX", case_sensitive=True), ["quick.*fox"]) is True
+    assert page_matches(text, SearchParams("QUICK.*FOX", mode="REGEX", case_sensitive=True), ["QUICK.*FOX"]) is False
+    # No match
+    assert page_matches(text, SearchParams(r"cat.*dog", mode="REGEX"), ["cat.*dog"]) is False
+
+
+def test_regex_invalid_pattern():
+    """Test that invalid regex patterns are handled gracefully."""
+    text = "test"
+    # Invalid regex should not crash
+    assert page_matches(text, SearchParams(r"[invalid", mode="REGEX"), ["[invalid"]) is False
+
+
+def test_regex_worker(sample_pdf):
+    """Test regex search worker."""
+    hits = []
+    params = SearchParams(r"alpha.*gamma", mode="REGEX", case_sensitive=False)
+    worker = SearchWorker(sample_pdf, params)
+    
+    def on_done(hits_list):
+        hits.extend(hits_list)
+    
+    worker.done.connect(on_done)
+    worker.run()
+    
+    # Need to process events to allow worker to complete
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    for _ in range(50):  # Wait up to 5 seconds
+        QApplication.instance().processEvents()
+        time.sleep(0.1)
+        if len(hits) > 0:
+            break
+    
+    # The sample PDF has "alpha beta gamma" on pages 1, 2 (0-indexed pages 1, 2)
+    # Page 0 has "Hello PDFAR world" instead
+    assert [h.page for h in hits] == [1, 2]
+    assert all(isinstance(h, SearchHit) for h in hits)
