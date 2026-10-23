@@ -146,6 +146,12 @@ class MainWindow(QMainWindow):
         self.act_dark_mode.setToolTip("Toggle dark mode (Ctrl+D)")
         self.act_dark_mode.triggered.connect(self._toggle_dark_mode)
 
+        self.act_reflow = QAction("Reflow", self)
+        self.act_reflow.setCheckable(True)
+        self.act_reflow.setShortcut("Ctrl+R")
+        self.act_reflow.setToolTip("Toggle reflow mode (Ctrl+R)")
+        self.act_reflow.triggered.connect(self._toggle_reflow)
+
         # Navigation actions
         self.act_prev = QAction("Previous Page", self)
         self.act_prev.setShortcut("PgUp")
@@ -220,7 +226,6 @@ class MainWindow(QMainWindow):
         self.act_next_highlight_color.triggered.connect(self._cycle_highlight_color)
 
         self.act_save_annotations = QAction("Save Annotations", self)
-        self.act_save_annotations.setShortcut("Ctrl+S")
         self.act_save_annotations.setToolTip("Save annotations to PDF (Ctrl+S)")
         self.act_save_annotations.triggered.connect(self._save_annotations)
 
@@ -242,41 +247,9 @@ class MainWindow(QMainWindow):
         self.menu_recent = QMenu("Recent files", self)
         self.act_recent.setMenu(self.menu_recent)
 
-        self.act_sidebar = QAction("Sidebar", self)
-        self.act_sidebar.setCheckable(True)
-        self.act_sidebar.setChecked(True)
-        self.act_sidebar.setShortcut("F9")
-        self.act_sidebar.setToolTip("Toggle sidebar (F9)")
-        self.act_sidebar.triggered.connect(self._toggle_sidebar)
-
-        self.act_presentation = QAction("Presentation", self)
-        self.act_presentation.setShortcut("F11")
-        self.act_presentation.setToolTip("Enter presentation mode (F11)")
-        self.act_presentation.triggered.connect(self.toggle_presentation)
-
-        self.act_dark_mode = QAction("Dark Mode", self)
-        self.act_dark_mode.setCheckable(True)
-        self.act_dark_mode.setShortcut("Ctrl+D")
-        self.act_dark_mode.setToolTip("Toggle dark mode (Ctrl+D)")
-        self.act_dark_mode.triggered.connect(self._toggle_dark_mode)
-
-        self.act_properties = QAction("Properties", self)
-        self.act_properties.setShortcut("Ctrl+I")
-        self.act_properties.setToolTip("Document Properties (Ctrl+I)")
-        self.act_properties.triggered.connect(self._show_properties)
-
-        self.act_attachments = QAction("Attachments", self)
-        self.act_attachments.setShortcut("Ctrl+Shift+A")
-        self.act_attachments.setToolTip("Show Attachments (Ctrl+Shift+A)")
-        self.act_attachments.triggered.connect(self._show_attachments)
-
         self.act_find = QAction("Find", self)
         self.act_find.setShortcut(QKeySequence.StandardKey.Find)
         self.act_find.triggered.connect(self._focus_search)
-
-        self.act_open = QAction("&Open…", self)
-        self.act_open.setShortcut(QKeySequence.StandardKey.Open)
-        self.act_open.triggered.connect(self.open_dialog)
 
     def _build_menubar(self) -> None:
         """Create the menu bar with File, Edit, View, Tools, Help menus."""
@@ -319,6 +292,7 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         view_menu.addAction(self.act_sidebar)
         view_menu.addAction(self.act_dark_mode)
+        view_menu.addAction(self.act_reflow)
         view_menu.addAction(self.act_presentation)
 
         # Tools menu
@@ -403,6 +377,10 @@ class MainWindow(QMainWindow):
         self.act_rotr.triggered.connect(self._rot_right)
         tb.addAction(self.act_rotl)
         tb.addAction(self.act_rotr)
+        tb.addSeparator()
+
+        # Reflow mode
+        tb.addAction(self.act_reflow)
         tb.addSeparator()
 
     # --------------------------------------------------- presentation mode
@@ -513,25 +491,16 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(self.status_right)
 
     def _build_shortcuts(self) -> None:
+        # Only keys that are not already owned by a QAction.  Registering a
+        # second shortcut for the same sequence makes Qt report an ambiguous
+        # shortcut and the key silently stops working.
         self._shortcut("F3", self._hit_next)
         self._shortcut("Shift+F3", self._hit_prev)
         self._shortcut("Ctrl+Shift+C", self._copy)
-        self._shortcut("Ctrl+Left", self._rot_left)
-        self._shortcut("Ctrl+Right", self._rot_right)
         self._shortcut("Ctrl+L", self._focus_search)
-        self._shortcut("Ctrl+0", self._fit_page)
-        self._shortcut("Ctrl+1", self._zoom_100)
-        self._shortcut("Ctrl+2", self._fit_width)
         self._shortcut("Ctrl+W", self._close_active_tab)
         self._shortcut("Ctrl+Tab", self._next_tab)
         self._shortcut("Ctrl+Shift+Tab", self._prev_tab)
-        self._shortcut("Ctrl+B", self._add_bookmark)
-        self._shortcut("Ctrl+H", self._create_highlight)
-        self._shortcut("Ctrl+Shift+H", self._cycle_highlight_color)
-        self._shortcut("Ctrl+S", self._save_annotations)
-        self._shortcut("Ctrl+D", self._toggle_dark_mode)
-        self._shortcut("Ctrl+I", self._show_properties)
-        self._shortcut("Ctrl+Shift+A", self._show_attachments)
 
     def _shortcut(self, sequence: str, slot) -> None:
         """Create a shortcut whose handler is a bound method (not a lambda),
@@ -659,48 +628,6 @@ class MainWindow(QMainWindow):
         if self.view:
             self.view.goto_page(self.view.page_count - 1)
 
-    def _save_document(self) -> None:
-        """Save the document (annotations, bookmarks, etc.)"""
-        if self.view:
-            success = self.view.save_annotations()
-            if success:
-                self.status_left.setText("Document saved")
-            else:
-                self.status_left.setText("Failed to save document")
-
-    def _save_document_as(self) -> None:
-        """Save the document to a new location."""
-        if not self.view:
-            return
-        path, _ = QFileDialog.getSaveFileName(self, "Save Document As", "",
-                                              "PDF Files (*.pdf)")
-        if path:
-            try:
-                self.view.doc.save(path)
-                self.status_left.setText(f"Document saved to {path}")
-            except Exception as exc:
-                QMessageBox.critical(self, "Save As", f"Could not save document:\n{exc}")
-
-    def _print_document(self) -> None:
-        """Print the document."""
-        if self.view:
-            QMessageBox.information(self, "Print", "Print functionality not yet implemented")
-
-    def _select_all(self) -> None:
-        """Select all text in the current page."""
-        if self.view:
-            self.view.select_all()
-
-    def _goto_first_page(self) -> None:
-        """Go to the first page."""
-        if self.view:
-            self.view.goto_page(0)
-
-    def _goto_last_page(self) -> None:
-        """Go to the last page."""
-        if self.view:
-            self.view.goto_page(self.view.page_count - 1)
-
     def _show_about(self) -> None:
         """Show the about dialog."""
         QMessageBox.about(self, "About PDFAR",
@@ -723,6 +650,42 @@ class MainWindow(QMainWindow):
                     tab.view.set_dark_mode(dark_mode)
             # Apply theme to entire application
             self._apply_dark_mode(dark_mode)
+
+    def _toggle_reflow(self) -> None:
+        """Toggle reflow mode for the active document.
+
+        Reflow is a per-document reading mode (a scanned PDF may not support
+        it), unlike dark mode which is a global preference.
+        """
+        if self.view:
+            reflow = not self.view.reflow_mode
+            self.view.set_reflow_mode(reflow)
+            self.act_reflow.setChecked(reflow)
+            if reflow:
+                self.status_left.setText("Preparing reflow…")
+            else:
+                self.status_left.setText("Reflow off")
+        else:
+            self.act_reflow.setChecked(False)
+
+    def _on_reflow_progress(self, done: int, total: int) -> None:
+        # Only the active document's progress belongs in the status bar.
+        if self.sender() is not self.view or not total:
+            return
+        self.status_left.setText(
+            f"Preparing reflow… {done}/{total} ({int(done * 100 / total)}%)")
+
+    def _on_reflow_ready(self, has_text: bool, empty_pages: int) -> None:
+        if self.sender() is not self.view:
+            return
+        if not has_text:
+            self.status_left.setText(
+                "Reflow unavailable: no extractable text (scanned PDF?)")
+        elif empty_pages:
+            self.status_left.setText(
+                f"Reflow ready — {empty_pages} page(s) without extractable text")
+        else:
+            self.status_left.setText("Reflow ready")
 
     def _show_properties(self) -> None:
         """Show document properties dialog with multiple tabs."""
@@ -1250,6 +1213,8 @@ class MainWindow(QMainWindow):
         tab.view.zoom_changed.connect(self._on_zoom_changed)
         tab.view.hit_changed.connect(self._on_hit_changed)
         tab.view.selection_changed.connect(self._update_status)
+        tab.view.reflow_progress.connect(self._on_reflow_progress)
+        tab.view.reflow_ready.connect(self._on_reflow_ready)
         tab.sidebar.goto_page_requested.connect(self._goto)
         # Connect annotation manager to sidebar
         tab.sidebar.set_annotation_manager(tab.view.annotation_manager)
@@ -1261,6 +1226,8 @@ class MainWindow(QMainWindow):
             tab.view.zoom_changed.disconnect(self._on_zoom_changed)
             tab.view.hit_changed.disconnect(self._on_hit_changed)
             tab.view.selection_changed.disconnect(self._update_status)
+            tab.view.reflow_progress.disconnect(self._on_reflow_progress)
+            tab.view.reflow_ready.disconnect(self._on_reflow_ready)
             tab.sidebar.goto_page_requested.disconnect(self._goto)
         except TypeError:
             pass
@@ -1291,6 +1258,8 @@ class MainWindow(QMainWindow):
         self.page_spin.blockSignals(False)
         self.page_label.setText(f"/ {view.page_count}")
         self.zoom_label.setText(f"{int(round(view.zoom * 100))}%")
+        self.act_reflow.setChecked(view.reflow_mode)
+        self.act_dark_mode.setChecked(view.dark_mode)
         # search results belong to the previous document
         self.results.clear()
         self.hit_label.setText("")
@@ -1345,6 +1314,7 @@ class MainWindow(QMainWindow):
         self.page_spin.setValue(1)
         self.page_label.setText("/ 0")
         self.zoom_label.setText("100%")
+        self.act_reflow.setChecked(False)
         self.results.clear()
         self.hit_label.setText("")
         self.status_left.setText("No document")

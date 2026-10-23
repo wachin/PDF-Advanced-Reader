@@ -16,21 +16,23 @@ back through a Qt signal and are stored in a byte-budget LRU cache.
 
 from __future__ import annotations
 
+import bisect
 from typing import Dict, List, Optional, Tuple
 
 try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
 except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
-from PyQt6.QtCore import QPoint, QRect, Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, QRect, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import (
-    QColor, QImage, QKeyEvent, QMouseEvent, QPaintEvent, QPainter,
+    QColor, QFont, QFontMetrics, QImage, QKeyEvent, QMouseEvent, QPaintEvent, QPainter,
     QPen, QWheelEvent, QGuiApplication, QResizeEvent,
 )
 from PyQt6.QtWidgets import QAbstractScrollArea, QFrame, QScroller
 
 from .cache import PageCache
 from .geometry import display_size, map_rect, normalize_rotation
+from .reflow import PageLayout, REFLOW_PAGE_GAP, ReflowWorker, reflow_text_width
 from .render import RenderPool, RenderResult
 from .search import SearchHit
 from .tiles import Tile, TileGrid, TILE_SIZE
@@ -80,6 +82,15 @@ DARK_PLACEHOLDER_BG = QColor(50, 50, 50)
 DARK_PLACEHOLDER_FG = QColor(180, 180, 180)
 DARK_SHADOW = QColor(0, 0, 0, 120)
 
+# Reflow palette: a paper-like surface is easier to read than the dark page
+# backdrop used for rendered pages.
+LIGHT_REFLOW_BG = QColor(250, 249, 246)
+LIGHT_REFLOW_FG = QColor(32, 32, 32)
+LIGHT_REFLOW_MUTED = QColor(128, 128, 128)
+DARK_REFLOW_BG = QColor(28, 28, 30)
+DARK_REFLOW_FG = QColor(225, 225, 225)
+DARK_REFLOW_MUTED = QColor(140, 140, 140)
+
 
 class PDFView(QAbstractScrollArea):
     """Continuous-scroll PDF view."""
@@ -89,10 +100,13 @@ class PDFView(QAbstractScrollArea):
     selection_changed = pyqtSignal()
     hit_changed = pyqtSignal(int, int)      # (current_hit, total_hits), 1-based
     doc_error = pyqtSignal(str)
+    reflow_progress = pyqtSignal(int, int)  # (pages laid out, page count)
+    reflow_ready = pyqtSignal(bool, int)    # (has_text, pages without text)
 
     def __init__(self, doc_path: str, parent=None, password: str = ""):
         super().__init__(parent)
         self.doc_path = doc_path
+        self._password = password
         self.doc = fitz.open(doc_path)
         if self.doc.needs_pass:
             if not password or not self.doc.authenticate(password):
@@ -111,6 +125,28 @@ class PDFView(QAbstractScrollArea):
         self.current_page = 0
         self.memory_level = DEFAULT_MEMORY_LEVEL
         self.dark_mode = False
+
+        # Reflow (P1-5): page layouts are prepared by a background worker and
+        # cached here; painting only walks the lines that intersect the view.
+        self.reflow_mode = False
+        self._reflow_worker: Optional[ReflowWorker] = None
+        self._reflow_pages: Dict[int, PageLayout] = {}
+        self._reflow_tops: List[float] = []
+        self._reflow_width = 0
+        self._reflow_done = 0
+        self._reflow_total = 0
+        self._reflow_has_text = False
+        self._reflow_empty_pages = 0
+        self._reflow_pending_page: Optional[int] = None
+        self._reflow_pending_center = False
+        self._reflow_error = ""
+        self._reflow_fonts: Dict[Tuple[str, int, bool, bool], QFont] = {}
+        self._reflow_metrics: Dict[Tuple[str, int, bool, bool], QFontMetrics] = {}
+        self._reflow_timer = QTimer(self)
+        self._reflow_timer.setSingleShot(True)
+        self._reflow_timer.setInterval(250)
+        self._reflow_timer.timeout.connect(self._maybe_restart_reflow)
+        self._vbar_policy_before_reflow = self.verticalScrollBarPolicy()
 
         self.cache = PageCache()
         self.pool = RenderPool(doc_path, workers=min(4, max(2, (QThread.idealThreadCount() or 2))),
@@ -178,6 +214,8 @@ class PDFView(QAbstractScrollArea):
             return ""
 
     def shutdown(self) -> None:
+        self._reflow_timer.stop()
+        self._stop_reflow_worker()
         self.pool.shutdown(wait=True)
         try:
             self.doc.close()
@@ -318,8 +356,231 @@ class PDFView(QAbstractScrollArea):
         self.verticalScrollBar().setStyleSheet("")
         self.horizontalScrollBar().setStyleSheet("")
 
+    # ------------------------------------------------------------ reflow mode
+    def set_reflow_mode(self, enabled: bool) -> None:
+        """Enter or leave the single-column text view (P1-5).
+
+        Extraction and layout run on a :class:`ReflowWorker`; the GUI stays
+        responsive and shows a progress message while pages are prepared.
+        """
+        enabled = bool(enabled)
+        if self.reflow_mode == enabled:
+            return
+        self.reflow_mode = enabled
+        if enabled:
+            self.clear_selection()
+            self._enter_reflow()
+        else:
+            self._leave_reflow()
+        self.viewport().update()
+
+    def is_reflow_mode(self) -> bool:
+        return self.reflow_mode
+
+    def _enter_reflow(self) -> None:
+        self._stop_reflow_worker()
+        self._reflow_pages.clear()
+        self._reflow_done = 0
+        self._reflow_total = self.page_count
+        self._reflow_has_text = False
+        self._reflow_empty_pages = 0
+        self._reflow_error = ""
+        self._reflow_pending_page = None
+        self._reflow_pending_center = False
+
+        # Reserve the scrollbar so the column width does not change (and the
+        # layout does not need rebuilding) once the height becomes known.
+        self._vbar_policy_before_reflow = self.verticalScrollBarPolicy()
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self._reflow_width = self._reflow_available_width()
+
+        self._recompute_reflow_layout()
+        if self.page_count:
+            self.goto_page(self.current_page, center=False)
+
+        if self.page_count:
+            worker = ReflowWorker(self.doc_path, self._reflow_width,
+                                  password=self._password, parent=None)
+            worker.page_ready.connect(self._on_reflow_page)
+            worker.progress.connect(self._on_reflow_progress)
+            worker.failed.connect(self._on_reflow_failed)
+            worker.finished.connect(self._on_reflow_finished)
+            self._reflow_worker = worker
+            # The initial scroll position was computed from estimated heights.
+            # Re-anchor once the current page's real layout arrives.
+            self._reflow_pending_page = self.current_page
+            self._reflow_pending_center = False
+            worker.start()
+        else:
+            self.reflow_progress.emit(0, 0)
+            self.reflow_ready.emit(False, 0)
+
+    def _leave_reflow(self) -> None:
+        self._reflow_timer.stop()
+        self._stop_reflow_worker()
+        self._reflow_pages.clear()
+        self._reflow_tops = []
+        self._reflow_done = 0
+        self._reflow_total = 0
+        self._reflow_pending_page = None
+        self._reflow_pending_center = False
+        self.setVerticalScrollBarPolicy(self._vbar_policy_before_reflow)
+        page = self.current_page
+        self._relayout()
+        if self.page_count:
+            self.goto_page(page, center=False)
+        self._request_visible()
+
+    def _stop_reflow_worker(self) -> None:
+        worker = self._reflow_worker
+        self._reflow_worker = None
+        if worker is None:
+            return
+        worker.requestInterruption()
+        # Deterministic shutdown: never destroy a running QThread.
+        worker.wait()
+        try:
+            worker.page_ready.disconnect()
+            worker.progress.disconnect()
+            worker.failed.disconnect()
+            worker.finished.disconnect()
+        except TypeError:
+            pass
+        worker.deleteLater()
+
+    def _reflow_available_width(self) -> int:
+        vw = self.viewport().width()
+        if vw <= 1:
+            vw = max(1, self.width())
+        vbar = self.verticalScrollBar()
+        if (self.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+                and not vbar.isVisible()):
+            # The policy was just changed; the viewport has not grown/shrunk
+            # to account for the bar yet.
+            vw -= vbar.sizeHint().width()
+        return reflow_text_width(vw)
+
+    def _reflow_font(self, family: str, size: int, bold: bool, italic: bool) -> QFont:
+        key = (family, size, bold, italic)
+        font = self._reflow_fonts.get(key)
+        if font is None:
+            font = QFont(family)
+            font.setPixelSize(size)
+            font.setBold(bold)
+            font.setItalic(italic)
+            self._reflow_fonts[key] = font
+        return font
+
+    def _reflow_metrics_for(self, family: str, size: int, bold: bool,
+                            italic: bool) -> QFontMetrics:
+        key = (family, size, bold, italic)
+        metrics = self._reflow_metrics.get(key)
+        if metrics is None:
+            metrics = QFontMetrics(self._reflow_font(family, size, bold, italic))
+            self._reflow_metrics[key] = metrics
+        return metrics
+
+    # -- worker slots ------------------------------------------------------
+    def _on_reflow_page(self, layout: PageLayout) -> None:
+        if not isinstance(layout, PageLayout):
+            return
+        self._reflow_pages[layout.page] = layout
+        self._reflow_done += 1
+        if layout.has_text:
+            self._reflow_has_text = True
+        else:
+            self._reflow_empty_pages += 1
+        self._recompute_reflow_layout()
+
+        pending = self._reflow_pending_page
+        if pending is not None and pending in self._reflow_pages:
+            self._reflow_pending_page = None
+            self._scroll_to_reflow_page(pending, center=self._reflow_pending_center)
+            self._reflow_pending_center = False
+        self.viewport().update()
+
+    def _on_reflow_progress(self, done: int, total: int) -> None:
+        self.reflow_progress.emit(done, total)
+
+    def _on_reflow_failed(self, message: str) -> None:
+        self._reflow_error = message
+        self.reflow_ready.emit(False, self.page_count)
+        self.viewport().update()
+
+    def _on_reflow_finished(self) -> None:
+        if self._reflow_worker is not None:
+            worker = self._reflow_worker
+            self._reflow_worker = None
+            worker.deleteLater()
+        self._recompute_reflow_layout()
+        self.reflow_progress.emit(self._reflow_done, self.page_count)
+        self.reflow_ready.emit(self._reflow_has_text, self._reflow_empty_pages)
+        self.viewport().update()
+
+    # -- layout ------------------------------------------------------------
+    def _reflow_estimate_height(self, page: int) -> float:
+        """Height guess for a page the worker has not reached yet.
+
+        Keeps the scrollbar monotonic and lets ``goto_page`` work while the
+        document is still being prepared; the real height replaces it as soon
+        as the page arrives.
+        """
+        if not self.page_count:
+            return 0.0
+        w, h = self.page_sizes[page]
+        # A reflowed column is roughly as tall as the original page's text,
+        # scaled by the width ratio.
+        text_w = max(1, self._reflow_width)
+        ratio = (w / text_w) if text_w else 1.0
+        return max(200.0, float(h) * max(0.5, min(ratio, 2.0)))
+
+    def _recompute_reflow_layout(self) -> None:
+        top = float(PAD)
+        self._reflow_tops = []
+        for i in range(self.page_count):
+            self._reflow_tops.append(top)
+            layout = self._reflow_pages.get(i)
+            height = layout.height if layout is not None else self._reflow_estimate_height(i)
+            top += height
+            if i < self.page_count - 1:
+                top += REFLOW_PAGE_GAP
+        self._content_h = (top + PAD) if self.page_count else 0.0
+        self._content_w = float(self.viewport().width())
+        # Shared with _update_current_page / visible_range.
+        self._page_tops = list(self._reflow_tops)
+        self._update_scrollbars()
+
+    def _maybe_restart_reflow(self) -> None:
+        if not self.reflow_mode:
+            return
+        width = self._reflow_available_width()
+        if width == self._reflow_width:
+            return
+        page = self.current_page
+        self._enter_reflow()
+        self.goto_page(page, center=True)
+
+    def _scroll_to_reflow_page(self, page: int, center: bool = True) -> None:
+        if page < 0 or page >= len(self._reflow_tops):
+            return
+        top = self._reflow_tops[page]
+        # When not centring, put the page start at the viewport top.  A margin
+        # here would leave the scroll position in the previous page's gap and
+        # make _update_current_page report the wrong page.
+        value = top - (self.viewport().height() / 2.0 if center else 0.0)
+        self.verticalScrollBar().setValue(int(max(0, value)))
+
+    def _reflow_page_at(self, y: float) -> int:
+        if not self._reflow_tops:
+            return 0
+        idx = bisect.bisect_right(self._reflow_tops, y) - 1
+        return max(0, min(idx, self.page_count - 1))
+
     # ------------------------------------------------------------- layout
     def _relayout(self) -> None:
+        if self.reflow_mode:
+            self._recompute_reflow_layout()
+            return
         z = self.zoom
         self._disp_sizes = []
         self._page_tops = []
@@ -391,7 +652,7 @@ class PDFView(QAbstractScrollArea):
 
     # ---------------------------------------------------------- rendering
     def _request_visible(self) -> None:
-        if not self.page_count:
+        if not self.page_count or self.reflow_mode:
             return
         first, last = self.visible_range()
         # keep the cache viewport-aware so it evicts far pages first (Okular)
@@ -551,6 +812,11 @@ class PDFView(QAbstractScrollArea):
             painter.end()
             return
 
+        if self.reflow_mode:
+            self._paint_reflow(painter, event.rect())
+            painter.end()
+            return
+
         vsx = self.horizontalScrollBar().value()
         vsy = self.verticalScrollBar().value()
 
@@ -598,6 +864,97 @@ class PDFView(QAbstractScrollArea):
             self._paint_overlays(painter, i, x, y)
 
         painter.end()
+
+    def _paint_reflow(self, painter: QPainter, rect: QRect) -> None:
+        """Paint the single-column text view.
+
+        Only cached layouts are drawn; nothing is extracted or measured here.
+        """
+        if self.dark_mode:
+            bg, fg, muted = DARK_REFLOW_BG, DARK_REFLOW_FG, DARK_REFLOW_MUTED
+        else:
+            bg, fg, muted = LIGHT_REFLOW_BG, LIGHT_REFLOW_FG, LIGHT_REFLOW_MUTED
+        painter.fillRect(rect, bg)
+
+        if not self.page_count:
+            painter.setPen(muted)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Empty document")
+            return
+
+        if self._reflow_error:
+            painter.setPen(muted)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter,
+                             "Reflow unavailable:\n" + self._reflow_error)
+            return
+
+        if self._reflow_done == 0 and self._reflow_total:
+            painter.setPen(muted)
+            painter.setFont(self._reflow_font("Sans Serif", 14, False, False))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter,
+                             f"Preparing reflow… 0/{self._reflow_total}")
+            return
+
+        if (not self._reflow_has_text and self._reflow_done >= self._reflow_total
+                and self._reflow_total):
+            painter.setPen(fg)
+            painter.setFont(self._reflow_font("Sans Serif", 15, False, False))
+            painter.drawText(
+                rect.adjusted(40, 0, -40, 0),
+                Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+                "This document has no extractable text.\n\n"
+                "Reflow only works on text-based PDFs. Scanned documents "
+                "require OCR first.",
+            )
+            return
+
+        vw = self.viewport().width()
+        vh = self.viewport().height()
+        vsy = self.verticalScrollBar().value()
+        text_w = self._reflow_width or reflow_text_width(vw)
+        x0 = max(0.0, (vw - text_w) / 2.0)
+        first = self._reflow_page_at(float(vsy))
+        small = self._reflow_font("Sans Serif", 11, False, False)
+
+        for page in range(first, self.page_count):
+            top = self._reflow_tops[page] - vsy
+            layout = self._reflow_pages.get(page)
+
+            if layout is not None:
+                if not layout.has_text:
+                    if -20 <= top <= vh:
+                        painter.setPen(muted)
+                        painter.setFont(self._reflow_font("Sans Serif", 12, False, True))
+                        painter.drawText(int(x0), int(top + 20),
+                                         f"Page {page + 1} — no extractable text")
+                else:
+                    for line in layout.lines:
+                        ly = top + line.y
+                        if ly + line.height < -2:
+                            continue
+                        if ly > vh + 2:
+                            break
+                        self._paint_reflow_line(painter, line, x0, top, fg)
+
+                sep_y = top + layout.height + REFLOW_PAGE_GAP / 2.0
+                if page < self.page_count - 1 and -12 <= sep_y <= vh + 12:
+                    painter.setPen(QPen(muted, 1, Qt.PenStyle.DashLine))
+                    painter.drawLine(QPointF(x0, sep_y), QPointF(x0 + text_w, sep_y))
+                    painter.setPen(muted)
+                    painter.setFont(small)
+                    painter.drawText(QPointF(x0 + text_w - 64, sep_y - 6),
+                                     f"Page {page + 1}")
+
+            if top > vh:
+                break
+
+    def _paint_reflow_line(self, painter: QPainter, line, x: float,
+                           section_top: float, color: QColor) -> None:
+        # line.baseline is relative to the page section, not to the line.
+        painter.setPen(color)
+        for text, family, size, bold, italic in line.runs:
+            painter.setFont(self._reflow_font(family, size, bold, italic))
+            painter.drawText(QPointF(x, section_top + line.baseline), text)
+            x += self._reflow_metrics_for(family, size, bold, italic).horizontalAdvance(text)
 
     def _paint_tile_visible(self, painter: QPainter, tile_img: QImage,
                             tx: float, ty: float, tw: float, th: float,
@@ -765,7 +1122,7 @@ class PDFView(QAbstractScrollArea):
         return text
 
     def select_all(self) -> None:
-        if not self.page_count:
+        if not self.page_count or self.reflow_mode:
             return
         first_words = self._page_words(0)
         last_words = self._page_words(self.page_count - 1)
@@ -827,6 +1184,10 @@ class PDFView(QAbstractScrollArea):
         return True
 
     def scroll_to_rect(self, page: int, rect: Tuple[float, float, float, float]) -> None:
+        if self.reflow_mode:
+            # Reflow has no page-space geometry; jump to the page section.
+            self.goto_page(page, center=True)
+            return
         x0, y0, x1, y1 = map_rect(rect, *self.page_sizes[page], self.rotation)
         px, py = self._page_origin(page)
         target_y = py + (y0 + y1) / 2.0 * self.zoom - self.viewport().height() / 2.0
@@ -839,6 +1200,8 @@ class PDFView(QAbstractScrollArea):
     # ---------------------------------------------------------- zoom/fit
     def set_zoom(self, zoom: float, anchor: Optional[QPoint] = None,
                  clear_fit_mode: bool = True) -> None:
+        if self.reflow_mode:
+            return          # reflow is text-sized, not zoomed
         zoom = max(MIN_ZOOM, min(MAX_ZOOM, float(zoom)))
         if abs(zoom - self.zoom) < 1e-6:
             return
@@ -893,7 +1256,7 @@ class PDFView(QAbstractScrollArea):
         self.apply_fit()
 
     def apply_fit(self) -> None:
-        if self.fit_mode == "none" or not self.page_count:
+        if self.reflow_mode or self.fit_mode == "none" or not self.page_count:
             return
         vw = max(1, self.viewport().width() - 2 * PAD)
         vh = max(1, self.viewport().height() - 2 * PAD)
@@ -939,6 +1302,8 @@ class PDFView(QAbstractScrollArea):
     # ----------------------------------------------------------- rotation
     def set_rotation(self, rotation: int) -> None:
         """Set the absolute view rotation (0/90/180/270, clockwise)."""
+        if self.reflow_mode:
+            return          # reflow drops the original page geometry
         rotation = normalize_rotation(rotation)
         if rotation == self.rotation:
             return
@@ -964,11 +1329,24 @@ class PDFView(QAbstractScrollArea):
             "fit_mode": self.fit_mode,
             "vscroll": self.verticalScrollBar().value(),
             "hscroll": self.horizontalScrollBar().value(),
+            "reflow": self.reflow_mode,
         }
 
     def restore_state(self, state: dict) -> None:
         """Restore view state from a dict returned by get_state()."""
         if not state:
+            return
+        if self.reflow_mode:
+            page = state.get("page", 0)
+            page = max(0, min(page, self.page_count - 1)) if self.page_count else 0
+            self.goto_page(page, center=False)
+            return
+        if state.get("reflow"):
+            # Saved while reflow was active: only the page is meaningful in
+            # the normal layout (the scroll offset was reflow coordinates).
+            page = state.get("page", 0)
+            page = max(0, min(page, self.page_count - 1)) if self.page_count else 0
+            self.goto_page(page, center=False)
             return
         # Block signals on self and scroll bars to prevent _update_current_page from recalculating page
         self.blockSignals(True)
@@ -1013,6 +1391,16 @@ class PDFView(QAbstractScrollArea):
         if not self.page_count:
             return
         index = max(0, min(int(index), self.page_count - 1))
+        if self.reflow_mode:
+            # If the worker has not laid this page out yet, jump once it does.
+            if index not in self._reflow_pages and self._reflow_worker is not None:
+                self._reflow_pending_page = index
+                self._reflow_pending_center = center
+            self._scroll_to_reflow_page(index, center=center)
+            self.current_page = index
+            self.page_changed.emit(index)
+            self.viewport().update()
+            return
         py = self._page_tops[index]
         value = py - (self.viewport().height() / 2.0 if center else 20)
         self.verticalScrollBar().setValue(int(max(0, value)))
@@ -1041,7 +1429,14 @@ class PDFView(QAbstractScrollArea):
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
-        if self.fit_mode != "none":
+        if self.reflow_mode:
+            self._recompute_reflow_layout()
+            # Re-wrap only after the user stops dragging (extraction is cheap
+            # but laying out hundreds of pages should not run per pixel).
+            if self._reflow_available_width() != self._reflow_width:
+                self._reflow_timer.start()
+            self.viewport().update()
+        elif self.fit_mode != "none":
             self.apply_fit()
         else:
             self._update_scrollbars()
@@ -1054,7 +1449,8 @@ class PDFView(QAbstractScrollArea):
         self._request_visible()
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+        if (event.modifiers() & Qt.KeyboardModifier.ControlModifier
+                and not self.reflow_mode):
             steps = event.angleDelta().y() / 120.0
             if steps:
                 self.set_zoom(self.zoom * (1.15 ** steps), anchor=event.position().toPoint())
@@ -1069,6 +1465,14 @@ class PDFView(QAbstractScrollArea):
         super().wheelEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self.reflow_mode:
+            # Selection uses page-space geometry that reflow does not have.
+            if event.button() == Qt.MouseButton.LeftButton:
+                self.setFocus(Qt.FocusReason.MouseFocusReason)
+                event.accept()
+                return
+            super().mousePressEvent(event)
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             self._press_pos = event.position().toPoint()

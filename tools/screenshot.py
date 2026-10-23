@@ -13,8 +13,12 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import tempfile
 import time
 
+# Do not read or overwrite the user's PDFAR settings (saved view state would
+# override --page and leak between runs).
+os.environ.setdefault("XDG_CONFIG_HOME", tempfile.mkdtemp(prefix="pdfar-tool-"))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -42,7 +46,12 @@ def main() -> int:
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=860)
     ap.add_argument("--search", default="", help="run a search and show highlights")
+    ap.add_argument("--reflow", action="store_true", help="enable reflow mode")
     args = ap.parse_args()
+
+    if not os.path.isfile(args.pdf):
+        print("file not found:", args.pdf, file=sys.stderr)
+        return 1
 
     app = QApplication(sys.argv)
     win = MainWindow()
@@ -54,6 +63,9 @@ def main() -> int:
         print("could not open", args.pdf, file=sys.stderr)
         return 1
 
+    # Let the deferred restore of the saved view state run before we navigate,
+    # otherwise it would override the requested page.
+    app.processEvents()
     win._goto(args.page)
     if args.search:
         win.query_edit.setText(args.search)
@@ -61,13 +73,23 @@ def main() -> int:
 
     view = win.view
 
-    def visible_pages_ready():
-        first, last = view.visible_range()
-        return all(view.cache.get(p, view.zoom, view.rotation) is not None
-                   for p in range(first, last + 1))
+    if args.reflow:
+        view.set_reflow_mode(True)
+        win.act_reflow.setChecked(True)
+        ok = wait_until(app, lambda: view._reflow_worker is None, timeout=120)
+        if not ok:
+            print("warning: reflow did not finish preparing", file=sys.stderr)
+        win.status_left.setText(
+            "Reflow ready" if view._reflow_has_text
+            else "Reflow unavailable: no extractable text (scanned PDF?)")
+    else:
+        def visible_pages_ready():
+            first, last = view.visible_range()
+            return all(view.cache.get(p, view.zoom, view.rotation) is not None
+                       for p in range(first, last + 1))
 
-    if not wait_until(app, visible_pages_ready):
-        print("warning: some visible pages did not finish rendering", file=sys.stderr)
+        if not wait_until(app, visible_pages_ready):
+            print("warning: some visible pages did not finish rendering", file=sys.stderr)
     app.processEvents()
 
     win.grab().save(args.out)

@@ -343,15 +343,15 @@ Use a functional comparison matrix to identify gaps.
 | Search | Yes | Regex + advanced | Improve |
 | Thumbnails | Yes | Advanced management | Improve |
 | Outline | Yes | Editing/management | Improve |
-| Tabs | No | Multiple documents | Pending |
+| Tabs | Yes | Multiple documents | Implemented |
 | Presentation | No | Fullscreen/slideshow | Pending |
-| Dark mode | Incomplete | Full theme | Pending |
+| Dark mode | Yes | Full theme | Implemented |
 | Resumption | Partial | Per-document position | Pending |
-| Reflow | No | Adaptive reading | Pending |
+| Reflow | Yes | Adaptive reading | Implemented (text PDFs) |
 | Bookmarks | No | Full bookmarks | Pending |
 | Properties | Partial | Full inspector | Pending |
-| Attachments | No | Full management | Pending |
-| Regex search | No | Secure regex | Pending |
+| Attachments | Yes | Full management | Implemented |
+| Regex search | Yes | Secure regex | Implemented |
 | Layers | No | OCG | Pending |
 | Annotations | Basic/none | Full system | High priority |
 | Forms | No | AcroForm | Pending |

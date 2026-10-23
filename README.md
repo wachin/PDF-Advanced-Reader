@@ -54,6 +54,7 @@ Fixes in 2.0 (there were ten other bugs behind it):
 - **Zoom** — fit-page, fit-width, presets 50 %–400 %, `Ctrl` + mouse wheel zooms around the cursor.
 - **Rotation** — 90° steps, with selection and highlights staying on the right words.
 - **Encrypted PDFs** — password prompt, credentials are passed to the render workers only.
+- **Reflow mode** — single-column text view for comfortable reading on any window size; text is extracted and laid out in the background, with a clear fallback when a document has no text layer.
 - **Comfort** — drag & drop to open, open from the command line, recent-file memory, remembered window layout, page spinner, status bar.
 
 ### Keyboard shortcuts
@@ -70,6 +71,34 @@ Fixes in 2.0 (there were ten other bugs behind it):
 | `Home` / `End` | First / last page |
 | `Ctrl+C` / `Ctrl+A` | Copy selection / select all |
 | `Ctrl+wheel` | Zoom at cursor |
+| `Ctrl+R` | Toggle reflow mode |
+
+---
+
+### Reflow mode: what it can and cannot do
+
+Reflow (`View → Reflow` or `Ctrl+R`) discards the fixed page geometry and
+re-wraps the document's text into one column sized to the window. Extraction
+and layout run on a worker thread with its own document handle, so opening
+reflow on a 500-page PDF does not freeze the UI; pages appear as they are
+prepared and a progress count is shown in the status bar.
+
+PDF is a fixed-layout format, so reflow is necessarily a best-effort
+transformation:
+
+- **A text layer is required.** Scanned or image-only PDFs cannot be reflowed;
+  PDFAR shows an explicit warning instead of an empty view. Run OCR on such
+  files first.
+- **Reading order comes from the PDF's text blocks.** Multi-column pages,
+  sidebars, tables and text boxes are linearized in block order, which may
+  differ from the visual order. Complex layouts may look different from the
+  original page.
+- **Images, figures and vector graphics are not shown** in reflow; only text is
+  extracted and re-laid out.
+- **Zoom and rotation do not apply while reflow is active** — the column is
+  sized to the window and re-wraps when the window is resized.
+- Returning to normal view restores the original page layout and the page you
+  were reading.
 
 ---
 
@@ -287,10 +316,10 @@ python3 compile_ts.py
 
 ## Roadmap
 
-- [ ] Thumbnail sidebar navigation
+- [x] Thumbnail sidebar navigation
 - [ ] Persistent annotations (saved highlights/notes)
 - [ ] Export search results
-- [ ] Dark mode support
+- [x] Dark mode support
 - [ ] Full Debian package
 
 ---
