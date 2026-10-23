@@ -1496,7 +1496,8 @@ class MainWindow(QMainWindow):
         toolbar = getattr(self, "toolbar", None)
         if toolbar is None:
             return
-        for action in (self.act_zout, self.act_zin, self.act_reflow):
+        for action in (self.act_prev, self.act_next,
+                       self.act_zout, self.act_zin, self.act_reflow):
             button = toolbar.widgetForAction(action)
             if isinstance(button, QToolButton):
                 button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
@@ -1504,6 +1505,8 @@ class MainWindow(QMainWindow):
     def _update_zoom_actions(self, reflow: bool) -> None:
         """Keep Ctrl +/- labelled for what they actually do in this mode."""
         ink = "#e6e6e6" if self.act_dark_mode.isChecked() else "#3c3c3c"
+        self.act_prev.setIcon(self._tinted_icon("previous_page.svg", ink))
+        self.act_next.setIcon(self._tinted_icon("next_page.svg", ink))
         self.act_reflow.setIcon(self._tinted_icon("reflow.svg", ink))
         if reflow:
             self.act_zin.setIcon(self._tinted_icon("text_increase.svg", ink))

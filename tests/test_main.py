@@ -7,8 +7,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-from PyQt6.QtCore import QSettings
-from PyQt6.QtWidgets import QMessageBox
+from PyQt6.QtCore import QSettings, Qt
+from PyQt6.QtWidgets import QMessageBox, QToolButton
 
 from pdfar import APP_NAME
 from pdfar.main import MainWindow
@@ -124,6 +124,25 @@ def test_search_through_the_dock(qapp, sample_pdf):
         assert win.hit_label.text().startswith("Hit")
     finally:
         win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_page_navigation_actions_use_icons(qapp):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        for act, tip in ((win.act_prev, "Previous page (PgUp)"),
+                         (win.act_next, "Next page (PgDown)")):
+            assert not act.icon().isNull()
+            assert act.toolTip() == tip
+            button = win.toolbar.widgetForAction(act)
+            assert isinstance(button, QToolButton)
+            assert (button.toolButtonStyle()
+                    == Qt.ToolButtonStyle.ToolButtonIconOnly)
+    finally:
         win.close()
         win.deleteLater()
         qapp.processEvents()
