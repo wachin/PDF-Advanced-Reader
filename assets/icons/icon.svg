@@ -5,38 +5,21 @@
       <stop offset="0" stop-color="#3b82f6"/>
       <stop offset="1" stop-color="#4338ca"/>
     </linearGradient>
-    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ffffff"/>
-      <stop offset="1" stop-color="#eef2ff"/>
-    </linearGradient>
-    <linearGradient id="badge" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#f87171"/>
-      <stop offset="1" stop-color="#dc2626"/>
-    </linearGradient>
     <radialGradient id="glow" cx="0.15" cy="0.1" r="0.9">
       <stop offset="0" stop-color="#ffffff" stop-opacity="0.16"/>
       <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
     </radialGradient>
   </defs>
 
-  <!-- Background tile -->
   <rect width="256" height="256" rx="56" fill="url(#bg)"/>
   <rect width="256" height="256" rx="56" fill="url(#glow)"/>
 
-  <!-- Page -->
-  <path d="M76 42 H156 L198 84 V202 A14 14 0 0 1 184 216 H76
-           A14 14 0 0 1 62 202 V56 A14 14 0 0 1 76 42 Z" fill="url(#page)"/>
-  <path d="M156 42 L198 84 H170 A14 14 0 0 1 156 70 Z" fill="#c7d2fe"/>
-
-  <!-- Text lines -->
-  <rect x="88" y="104" width="84" height="10" rx="5" fill="#94a3b8"/>
-  <rect x="88" y="126" width="68" height="10" rx="5" fill="#cbd5e1"/>
-  <rect x="88" y="148" width="76" height="10" rx="5" fill="#cbd5e1"/>
-  <rect x="88" y="170" width="32" height="10" rx="5" fill="#3b82f6"/>
-
-  <!-- PDF badge -->
-  <rect x="122" y="166" width="72" height="38" rx="10" fill="url(#badge)"/>
-  <text x="158" y="191" font-family="DejaVu Sans, Arial, sans-serif"
-        font-size="19" font-weight="700" fill="#ffffff"
-        text-anchor="middle">PDF</text>
+  <!-- Flow P monogram -->
+  <rect x="72" y="54" width="36" height="148" rx="18" fill="#ffffff"/>
+  <path d="M90 72 H128 A52 52 0 0 1 128 176 H90" fill="none"
+        stroke="#ffffff" stroke-width="36"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Reflow ribbon -->
+  <path d="M172 170 C202 172 214 194 200 208 C192 216 178 214 174 204"
+        fill="none" stroke="#fb7185" stroke-width="13" stroke-linecap="round"/>
 </svg>
