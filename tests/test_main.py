@@ -134,11 +134,25 @@ def test_zoom_preset_and_rotation_actions(qapp, sample_pdf):
     win.show()
     qapp.processEvents()
     try:
+        presets = [win.zoom_combo.itemText(i)
+                   for i in range(win.zoom_combo.count())]
+        assert presets == ["Fit Page", "Fit Width",
+                           "50%", "62.5%", "75%", "87.5%",
+                           "100%", "112.5%", "125%", "137.5%",
+                           "150%", "162.5%", "175%", "200%",
+                           "250%", "300%", "350%", "400%"]
+
         win.open_document(sample_pdf)
         win.zoom_combo.setCurrentText("150%")
         qapp.processEvents()
         assert abs(win.view.zoom - 1.5) < 1e-6
         assert win.zoom_label.text() == "150%"
+
+        win.zoom_combo.setCurrentText("62.5%")
+        qapp.processEvents()
+        assert abs(win.view.zoom - 0.625) < 1e-6
+        assert win.zoom_label.text() == "62.5%"
+        assert "62.5%" in win.status_right.text()
 
         win._rotate(90)
         qapp.processEvents()

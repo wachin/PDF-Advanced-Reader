@@ -51,7 +51,7 @@ Fixes in 2.0 (there were ten other bugs behind it):
 - **Real text selection** — drag to select across pages and columns, `Ctrl+C` to copy, `Ctrl+A` to select all (text comes from the PDF text layer, works with any rotation).
 - **Search** — AND / OR / exact phrase, match-case, whole-words, per-page snippets, highlighted matches, `F3` / `Shift+F3` to jump between hits.
 - **Sidebar** — page thumbnails (rendered in the background) and the document outline/table of contents with click-to-jump.
-- **Zoom** — fit-page, fit-width, presets 50 %–400 %, `Ctrl` + mouse wheel zooms around the cursor. A compact **Step** selector (2.5 %–25 %, default 10 %) sets the additive increment used by Zoom In/Out and `Ctrl++`/`Ctrl+-`; `Ctrl` + wheel follows the same step by default and can be switched to fluid zoom in the View menu.
+- **Zoom** — fit-page, fit-width, and presets `50, 62.5, 75, 87.5, 100, 112.5, 125, 137.5, 150, 162.5, 175, 200, 250, 300, 350, 400 %`; `Ctrl` + mouse wheel zooms around the cursor. A compact **Step** selector (2.5 %–25 %, default 10 %) sets the additive increment used by Zoom In/Out and `Ctrl++`/`Ctrl+-`; `Ctrl` + wheel follows the same step by default and can be switched to fluid zoom in the View menu.
 - **Rotation** — 90° steps, with selection and highlights staying on the right words.
 - **Encrypted PDFs** — password prompt, credentials are passed to the render workers only.
 - **Reflow mode** — single-column text view for comfortable reading on any window size; text is extracted and laid out in the background, with adjustable text size and a clear fallback when a document has no text layer.

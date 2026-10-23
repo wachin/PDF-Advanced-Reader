@@ -48,6 +48,14 @@ def _asset_path(name: str) -> str:
     return path if os.path.exists(path) else os.path.join("assets", "icons", name)
 
 
+def _format_zoom(zoom: float) -> str:
+    """Format a zoom factor as a percentage (half-points when needed)."""
+    pct = zoom * 100.0
+    if abs(pct - round(pct)) < 0.01:
+        return f"{int(round(pct))}%"
+    return f"{pct:.1f}%"
+
+
 class MainWindow(QMainWindow):
     """PDFAR main window."""
 
@@ -379,8 +387,11 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.zoom_label)
 
         self.zoom_combo = QComboBox()
-        self.zoom_combo.addItems(["Fit Page", "Fit Width", "50%", "75%", "100%",
-                                  "125%", "150%", "200%", "300%", "400%"])
+        self.zoom_combo.addItems(["Fit Page", "Fit Width",
+                                  "50%", "62.5%", "75%", "87.5%",
+                                  "100%", "112.5%", "125%", "137.5%",
+                                  "150%", "162.5%", "175%", "200%",
+                                  "250%", "300%", "350%", "400%"])
         self.zoom_combo.setCurrentIndex(1)
         self.zoom_combo.setFixedWidth(104)
         self.zoom_combo.currentTextChanged.connect(self._apply_zoom_preset)
@@ -1386,7 +1397,7 @@ class MainWindow(QMainWindow):
         elif text == "Fit Width":
             self._set_fit("width")
         elif text.endswith("%"):
-            self._set_zoom(int(text[:-1]) / 100.0)
+            self._set_zoom(float(text[:-1]) / 100.0)
 
     def _apply_zoom_step(self, _index: int = -1) -> None:
         step = self.zoom_step_combo.currentData()
@@ -1452,8 +1463,8 @@ class MainWindow(QMainWindow):
             self.zoom_label.setText(f"{int(round(view.reflow_font_scale * 100))}%")
             self.zoom_label.setToolTip("Reflow text size (Ctrl++ / Ctrl+-)")
         else:
-            zoom = int(round(view.zoom * 100)) if view is not None else 100
-            self.zoom_label.setText(f"{zoom}%")
+            zoom = _format_zoom(view.zoom) if view is not None else "100%"
+            self.zoom_label.setText(zoom)
             self.zoom_label.setToolTip("Zoom level")
 
     def _tinted_icon(self, name: str, color: str) -> QIcon:
@@ -1527,7 +1538,7 @@ class MainWindow(QMainWindow):
             return
         self.status_right.setText(
             f"Page {self.view.current_page + 1}/{self.view.page_count}   |   "
-            f"{int(round(self.view.zoom * 100))}%   |   "
+            f"{_format_zoom(self.view.zoom)}   |   "
             f"{'Fit ' + self.view.fit_mode.title() if self.view.fit_mode != 'none' else 'Manual'}"
             f"{extra}")
 
