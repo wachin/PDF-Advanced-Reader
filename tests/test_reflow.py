@@ -14,6 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pymupdf as fitz
 import pytest
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QMessageBox
 
 from pdfar.main import MainWindow
@@ -418,6 +419,12 @@ def test_main_window_zoom_actions_switch_with_reflow(qapp, tmp_path):
         assert win.act_zout.text() == "Decrease Text Size"
         assert not win.act_zin.icon().isNull()
         assert not win.act_zout.icon().isNull()
+        zin_button = win.toolbar.widgetForAction(win.act_zin)
+        zout_button = win.toolbar.widgetForAction(win.act_zout)
+        assert zin_button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
+        assert zout_button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
+        assert win.act_zin.toolTip() == "Increase Text Size (Ctrl++)"
+        assert win.act_zout.toolTip() == "Decrease Text Size (Ctrl+-)"
         assert win.zoom_label.text() == "100%"
 
         win._zoom_in()
@@ -437,6 +444,8 @@ def test_main_window_zoom_actions_switch_with_reflow(qapp, tmp_path):
         assert win.act_zin.text() == "Zoom In"
         assert win.act_zin.icon().isNull()
         assert win.act_zout.icon().isNull()
+        assert (win.toolbar.widgetForAction(win.act_zin).toolButtonStyle()
+                == Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         assert win.zoom_label.text() == f"{int(round(win.view.zoom * 100))}%"
     finally:
         win.close()

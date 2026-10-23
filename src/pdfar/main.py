@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSpinBox,
-    QStatusBar, QTabWidget, QToolBar, QVBoxLayout, QWidget,
+    QStatusBar, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import APP_NAME, __version__
@@ -1423,6 +1423,21 @@ class MainWindow(QMainWindow):
         self._icon_cache[key] = icon
         return icon
 
+    def _set_text_size_buttons_icon_only(self, icon_only: bool) -> None:
+        """Show only the A+/A- icons on the toolbar while reflow is active.
+
+        The labels stay in the View menu and as tooltips on hover.
+        """
+        toolbar = getattr(self, "toolbar", None)
+        if toolbar is None:
+            return
+        style = (Qt.ToolButtonStyle.ToolButtonIconOnly if icon_only
+                 else Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        for action in (self.act_zin, self.act_zout):
+            button = toolbar.widgetForAction(action)
+            if isinstance(button, QToolButton):
+                button.setToolButtonStyle(style)
+
     def _update_zoom_actions(self, reflow: bool) -> None:
         """Keep Ctrl +/- labelled for what they actually do in this mode."""
         if reflow:
@@ -1430,9 +1445,9 @@ class MainWindow(QMainWindow):
             self.act_zin.setIcon(self._tinted_icon("text_increase.svg", ink))
             self.act_zout.setIcon(self._tinted_icon("text_decrease.svg", ink))
             self.act_zin.setText("Increase Text Size")
-            self.act_zin.setToolTip("Increase reflow text size (Ctrl++)")
+            self.act_zin.setToolTip("Increase Text Size (Ctrl++)")
             self.act_zout.setText("Decrease Text Size")
-            self.act_zout.setToolTip("Decrease reflow text size (Ctrl+-)")
+            self.act_zout.setToolTip("Decrease Text Size (Ctrl+-)")
             self.act_zoom_100.setText("Default Text Size")
             self.act_zoom_100.setToolTip("Reset reflow text size (Ctrl+0)")
         else:
@@ -1444,6 +1459,7 @@ class MainWindow(QMainWindow):
             self.act_zout.setToolTip("Zoom out (Ctrl+-)")
             self.act_zoom_100.setText("100%")
             self.act_zoom_100.setToolTip("Actual size (Ctrl+0)")
+        self._set_text_size_buttons_icon_only(reflow)
 
     def _update_status(self) -> None:
         if not self.view:
