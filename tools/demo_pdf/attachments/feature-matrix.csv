@@ -1,0 +1,13 @@
+area,feature,supported,notes
+Rendering,Continuous scroll,yes,tiles
+Rendering,Tiled zoom,yes,cache
+Rendering,Rotation,yes,page
+Text,Selection,yes,layer
+Text,Search,yes,AND/OR
+Text,Regex search,yes,pattern
+Reading,Reflow,yes,columns
+Reading,Text size,yes,scale
+Navigation,Outline,yes,5 levels
+Navigation,Thumbnails,yes,async
+Documents,Attachments,yes,embedded
+Documents,Forms,yes,widgets

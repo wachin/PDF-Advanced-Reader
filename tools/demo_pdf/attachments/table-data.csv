@@ -1,0 +1,52 @@
+id,category,structure,page,state,notes
+ST-001,Typography,H1 heading,3,Stable,Section opener
+ST-002,Typography,H2/H3 subheads,3,Stable,TOC level 2-3
+ST-003,Typography,H4/H5 subheads,3,Stable,Deep outline
+ST-004,Typography,Justified paragraph,4,Stable,Wide measure
+ST-005,Typography,Bullet list,5,Stable,Nested bullets
+ST-006,Typography,Numbered list,5,Stable,Two-digit items
+ST-007,Typography,Block quote,6,Stable,Indented rule
+ST-008,Typography,Code block,6,Stable,Monospace
+ST-009,Typography,Two columns,7,Stable,Frame switch
+ST-010,Typography,Unicode samples,7,Stable,"Greek, Cyrillic"
+IM-001,Images,PNG with alpha,9,Stable,Transparent
+IM-002,Images,JPEG photograph,10,Stable,Color
+IM-003,Images,Grayscale JPEG,10,Stable,DeviceGray
+IM-004,Images,Vector diagram,9,Stable,Large raster
+IM-005,Images,200 DPI scan,12,Stable,Heavy page
+TB-001,Tables,Simple grid,14,Stable,Header row
+TB-002,Tables,Zebra rows,14,Stable,Alternating fill
+TB-003,Tables,Merged cells,15,Stable,Colspan/rowspan
+TB-004,Tables,Long table,16,Stable,Repeated header
+TB-005,Tables,Numeric columns,17,Stable,Right aligned
+TB-006,Tables,Rich cells,18,Stable,Nested content
+TB-007,Tables,Feature matrix,19,Stable,Check marks
+NV-001,Navigation,Outline level 1,21,Stable,Bookmark
+NV-002,Navigation,Outline level 5,21,Stable,Nested bookmark
+NV-003,Navigation,Internal link,22,Stable,GOTO
+NV-004,Navigation,External URL,22,Stable,URI
+AN-001,Annotations,Highlight,24,Stable,Markup
+AN-002,Annotations,Underline,24,Stable,Markup
+AN-003,Annotations,Strikeout,24,Stable,Markup
+AN-004,Annotations,Squiggly,24,Stable,Markup
+AN-005,Annotations,Sticky note,25,Stable,Popup
+AN-006,Annotations,Free text,25,Stable,Callout
+AN-007,Annotations,Shapes,26,Stable,Square/circle/line
+AN-008,Annotations,Ink,26,Stable,Freehand
+AN-009,Annotations,Stamp,26,Stable,Rubber stamp
+AN-010,Annotations,File attachment,26,Stable,Paperclip
+FM-001,Forms,Text field,28,Stable,Single line
+FM-002,Forms,Multiline field,28,Stable,Comment box
+FM-003,Forms,Checkbox,29,Stable,On/Off
+FM-004,Forms,Radio group,29,Stable,Three options
+FM-005,Forms,Combo box,30,Stable,Choice
+FM-006,Forms,List box,30,Stable,Options
+AT-001,Attachments,CSV data,32,Stable,Table source
+AT-002,Attachments,ODS workbook,32,Stable,Calc
+AT-003,Attachments,JSON manifest,32,Stable,Metadata
+AT-004,Attachments,Text notes,32,Stable,Plain text
+RD-001,Rendering,Transparency,34,Stable,Alpha blend
+RD-002,Rendering,Gradient,34,Stable,Shading
+RD-003,Rendering,A3 page,36,Stable,Mixed size
+RD-004,Rendering,Rotated page,37,Stable,/Rotate 90
+RD-005,Rendering,Dense small type,35,Stable,7.5 pt

@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="880" viewBox="0 0 1400 880">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#eef2ff"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#4338ca"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="1" y="1" width="1398" height="878" rx="26" fill="url(#bg)" stroke="#c7d2fe" stroke-width="2"/>
+  <text x="64" y="70" font-family="DejaVu Sans, sans-serif" font-size="28" font-weight="700"
+        fill="#1e293b">Feature surface exercised by this document</text>
+  <text x="64" y="104" font-family="DejaVu Sans, sans-serif" font-size="16" fill="#64748b">
+    Each card maps to a section you can use to validate rendering and interaction.
+  </text>
+
+  <g font-family="DejaVu Sans, sans-serif">
+    <!-- Card 1 Search -->
+    <rect x="64" y="150" width="400" height="200" rx="18" fill="#ffffff" stroke="#dbe3f0" stroke-width="2"/>
+    <circle cx="122" cy="222" r="36" fill="#e0f2fe"/>
+    <circle cx="116" cy="216" r="14" fill="none" stroke="#0284c7" stroke-width="4"/>
+    <line x1="127" y1="227" x2="140" y2="240" stroke="#0284c7" stroke-width="5" stroke-linecap="round"/>
+    <text x="178" y="214" font-size="21" font-weight="700" fill="#0f172a">Search</text>
+    <text x="178" y="244" font-size="15" fill="#64748b">AND / OR / phrase queries, regex</text>
+    <text x="178" y="270" font-size="15" fill="#64748b">highlighted hits and F3 navigation</text>
+    <text x="178" y="316" font-size="13" fill="#0284c7">Section 2.5 · 5.2</text>
+
+    <!-- Card 2 Annotations -->
+    <rect x="500" y="150" width="400" height="200" rx="18" fill="#ffffff" stroke="#dbe3f0" stroke-width="2"/>
+    <circle cx="558" cy="222" r="36" fill="#fef3c7"/>
+    <path d="M540 232 l10 -26 l8 20 l10 -14 l8 20" fill="none" stroke="#b45309" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="614" y="214" font-size="21" font-weight="700" fill="#0f172a">Annotations</text>
+    <text x="614" y="244" font-size="15" fill="#64748b">highlights, notes, shapes, ink</text>
+    <text x="614" y="270" font-size="15" fill="#64748b">stamps and file attachments</text>
+    <text x="614" y="316" font-size="13" fill="#b45309">Section 6</text>
+
+    <!-- Card 3 Reflow -->
+    <rect x="936" y="150" width="400" height="200" rx="18" fill="#ffffff" stroke="#dbe3f0" stroke-width="2"/>
+    <circle cx="994" cy="222" r="36" fill="#dcfce7"/>
+    <path d="M976 206 h38 M976 218 h28 M976 230 h34 M976 242 h20" stroke="#16a34a" stroke-width="4" stroke-linecap="round"/>
+    <text x="1050" y="214" font-size="21" font-weight="700" fill="#0f172a">Reflow</text>
+    <text x="1050" y="244" font-size="15" fill="#64748b">single-column reading mode</text>
+    <text x="1050" y="270" font-size="15" fill="#64748b">adjustable text size</text>
+    <text x="1050" y="316" font-size="13" fill="#16a34a">Section 2.4</text>
+
+    <!-- Card 4 Tables -->
+    <rect x="64" y="400" width="400" height="200" rx="18" fill="#ffffff" stroke="#dbe3f0" stroke-width="2"/>
+    <circle cx="122" cy="472" r="36" fill="#eef2ff"/>
+    <rect x="104" y="454" width="36" height="36" rx="4" fill="none" stroke="#4f46e5" stroke-width="3"/>
+    <path d="M104 466 h36 M104 478 h36 M116 454 v36 M128 454 v36" stroke="#4f46e5" stroke-width="2"/>
+    <text x="178" y="464" font-size="21" font-weight="700" fill="#0f172a">Tables</text>
+    <text x="178" y="494" font-size="15" fill="#64748b">grids, zebra rows, spans</text>
+    <text x="178" y="520" font-size="15" fill="#64748b">long tables across pages</text>
+    <text x="178" y="566" font-size="13" fill="#4f46e5">Section 4</text>
+
+    <!-- Card 5 Forms -->
+    <rect x="500" y="400" width="400" height="200" rx="18" fill="#ffffff" stroke="#dbe3f0" stroke-width="2"/>
+    <circle cx="558" cy="472" r="36" fill="#fce7f3"/>
+    <rect x="540" y="456" width="36" height="14" rx="3" fill="none" stroke="#be185d" stroke-width="3"/>
+    <rect x="540" y="478" width="36" height="14" rx="3" fill="none" stroke="#be185d" stroke-width="3"/>
+    <path d="M547 463 l3 3 l6 -7" fill="none" stroke="#be185d" stroke-width="2.5"/>
+    <text x="614" y="464" font-size="21" font-weight="700" fill="#0f172a">Forms</text>
+    <text x="614" y="494" font-size="15" fill="#64748b">text, check, radio, choice</text>
+    <text x="614" y="520" font-size="15" fill="#64748b">widget appearance and values</text>
+    <text x="614" y="566" font-size="13" fill="#be185d">Section 7</text>
+
+    <!-- Card 6 Attachments -->
+    <rect x="936" y="400" width="400" height="200" rx="18" fill="#ffffff" stroke="#dbe3f0" stroke-width="2"/>
+    <circle cx="994" cy="472" r="36" fill="#e0f2fe"/>
+    <path d="M986 486 l18 -18 a8 8 0 0 1 11 11 l-20 20 a12 12 0 0 1 -17 -17 l20 -20"
+          fill="none" stroke="#0369a1" stroke-width="4" stroke-linecap="round"/>
+    <text x="1050" y="464" font-size="21" font-weight="700" fill="#0f172a">Attachments</text>
+    <text x="1050" y="494" font-size="15" fill="#64748b">CSV, ODS, JSON and text</text>
+    <text x="1050" y="520" font-size="15" fill="#64748b">embedded in the file</text>
+    <text x="1050" y="566" font-size="13" fill="#0369a1">Section 8</text>
+
+    <!-- Bottom bar -->
+    <rect x="64" y="650" width="1272" height="152" rx="18" fill="url(#accent)" opacity="0.95"/>
+    <text x="100" y="702" font-size="22" font-weight="700" fill="#ffffff">A single fixture for layout, navigation and interaction</text>
+    <text x="100" y="736" font-size="15" fill="#dbeafe">Scroll performance, zoom anchoring, text selection, outline depth, mixed page sizes and rotation.</text>
+    <text x="100" y="766" font-size="13" fill="#bfdbfe">Generated by tools/demo_pdf/make_demo_pdf.py</text>
+  </g>
+</svg>

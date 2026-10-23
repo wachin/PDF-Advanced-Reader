@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="520" viewBox="0 0 1400 520">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#eef2ff"/>
+    </linearGradient>
+    <linearGradient id="step1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#60a5fa"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <linearGradient id="step2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#818cf8"/>
+      <stop offset="1" stop-color="#4f46e5"/>
+    </linearGradient>
+    <linearGradient id="step3" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#0284c7"/>
+    </linearGradient>
+    <linearGradient id="step4" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fb7185"/>
+      <stop offset="1" stop-color="#e11d48"/>
+    </linearGradient>
+    <linearGradient id="step5" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4ade80"/>
+      <stop offset="1" stop-color="#16a34a"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <rect x="1" y="1" width="1398" height="518" rx="26" fill="url(#bg)" stroke="#c7d2fe" stroke-width="2"/>
+
+  <text x="70" y="70" font-family="DejaVu Sans, sans-serif" font-size="28" font-weight="700"
+        fill="#1e293b">From file to pixels: the render pipeline</text>
+  <text x="70" y="104" font-family="DejaVu Sans, sans-serif" font-size="17" fill="#64748b">
+    Each stage is independent, so heavy pages never block the user interface.
+  </text>
+
+  <g stroke="#94a3b8" stroke-width="4" fill="none" marker-end="url(#arrow)">
+    <line x1="235" y1="270" x2="300" y2="270"/>
+    <line x1="505" y1="270" x2="570" y2="270"/>
+    <line x1="775" y1="270" x2="840" y2="270"/>
+    <line x1="1045" y1="270" x2="1110" y2="270"/>
+  </g>
+
+  <g font-family="DejaVu Sans, sans-serif" text-anchor="middle">
+    <circle cx="155" cy="270" r="72" fill="url(#step1)"/>
+    <text x="155" y="282" font-size="42" font-weight="700" fill="#ffffff">1</text>
+    <text x="155" y="382" font-size="21" font-weight="700" fill="#1e293b">Open</text>
+    <text x="155" y="408" font-size="15" fill="#64748b">map the file</text>
+
+    <circle cx="425" cy="270" r="72" fill="url(#step2)"/>
+    <text x="425" y="282" font-size="42" font-weight="700" fill="#ffffff">2</text>
+    <text x="425" y="382" font-size="21" font-weight="700" fill="#1e293b">Parse</text>
+    <text x="425" y="408" font-size="15" fill="#64748b">build the page tree</text>
+
+    <circle cx="695" cy="270" r="72" fill="url(#step3)"/>
+    <text x="695" y="282" font-size="42" font-weight="700" fill="#ffffff">3</text>
+    <text x="695" y="382" font-size="21" font-weight="700" fill="#1e293b">Lay out</text>
+    <text x="695" y="408" font-size="15" fill="#64748b">estimate page boxes</text>
+
+    <circle cx="965" cy="270" r="72" fill="url(#step4)"/>
+    <text x="965" y="282" font-size="42" font-weight="700" fill="#ffffff">4</text>
+    <text x="965" y="382" font-size="21" font-weight="700" fill="#1e293b">Render</text>
+    <text x="965" y="408" font-size="15" fill="#64748b">worker threads, tiles</text>
+
+    <circle cx="1235" cy="270" r="72" fill="url(#step5)"/>
+    <text x="1235" y="282" font-size="42" font-weight="700" fill="#ffffff">5</text>
+    <text x="1235" y="382" font-size="21" font-weight="700" fill="#1e293b">Paint</text>
+    <text x="1235" y="408" font-size="15" fill="#64748b">blit cached tiles</text>
+  </g>
+
+  <g fill="#cbd5e1" font-family="DejaVu Sans, sans-serif" font-size="13" text-anchor="middle">
+    <text x="155" y="466">I/O</text>
+    <text x="425" y="466">CPU</text>
+    <text x="695" y="466">geometry</text>
+    <text x="965" y="466">threads</text>
+    <text x="1235" y="466">Qt event loop</text>
+  </g>
+</svg>

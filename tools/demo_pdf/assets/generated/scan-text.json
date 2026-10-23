@@ -1,0 +1,342 @@
+{
+ "width": 1654,
+ "height": 2338,
+ "lines": [
+  {
+   "x": 120,
+   "y": 105,
+   "text": "PDFAR FIELD NOTES",
+   "size": 40,
+   "font": "bold"
+  },
+  {
+   "x": 1034,
+   "y": 118,
+   "text": "scanned test sheet · 200 dpi",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 110,
+   "y": 280,
+   "text": "The render pool keeps a priority queue. Pages that",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 110,
+   "y": 320,
+   "text": "are visible on screen are rendered before pages",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 110,
+   "y": 360,
+   "text": "that are merely close by, and cached tiles are",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 110,
+   "y": 400,
+   "text": "reused until the memory budget is exceeded.",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 110,
+   "y": 464,
+   "text": "Selection follows the text layer, not the painted",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 110,
+   "y": 504,
+   "text": "pixels. Dragging across a line selects real",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 110,
+   "y": 544,
+   "text": "characters, and copying preserves reading order",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 110,
+   "y": 584,
+   "text": "even when the page has been rotated or zoomed.",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 110,
+   "y": 648,
+   "text": "Search accepts words, exact phrases and regular",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 110,
+   "y": 688,
+   "text": "expressions. Matches are highlighted in the page",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 110,
+   "y": 728,
+   "text": "and listed in the sidebar so the user can jump",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 110,
+   "y": 768,
+   "text": "between them without losing the reading position.",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 837,
+   "y": 280,
+   "text": "Thumbnails are produced by the same render pool",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 837,
+   "y": 320,
+   "text": "at a lower resolution. They are always generated",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 837,
+   "y": 360,
+   "text": "after the visible page, which keeps the first paint",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 837,
+   "y": 400,
+   "text": "fast on documents with hundreds of pages.",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 837,
+   "y": 464,
+   "text": "The outline is read from the PDF bookmarks and",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 837,
+   "y": 504,
+   "text": "shown as a tree. Documents with five heading",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 837,
+   "y": 544,
+   "text": "levels remain navigable because each level can be",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 837,
+   "y": 584,
+   "text": "collapsed independently.",
+   "size": 27,
+   "font": "body"
+  },
+  {
+   "x": 122,
+   "y": 884,
+   "text": "Item",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 272,
+   "y": 884,
+   "text": "Structure",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 752,
+   "y": 884,
+   "text": "Pages",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 932,
+   "y": 884,
+   "text": "State",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 122,
+   "y": 932,
+   "text": "A-01",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 272,
+   "y": 932,
+   "text": "Text page",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 752,
+   "y": 932,
+   "text": "12",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 932,
+   "y": 932,
+   "text": "ok",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 122,
+   "y": 980,
+   "text": "A-02",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 272,
+   "y": 980,
+   "text": "Table, 4 columns",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 752,
+   "y": 980,
+   "text": "14",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 932,
+   "y": 980,
+   "text": "ok",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 122,
+   "y": 1028,
+   "text": "A-03",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 272,
+   "y": 1028,
+   "text": "Full-page image",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 752,
+   "y": 1028,
+   "text": "21",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 932,
+   "y": 1028,
+   "text": "ok",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 122,
+   "y": 1076,
+   "text": "A-04",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 272,
+   "y": 1076,
+   "text": "Annotations",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 752,
+   "y": 1076,
+   "text": "23",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 932,
+   "y": 1076,
+   "text": "ok",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 122,
+   "y": 1124,
+   "text": "A-05",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 272,
+   "y": 1124,
+   "text": "Form fields",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 752,
+   "y": 1124,
+   "text": "25",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 932,
+   "y": 1124,
+   "text": "ok",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 110,
+   "y": 2218,
+   "text": "page 1 · synthetic scan · generated for PDFAR",
+   "size": 22,
+   "font": "mono"
+  },
+  {
+   "x": 1064,
+   "y": 982,
+   "text": "SCANNED COPY",
+   "size": 52,
+   "font": "bold"
+  }
+ ]
+}

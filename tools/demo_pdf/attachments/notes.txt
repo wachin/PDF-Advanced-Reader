@@ -1,0 +1,8 @@
+PDFAR demo fixture - field notes
+================================
+
+This text file is embedded in demo.pdf so the attachments panel
+has more than one payload type to display. It intentionally uses
+plain ASCII plus a few Unicode characters: 25 °C, 120 %, ±3 mm.
+
+Check: Tools > Attachments (Ctrl+Shift+A), then the Attachments tab.
