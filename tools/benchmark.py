@@ -9,17 +9,16 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import tempfile
 import time
 import resource
 from typing import Dict, Any
 
+# Isolate from the user's saved view state, which can restore another page and
+# make the first-page measurement time out.
+os.environ.setdefault("XDG_CONFIG_HOME", tempfile.mkdtemp(prefix="pdfar-tool-"))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-try:
-    import pymupdf as fitz
-except ImportError:
-    import fitz
 
 from PyQt6.QtWidgets import QApplication
 from pdfar.main import MainWindow
@@ -41,12 +40,10 @@ def run_benchmark(pdf_path: str) -> Dict[str, Any]:
     app = QApplication.instance() or QApplication(sys.argv)
     
     # 1. Startup / Init
-    t0 = time.perf_counter()
     win = MainWindow()
     win.resize(1280, 860)
     win.show()
     app.processEvents()
-    t_win_init = time.perf_counter() - t0
     
     # Track jobs queued during open
     t_open_start = time.perf_counter()
