@@ -164,7 +164,7 @@ class MainWindow(QMainWindow):
         self.act_reflow = QAction("Reflow", self)
         self.act_reflow.setCheckable(True)
         self.act_reflow.setShortcut("Ctrl+R")
-        self.act_reflow.setToolTip("Toggle reflow mode (Ctrl+R)")
+        self.act_reflow.setToolTip("Reflow (Ctrl+R)")
         self.act_reflow.triggered.connect(self._toggle_reflow)
 
         # Navigation actions
@@ -398,6 +398,9 @@ class MainWindow(QMainWindow):
         # Reflow mode
         tb.addAction(self.act_reflow)
         tb.addSeparator()
+
+        self._set_compact_toolbar_buttons()
+        self._update_zoom_actions(False)
 
     # --------------------------------------------------- presentation mode
     def toggle_presentation(self) -> None:
@@ -677,8 +680,7 @@ class MainWindow(QMainWindow):
                     tab.view.set_dark_mode(dark_mode)
             # Apply theme to entire application
             self._apply_dark_mode(dark_mode)
-            if self.view is not None and self.view.reflow_mode:
-                self._update_zoom_actions(True)
+            self._update_zoom_actions(self.view.reflow_mode)
 
     def _toggle_reflow(self) -> None:
         """Toggle reflow mode for the active document.
@@ -1423,25 +1425,21 @@ class MainWindow(QMainWindow):
         self._icon_cache[key] = icon
         return icon
 
-    def _set_text_size_buttons_icon_only(self, icon_only: bool) -> None:
-        """Show only the A+/A- icons on the toolbar while reflow is active.
-
-        The labels stay in the View menu and as tooltips on hover.
-        """
+    def _set_compact_toolbar_buttons(self) -> None:
+        """Show these toolbar actions as icons only; hover shows the label."""
         toolbar = getattr(self, "toolbar", None)
         if toolbar is None:
             return
-        style = (Qt.ToolButtonStyle.ToolButtonIconOnly if icon_only
-                 else Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        for action in (self.act_zin, self.act_zout):
+        for action in (self.act_zout, self.act_zin, self.act_reflow):
             button = toolbar.widgetForAction(action)
             if isinstance(button, QToolButton):
-                button.setToolButtonStyle(style)
+                button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
 
     def _update_zoom_actions(self, reflow: bool) -> None:
         """Keep Ctrl +/- labelled for what they actually do in this mode."""
+        ink = "#e6e6e6" if self.act_dark_mode.isChecked() else "#3c3c3c"
+        self.act_reflow.setIcon(self._tinted_icon("reflow.svg", ink))
         if reflow:
-            ink = "#e6e6e6" if self.act_dark_mode.isChecked() else "#3c3c3c"
             self.act_zin.setIcon(self._tinted_icon("text_increase.svg", ink))
             self.act_zout.setIcon(self._tinted_icon("text_decrease.svg", ink))
             self.act_zin.setText("Increase Text Size")
@@ -1451,15 +1449,14 @@ class MainWindow(QMainWindow):
             self.act_zoom_100.setText("Default Text Size")
             self.act_zoom_100.setToolTip("Reset reflow text size (Ctrl+0)")
         else:
-            self.act_zin.setIcon(QIcon())
-            self.act_zout.setIcon(QIcon())
+            self.act_zin.setIcon(self._tinted_icon("zoom_in.svg", ink))
+            self.act_zout.setIcon(self._tinted_icon("zoom_out.svg", ink))
             self.act_zin.setText("Zoom In")
             self.act_zin.setToolTip("Zoom in (Ctrl++)")
             self.act_zout.setText("Zoom Out")
             self.act_zout.setToolTip("Zoom out (Ctrl+-)")
             self.act_zoom_100.setText("100%")
             self.act_zoom_100.setToolTip("Actual size (Ctrl+0)")
-        self._set_text_size_buttons_icon_only(reflow)
 
     def _update_status(self) -> None:
         if not self.view:

@@ -412,6 +412,14 @@ def test_main_window_zoom_actions_switch_with_reflow(qapp, tmp_path):
     try:
         win.open_document(build_text_pdf(tmp_path / "a.pdf", pages=3))
         assert win.act_zin.text() == "Zoom In"
+        assert not win.act_zin.icon().isNull()
+        assert not win.act_zout.icon().isNull()
+        assert not win.act_reflow.icon().isNull()
+        assert (win.toolbar.widgetForAction(win.act_zin).toolButtonStyle()
+                == Qt.ToolButtonStyle.ToolButtonIconOnly)
+        assert (win.toolbar.widgetForAction(win.act_reflow).toolButtonStyle()
+                == Qt.ToolButtonStyle.ToolButtonIconOnly)
+        assert win.act_reflow.toolTip() == "Reflow (Ctrl+R)"
 
         win._toggle_reflow()
         assert wait_until(qapp, lambda: win.view._reflow_worker is None)
@@ -419,10 +427,6 @@ def test_main_window_zoom_actions_switch_with_reflow(qapp, tmp_path):
         assert win.act_zout.text() == "Decrease Text Size"
         assert not win.act_zin.icon().isNull()
         assert not win.act_zout.icon().isNull()
-        zin_button = win.toolbar.widgetForAction(win.act_zin)
-        zout_button = win.toolbar.widgetForAction(win.act_zout)
-        assert zin_button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
-        assert zout_button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
         assert win.act_zin.toolTip() == "Increase Text Size (Ctrl++)"
         assert win.act_zout.toolTip() == "Decrease Text Size (Ctrl+-)"
         assert win.zoom_label.text() == "100%"
@@ -442,10 +446,12 @@ def test_main_window_zoom_actions_switch_with_reflow(qapp, tmp_path):
 
         win._toggle_reflow()
         assert win.act_zin.text() == "Zoom In"
-        assert win.act_zin.icon().isNull()
-        assert win.act_zout.icon().isNull()
+        assert not win.act_zin.icon().isNull()
+        assert not win.act_zout.icon().isNull()
+        assert win.act_zin.toolTip() == "Zoom in (Ctrl++)"
+        assert win.act_zout.toolTip() == "Zoom out (Ctrl+-)"
         assert (win.toolbar.widgetForAction(win.act_zin).toolButtonStyle()
-                == Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+                == Qt.ToolButtonStyle.ToolButtonIconOnly)
         assert win.zoom_label.text() == f"{int(round(win.view.zoom * 100))}%"
     finally:
         win.close()
