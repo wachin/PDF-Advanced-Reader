@@ -58,6 +58,34 @@ def test_open_document_wires_everything(qapp, sample_pdf):
         qapp.processEvents()
 
 
+def test_properties_dialog_builds_all_tabs(qapp, sample_pdf, monkeypatch):
+    from PyQt6.QtWidgets import QDialog, QLabel, QTabWidget
+
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    seen = {}
+
+    def fake_exec(dlg):
+        tabs = dlg.findChild(QTabWidget)
+        seen["titles"] = [tabs.tabText(i) for i in range(tabs.count())]
+        seen["texts"] = [label.text() for label in dlg.findChildren(QLabel)]
+        return 0
+
+    try:
+        assert win.open_document(sample_pdf)
+        monkeypatch.setattr(QDialog, "exec", fake_exec)
+        win._show_properties()
+        assert seen["titles"] == ["General", "Fonts", "Security", "File Info", "Metadata"]
+        assert "Page Size:" in seen["texts"]
+        assert "3" in seen["texts"]
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
 def test_window_starts_with_ui_visible(qapp):
     """Regression: a previously-saved Qt windowState could leave the toolbar
     and docks hidden, so the window opened looking completely empty."""

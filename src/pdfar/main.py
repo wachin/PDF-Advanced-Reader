@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSpinBox,
-    QStatusBar, QTabWidget, QToolBar, QVBoxLayout, QWidget, QDialog, QVBoxLayout, QFormLayout, QLabel, QDialogButtonBox, QTabWidget, QTreeWidget, QTreeWidgetItem,
+    QStatusBar, QTabWidget, QToolBar, QVBoxLayout, QWidget,
 )
 
 from . import APP_NAME, __version__
@@ -691,196 +691,139 @@ class MainWindow(QMainWindow):
         """Show document properties dialog with multiple tabs."""
         if not self.view:
             return
+        path = self.view.doc_path
         try:
-            doc = fitz.open(self.view.doc_path)
-            meta = doc.metadata or {}
-            page_count = doc.page_count
-            page = doc[0]
-            page_size = page.rect
-            
-            # Get file info
-            import os
-            import hashlib
-            file_stat = os.stat(self.view.doc_path)
-            file_size = file_stat.st_size
-            
-            # Calculate file hash
-            sha256_hash = hashlib.sha256()
-            with open(self.view.doc_path, "rb") as f:
-                for chunk in iter(lambda: f.read(8192), b""):
-                    sha256_hash.update(chunk)
-            file_hash = sha256_hash.hexdigest()
-            
-            # Get font information
-            fonts = []
-            for i in range(doc.page_count):
-                page = doc[i]
-                fonts = page.get_fonts()
-                for font in fonts:
-                    fonts.append({
-                        'name': font[3] if len(font) > 3 else 'Unknown',
-                        'type': font[2] if len(font) > 2 else 'Unknown',
-                        'embedded': font[4] if len(font) > 4 else False,
-                    })
-            
-            # Get security info
-            permissions = doc.permissions
-            is_encrypted = doc.is_encrypted
-            security_handler = doc.security_handler
-            
-            # Get file size
-            file_size = os.path.getsize(self.view.doc_path)
-            if file_size < 1024:
-                size_str = f"{file_size} B"
-            elif file_size < 1024 * 1024:
-                size_str = f"{file_size / 1024:.1f} KB"
-            elif file_size < 1024 * 1024 * 1024:
-                size_str = f"{file_size / (1024 * 1024):.1f} MB"
-            else:
-                size_str = f"{file_size / (1024 * 1024 * 1024):.1f} GB"
-            
-            # File hash
-            sha256_hash = hashlib.sha256()
-            with open(self.view.doc_path, "rb") as f:
-                for chunk in iter(lambda: f.read(8192), b""):
-                    sha256_hash.update(chunk)
-            file_hash = sha256_hash.hexdigest()
-            
-            doc.close()
+            with fitz.open(path) as doc:
+                meta = doc.metadata or {}
+                page_count = doc.page_count
+                page_size = doc[0].rect if page_count else fitz.Rect()
+                unique_fonts = {}
+                for i in range(page_count):
+                    for font in doc[i].get_fonts():
+                        name = font[3] if len(font) > 3 else "Unknown"
+                        ftype = font[2] if len(font) > 2 else "Unknown"
+                        embedded = font[4] if len(font) > 4 else False
+                        unique_fonts.setdefault((name, ftype),
+                                                (name, ftype, embedded))
+                permissions = doc.permissions
+                is_encrypted = doc.is_encrypted
         except Exception as exc:
             QMessageBox.critical(self, "Properties", f"Could not read document:\n{exc}")
             return
 
-        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QFormLayout, QLabel, QDialogButtonBox, QTabWidget, QWidget, QTreeWidget, QTreeWidgetItem, QScrollArea
+        file_size = os.path.getsize(path)
+        if file_size < 1024:
+            size_text = f"{file_size} B"
+        elif file_size < 1024 * 1024:
+            size_text = f"{file_size / 1024:.1f} KB"
+        elif file_size < 1024 * 1024 * 1024:
+            size_text = f"{file_size / (1024 * 1024):.1f} MB"
+        else:
+            size_text = f"{file_size / (1024 * 1024 * 1024):.1f} GB"
+        try:
+            with open(path, "rb") as fh:
+                file_hash = hashlib.sha256(fh.read()).hexdigest()
+        except OSError as exc:
+            file_hash = f"(unavailable: {exc})"
+
+        from PyQt6.QtWidgets import (
+            QDialog, QDialogButtonBox, QFormLayout, QLabel, QTabWidget,
+            QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+        )
+
         dlg = QDialog(self)
         dlg.setWindowTitle("Document Properties")
-        dlg.setMinimumWidth(500)
-        dlg.setMinimumHeight(400)
+        dlg.setMinimumSize(560, 460)
         layout = QVBoxLayout(dlg)
-        
-        # Create tab widget
         tabs = QTabWidget()
-        
+
         # --- General Tab ---
         general_tab = QWidget()
-        general_layout = QVBoxLayout(general_tab)
-        form = QFormLayout()
-        form.addRow("Title:", QLabel(meta.get("title") or "(none)"))
-        form.addRow("Author:", QLabel(meta.get("author") or "(none)"))
-        form.addRow("Subject:", QLabel(meta.get("subject") or "(none)"))
-        form.addRow("Keywords:", QLabel(meta.get("keywords") or "(none)"))
-        form.addRow("Creator:", QLabel(meta.get("creator") or "(none)"))
-        form.addRow("Producer:", QLabel(meta.get("producer") or "(none)"))
-        form.addRow("Creation Date:", QLabel(meta.get("creationDate") or "(none)"))
-        form.addRow("Modification Date:", QLabel(meta.get("modDate") or "(none)"))
-        form.addRow("Pages:", QLabel(str(page_count)))
-        form.addRow("Page Size:", QLabel(f"{page_size.width:.1f} × {page_size.height:.1f} pts"))
-        form.addRow("File Size:", QLabel(f"{os.path.getsize(self.view.doc_path) / 1024:.1f} KB"))
-        form.addRow("File:", QLabel(self.view.doc_path))
-        layout = QVBoxLayout()
-        layout.addLayout(form)
+        general_form = QFormLayout(general_tab)
+        for label, value in (
+            ("Title:", meta.get("title")),
+            ("Author:", meta.get("author")),
+            ("Subject:", meta.get("subject")),
+            ("Keywords:", meta.get("keywords")),
+            ("Creator:", meta.get("creator")),
+            ("Producer:", meta.get("producer")),
+            ("Creation Date:", meta.get("creationDate")),
+            ("Modification Date:", meta.get("modDate")),
+        ):
+            general_form.addRow(label, QLabel(value or "(none)"))
+        general_form.addRow("Pages:", QLabel(str(page_count)))
+        general_form.addRow("Page Size:", QLabel(
+            f"{page_size.width:.1f} × {page_size.height:.1f} pts"))
+        general_form.addRow("File Size:", QLabel(size_text))
+        general_form.addRow("File:", QLabel(path))
         tabs.addTab(general_tab, "General")
-        
+
         # --- Fonts Tab ---
         fonts_tab = QWidget()
         fonts_layout = QVBoxLayout(fonts_tab)
         fonts_tree = QTreeWidget()
         fonts_tree.setHeaderLabels(["Font Name", "Type", "Embedded"])
-        fonts_tree.setColumnWidth(0, 200)
-        fonts_tree.setColumnWidth(1, 100)
-        fonts_tree.setColumnWidth(2, 80)
-        
-        # Collect unique fonts
-        unique_fonts = {}
-        for i in range(doc.page_count):
-            page = doc[i]
-            fonts = page.get_fonts()
-            for font in fonts:
-                name = font[3] if len(font) > 3 else 'Unknown'
-                ftype = font[2] if len(font) > 2 else 'Unknown'
-                embedded = font[4] if len(font) > 4 else False
-                key = (name, ftype)
-                if key not in unique_fonts:
-                    unique_fonts[key] = {'name': name, 'type': ftype, 'embedded': embedded}
-        
-        for font_info in unique_fonts.values():
-            item = QTreeWidgetItem([font_info['name'], font_info['type'], 'Yes' if font_info['embedded'] else 'No'])
-            if not font_info['embedded']:
-                # Mark non-embedded fonts in red
+        fonts_tree.setColumnWidth(0, 220)
+        fonts_tree.setColumnWidth(1, 120)
+        for name, ftype, embedded in unique_fonts.values():
+            item = QTreeWidgetItem([name, ftype, "Yes" if embedded else "No"])
+            if not embedded:
                 item.setForeground(2, Qt.GlobalColor.red)
             fonts_tree.addTopLevelItem(item)
-        
         fonts_tree.resizeColumnToContents(0)
         fonts_tree.resizeColumnToContents(1)
         fonts_layout.addWidget(fonts_tree)
-        
         fonts_info = QLabel(f"Total unique fonts: {len(unique_fonts)}")
         fonts_info.setStyleSheet("color: #888; font-size: 11px; padding: 4px;")
         fonts_layout.addWidget(fonts_info)
         tabs.addTab(fonts_tab, "Fonts")
-        
+
         # --- Security Tab ---
         security_tab = QWidget()
-        security_layout = QVBoxLayout(security_tab)
-        security_form = QFormLayout()
+        security_form = QFormLayout(security_tab)
         security_form.addRow("Encrypted:", QLabel("Yes" if is_encrypted else "No"))
         if is_encrypted:
-            # Try to get permission info
             perms = []
-            if permissions & 4:  # print
-                perms.append("Print")
-            if permissions & 8:  # modify
-                perms.append("Modify")
-            if permissions & 16:  # copy
-                perms.append("Copy")
-            if permissions & 16:  # annotate
-                perms.append("Annotate")
-            security_form.addRow("Permissions:", QLabel(", ".join(perms) if perms else "None"))
-            if security_handler:
-                security_form.addRow("Handler:", QLabel(str(security_handler)))
-        security_tab.setLayout(security_form)
+            for mask, name in (
+                (fitz.PDF_PERM_PRINT, "Print"),
+                (fitz.PDF_PERM_MODIFY, "Modify"),
+                (fitz.PDF_PERM_COPY, "Copy"),
+                (fitz.PDF_PERM_ANNOTATE, "Annotate"),
+            ):
+                if permissions & mask:
+                    perms.append(name)
+            security_form.addRow("Permissions:",
+                                 QLabel(", ".join(perms) if perms else "None"))
         tabs.addTab(security_tab, "Security")
-        
+
         # --- File Info Tab ---
         file_tab = QWidget()
-        file_layout = QVBoxLayout(file_tab)
-        file_form = QFormLayout()
-        file_form.addRow("File Path:", QLabel(self.view.doc_path))
-        file_form.addRow("File Size:", QLabel(f"{os.path.getsize(self.view.doc_path) / 1024:.1f} KB"))
-        file_form.addRow("SHA-256:", QLabel(hashlib.sha256(open(self.view.doc_path, 'rb').read()).hexdigest()))
-        file_form.addRow("Modified:", QLabel(time.ctime(os.path.getmtime(self.view.doc_path))))
-        file_form.addRow("Created:", QLabel(time.ctime(os.path.getctime(self.view.doc_path))))
-        file_layout.addLayout(file_form)
+        file_form = QFormLayout(file_tab)
+        file_form.addRow("File Path:", QLabel(path))
+        file_form.addRow("File Size:", QLabel(size_text))
+        file_form.addRow("SHA-256:", QLabel(file_hash))
+        file_form.addRow("Modified:", QLabel(time.ctime(os.path.getmtime(path))))
+        file_form.addRow("Created:", QLabel(time.ctime(os.path.getctime(path))))
         tabs.addTab(file_tab, "File Info")
-        
-        # --- Custom Metadata Tab ---
+
+        # --- Metadata Tab ---
         custom_tab = QWidget()
         custom_layout = QVBoxLayout(custom_tab)
-        custom_layout = QVBoxLayout()
-        
-        # Show all metadata
         meta_tree = QTreeWidget()
         meta_tree.setHeaderLabels(["Key", "Value"])
-        meta_tree.setColumnWidth(0, 150)
+        meta_tree.setColumnWidth(0, 160)
         for key, value in meta.items():
             if value:
-                item = QTreeWidgetItem([key, str(value)])
-                meta_tree.addTopLevelItem(item)
+                meta_tree.addTopLevelItem(QTreeWidgetItem([key, str(value)]))
         meta_tree.resizeColumnToContents(0)
         custom_layout.addWidget(QLabel("All Metadata:"))
         custom_layout.addWidget(meta_tree)
-        custom_tab.setLayout(custom_layout)
         tabs.addTab(custom_tab, "Metadata")
-        
-        # Add tabs to dialog
-        layout = QVBoxLayout(dlg)
+
         layout.addWidget(tabs)
-        
-        # Buttons
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
         buttons.accepted.connect(dlg.accept)
-        dlg_layout.addWidget(buttons)
-        
+        layout.addWidget(buttons)
         dlg.exec()
 
     def _show_attachments(self) -> None:
