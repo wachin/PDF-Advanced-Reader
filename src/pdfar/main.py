@@ -13,8 +13,12 @@ except ImportError:  # pragma: no cover - older PyMuPDF
 import hashlib
 import time
 
-from PyQt6.QtCore import QSettings, QThread, Qt
-from PyQt6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QKeySequence, QShortcut, QIcon
+from PyQt6.QtCore import QSettings, QSize, QThread, Qt
+from PyQt6.QtGui import (
+    QAction, QCloseEvent, QColor, QDragEnterEvent, QDropEvent, QIcon,
+    QKeySequence, QPainter, QPixmap, QShortcut,
+)
+from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
@@ -28,6 +32,16 @@ from .search import SearchParams, SearchWorker, normalize_space
 from .sidebar import Sidebar
 from .tabs import DocumentTab
 from .viewer import PDFView, MEMORY_LEVELS
+
+_ASSET_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "assets", "icons")
+
+
+def _asset_path(name: str) -> str:
+    """Resolve an asset from the source checkout, falling back to the CWD."""
+    path = os.path.join(_ASSET_DIR, name)
+    return path if os.path.exists(path) else os.path.join("assets", "icons", name)
 
 
 class MainWindow(QMainWindow):
@@ -43,6 +57,7 @@ class MainWindow(QMainWindow):
         self.search_thread: Optional[QThread] = None
         self.search_worker: Optional[SearchWorker] = None
         self.settings = QSettings(APP_NAME, APP_NAME)
+        self._icon_cache = {}
 
         self.tabs.setDocumentMode(True)
         self.tabs.setTabsClosable(True)
@@ -61,7 +76,7 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         # Set window icon
-        self.setWindowIcon(QIcon("assets/icons/icon.svg"))
+        self.setWindowIcon(QIcon(_asset_path("icon.svg")))
 
         self._build_actions()
         self._build_menubar()
@@ -317,7 +332,8 @@ class MainWindow(QMainWindow):
         tb = QToolBar("Main")
         tb.setMovable(False)
         tb.setObjectName("mainToolbar")
-        tb.setIconSize(tb.iconSize())
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        tb.setIconSize(QSize(18, 18))
         self.addToolBar(tb)
         self.toolbar = tb
 
@@ -661,6 +677,8 @@ class MainWindow(QMainWindow):
                     tab.view.set_dark_mode(dark_mode)
             # Apply theme to entire application
             self._apply_dark_mode(dark_mode)
+            if self.view is not None and self.view.reflow_mode:
+                self._update_zoom_actions(True)
 
     def _toggle_reflow(self) -> None:
         """Toggle reflow mode for the active document.
@@ -1224,8 +1242,8 @@ class MainWindow(QMainWindow):
         self.page_label.setText(f"/ {view.page_count}")
         self._update_zoom_label(view)
         self.act_reflow.setChecked(view.reflow_mode)
-        self._update_zoom_actions(view.reflow_mode)
         self.act_dark_mode.setChecked(view.dark_mode)
+        self._update_zoom_actions(view.reflow_mode)
         # search results belong to the previous document
         self.results.clear()
         self.hit_label.setText("")
@@ -1381,9 +1399,36 @@ class MainWindow(QMainWindow):
             self.zoom_label.setText(f"{zoom}%")
             self.zoom_label.setToolTip("Zoom level")
 
+    def _tinted_icon(self, name: str, color: str) -> QIcon:
+        """Render one of the monochrome SVG assets in *color*."""
+        key = (name, color)
+        icon = self._icon_cache.get(key)
+        if icon is not None:
+            return icon
+        renderer = QSvgRenderer(_asset_path(name))
+        icon = QIcon()
+        if renderer.isValid():
+            ink = QColor(color)
+            for size in (16, 24, 32, 48):
+                pixmap = QPixmap(size, size)
+                pixmap.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(pixmap)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                renderer.render(painter)
+                painter.setCompositionMode(
+                    QPainter.CompositionMode.CompositionMode_SourceIn)
+                painter.fillRect(pixmap.rect(), ink)
+                painter.end()
+                icon.addPixmap(pixmap)
+        self._icon_cache[key] = icon
+        return icon
+
     def _update_zoom_actions(self, reflow: bool) -> None:
         """Keep Ctrl +/- labelled for what they actually do in this mode."""
         if reflow:
+            ink = "#e6e6e6" if self.act_dark_mode.isChecked() else "#3c3c3c"
+            self.act_zin.setIcon(self._tinted_icon("text_increase.svg", ink))
+            self.act_zout.setIcon(self._tinted_icon("text_decrease.svg", ink))
             self.act_zin.setText("Increase Text Size")
             self.act_zin.setToolTip("Increase reflow text size (Ctrl++)")
             self.act_zout.setText("Decrease Text Size")
@@ -1391,6 +1436,8 @@ class MainWindow(QMainWindow):
             self.act_zoom_100.setText("Default Text Size")
             self.act_zoom_100.setToolTip("Reset reflow text size (Ctrl+0)")
         else:
+            self.act_zin.setIcon(QIcon())
+            self.act_zout.setIcon(QIcon())
             self.act_zin.setText("Zoom In")
             self.act_zin.setToolTip("Zoom in (Ctrl++)")
             self.act_zout.setText("Zoom Out")

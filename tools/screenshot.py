@@ -49,6 +49,7 @@ def main() -> int:
     ap.add_argument("--reflow", action="store_true", help="enable reflow mode")
     ap.add_argument("--text-scale", type=float, default=1.0,
                     help="reflow text-size multiplier (implies --reflow)")
+    ap.add_argument("--dark", action="store_true", help="enable dark mode")
     args = ap.parse_args()
 
     if not os.path.isfile(args.pdf):
@@ -74,6 +75,9 @@ def main() -> int:
         win.start_search()
 
     view = win.view
+
+    if args.dark:
+        win._toggle_dark_mode()
 
     if args.reflow or args.text_scale != 1.0:
         if args.text_scale != 1.0:

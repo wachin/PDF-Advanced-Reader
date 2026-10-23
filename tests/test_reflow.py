@@ -416,6 +416,8 @@ def test_main_window_zoom_actions_switch_with_reflow(qapp, tmp_path):
         assert wait_until(qapp, lambda: win.view._reflow_worker is None)
         assert win.act_zin.text() == "Increase Text Size"
         assert win.act_zout.text() == "Decrease Text Size"
+        assert not win.act_zin.icon().isNull()
+        assert not win.act_zout.icon().isNull()
         assert win.zoom_label.text() == "100%"
 
         win._zoom_in()
@@ -433,6 +435,8 @@ def test_main_window_zoom_actions_switch_with_reflow(qapp, tmp_path):
 
         win._toggle_reflow()
         assert win.act_zin.text() == "Zoom In"
+        assert win.act_zin.icon().isNull()
+        assert win.act_zout.icon().isNull()
         assert win.zoom_label.text() == f"{int(round(win.view.zoom * 100))}%"
     finally:
         win.close()
