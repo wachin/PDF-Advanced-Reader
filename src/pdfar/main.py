@@ -428,9 +428,9 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
 
         # Rotation
-        self.act_rotl = QAction("⟲", self)
+        self.act_rotl = QAction("Rotate Left", self)
         self.act_rotl.setToolTip("Rotate left")
-        self.act_rotr = QAction("⟳", self)
+        self.act_rotr = QAction("Rotate Right", self)
         self.act_rotr.setToolTip("Rotate right")
         self.act_rotl.triggered.connect(self._rot_left)
         self.act_rotr.triggered.connect(self._rot_right)
@@ -1497,7 +1497,8 @@ class MainWindow(QMainWindow):
         if toolbar is None:
             return
         for action in (self.act_prev, self.act_next,
-                       self.act_zout, self.act_zin, self.act_reflow):
+                       self.act_zout, self.act_zin, self.act_reflow,
+                       self.act_rotl, self.act_rotr):
             button = toolbar.widgetForAction(action)
             if isinstance(button, QToolButton):
                 button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
@@ -1507,6 +1508,8 @@ class MainWindow(QMainWindow):
         ink = "#e6e6e6" if self.act_dark_mode.isChecked() else "#3c3c3c"
         self.act_prev.setIcon(self._tinted_icon("previous_page.svg", ink))
         self.act_next.setIcon(self._tinted_icon("next_page.svg", ink))
+        self.act_rotl.setIcon(self._tinted_icon("rotate_left.svg", ink))
+        self.act_rotr.setIcon(self._tinted_icon("rotate_right.svg", ink))
         self.act_reflow.setIcon(self._tinted_icon("reflow.svg", ink))
         if reflow:
             self.act_zin.setIcon(self._tinted_icon("text_increase.svg", ink))

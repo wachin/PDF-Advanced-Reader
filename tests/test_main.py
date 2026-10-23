@@ -129,13 +129,15 @@ def test_search_through_the_dock(qapp, sample_pdf):
         qapp.processEvents()
 
 
-def test_page_navigation_actions_use_icons(qapp):
+def test_toolbar_icon_actions(qapp):
     win = MainWindow()
     win.show()
     qapp.processEvents()
     try:
         for act, tip in ((win.act_prev, "Previous page (PgUp)"),
-                         (win.act_next, "Next page (PgDown)")):
+                         (win.act_next, "Next page (PgDown)"),
+                         (win.act_rotl, "Rotate left"),
+                         (win.act_rotr, "Rotate right")):
             assert not act.icon().isNull()
             assert act.toolTip() == tip
             button = win.toolbar.widgetForAction(act)
