@@ -47,6 +47,8 @@ def main() -> int:
     ap.add_argument("--height", type=int, default=860)
     ap.add_argument("--search", default="", help="run a search and show highlights")
     ap.add_argument("--reflow", action="store_true", help="enable reflow mode")
+    ap.add_argument("--text-scale", type=float, default=1.0,
+                    help="reflow text-size multiplier (implies --reflow)")
     args = ap.parse_args()
 
     if not os.path.isfile(args.pdf):
@@ -73,9 +75,10 @@ def main() -> int:
 
     view = win.view
 
-    if args.reflow:
-        view.set_reflow_mode(True)
-        win.act_reflow.setChecked(True)
+    if args.reflow or args.text_scale != 1.0:
+        if args.text_scale != 1.0:
+            view.set_reflow_font_scale(args.text_scale)
+        win._toggle_reflow()
         ok = wait_until(app, lambda: view._reflow_worker is None, timeout=120)
         if not ok:
             print("warning: reflow did not finish preparing", file=sys.stderr)

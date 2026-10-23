@@ -47,6 +47,15 @@ REFLOW_SIZE_SCALE = 1.25
 REFLOW_MIN_FONT = 10
 REFLOW_MAX_FONT = 34
 
+# User text-size multiplier (Ctrl +/- in reflow).  It is applied at layout
+# time so the extracted document stays untouched and can be re-wrapped at any
+# size without re-reading the PDF.
+REFLOW_FONT_STEP = 1.15
+REFLOW_FONT_SCALE_MIN = 0.6
+REFLOW_FONT_SCALE_MAX = 3.0
+REFLOW_UI_MIN_FONT = 8
+REFLOW_UI_MAX_FONT = 72
+
 # Extract text only: TEXT_PRESERVE_IMAGES would copy every embedded image
 # bitmap through the dict, which is by far the most expensive part on scanned
 # or illustration-heavy documents.
@@ -158,6 +167,24 @@ def measure_text(text: str, family: str, size: int, bold: bool, italic: bool) ->
     return float(_metrics(family, size, bold, italic).horizontalAdvance(text))
 
 
+def clamp_font_scale(scale: float) -> float:
+    """Clamp a user text-size multiplier to the supported range."""
+    try:
+        value = float(scale)
+    except (TypeError, ValueError):
+        return 1.0
+    return max(REFLOW_FONT_SCALE_MIN, min(REFLOW_FONT_SCALE_MAX, value))
+
+
+def scaled_font_size(size: int, scale: float = 1.0) -> int:
+    """Apply the user multiplier to an extracted pixel size."""
+    try:
+        px = int(round(float(size) * clamp_font_scale(scale)))
+    except (TypeError, ValueError):
+        px = int(size)
+    return max(REFLOW_UI_MIN_FONT, min(REFLOW_UI_MAX_FONT, px))
+
+
 # --------------------------------------------------------------- extraction
 def _span_run(span: Dict) -> Optional[Run]:
     raw = span.get("text") or ""
@@ -214,13 +241,16 @@ def layout_paragraphs(
     width: int,
     page_num: int = 0,
     measure=measure_text,
+    size_scale: float = 1.0,
 ) -> PageLayout:
     """Wrap *paragraphs* into lines no wider than *width* pixels.
 
     ``measure(text, family, size, bold, italic) -> float`` is injectable so
-    the wrapper can be unit-tested without a font backend.
+    the wrapper can be unit-tested without a font backend.  ``size_scale``
+    multiplies every run size before measuring and wrapping.
     """
     width = max(1, int(width))
+    size_scale = clamp_font_scale(size_scale)
     lines: List[Line] = []
     y = 0.0
 
@@ -253,16 +283,17 @@ def layout_paragraphs(
             max_size = 0
 
         for word, run in words:
-            word_w = measure(word, run.family, run.size, run.bold, run.italic)
-            space_w = measure(" ", run.family, run.size, run.bold, run.italic)
+            size = scaled_font_size(run.size, size_scale)
+            word_w = measure(word, run.family, size, run.bold, run.italic)
+            space_w = measure(" ", run.family, size, run.bold, run.italic)
             if line_runs and line_width + space_w + word_w > width:
                 flush()
             if line_runs:
-                line_runs.append((" ", run.family, run.size, run.bold, run.italic))
+                line_runs.append((" ", run.family, size, run.bold, run.italic))
                 line_width += space_w
-            line_runs.append((word, run.family, run.size, run.bold, run.italic))
+            line_runs.append((word, run.family, size, run.bold, run.italic))
             line_width += word_w
-            max_size = max(max_size, run.size)
+            max_size = max(max_size, size)
 
         flush()
         # A visual gap separates paragraphs; headings (larger text) get more.
@@ -289,11 +320,13 @@ class ReflowWorker(QThread):
     progress = pyqtSignal(int, int)   # (done, total)
     failed = pyqtSignal(str)
 
-    def __init__(self, doc_path: str, width: int, password: str = "", parent=None):
+    def __init__(self, doc_path: str, width: int, password: str = "",
+                 font_scale: float = 1.0, parent=None):
         super().__init__(parent)
         self.doc_path = doc_path
         self.width = int(width)
         self.password = password
+        self.font_scale = clamp_font_scale(font_scale)
 
     def run(self) -> None:  # noqa: D401 - QThread entry point
         doc = None
@@ -308,7 +341,8 @@ class ReflowWorker(QThread):
                     return
                 try:
                     paragraphs = extract_paragraphs(doc.load_page(i), i)
-                    layout = layout_paragraphs(paragraphs, self.width, i)
+                    layout = layout_paragraphs(paragraphs, self.width, i,
+                                               size_scale=self.font_scale)
                 except Exception as exc:  # malformed page: keep going
                     layout = PageLayout(i, [], float(REFLOW_EMPTY_PAGE_HEIGHT),
                                         False, str(exc))

@@ -522,15 +522,26 @@ class MainWindow(QMainWindow):
         self._goto(self.page_spin.value() - 1)
 
     def _zoom_in(self) -> None:
-        if self.view:
+        if not self.view:
+            return
+        if self.view.reflow_mode:
+            self.view.reflow_text_bigger()
+        else:
             self.view.zoom_in()
 
     def _zoom_out(self) -> None:
-        if self.view:
+        if not self.view:
+            return
+        if self.view.reflow_mode:
+            self.view.reflow_text_smaller()
+        else:
             self.view.zoom_out()
 
     def _zoom_100(self) -> None:
-        self._set_zoom(1.0)
+        if self.view and self.view.reflow_mode:
+            self.view.set_reflow_font_scale(1.0)
+        else:
+            self._set_zoom(1.0)
 
     def _fit_page(self) -> None:
         self._set_fit("page")
@@ -661,12 +672,15 @@ class MainWindow(QMainWindow):
             reflow = not self.view.reflow_mode
             self.view.set_reflow_mode(reflow)
             self.act_reflow.setChecked(reflow)
+            self._update_zoom_actions(reflow)
+            self._update_zoom_label(self.view)
             if reflow:
                 self.status_left.setText("Preparing reflow…")
             else:
                 self.status_left.setText("Reflow off")
         else:
             self.act_reflow.setChecked(False)
+            self._update_zoom_actions(False)
 
     def _on_reflow_progress(self, done: int, total: int) -> None:
         # Only the active document's progress belongs in the status bar.
@@ -686,6 +700,12 @@ class MainWindow(QMainWindow):
                 f"Reflow ready — {empty_pages} page(s) without extractable text")
         else:
             self.status_left.setText("Reflow ready")
+
+    def _on_reflow_font_scale_changed(self, scale: float) -> None:
+        if self.sender() is not self.view:
+            return
+        self._update_zoom_label(self.view)
+        self._update_status()
 
     def _show_properties(self) -> None:
         """Show document properties dialog with multiple tabs."""
@@ -1158,6 +1178,7 @@ class MainWindow(QMainWindow):
         tab.view.selection_changed.connect(self._update_status)
         tab.view.reflow_progress.connect(self._on_reflow_progress)
         tab.view.reflow_ready.connect(self._on_reflow_ready)
+        tab.view.reflow_font_scale_changed.connect(self._on_reflow_font_scale_changed)
         tab.sidebar.goto_page_requested.connect(self._goto)
         # Connect annotation manager to sidebar
         tab.sidebar.set_annotation_manager(tab.view.annotation_manager)
@@ -1171,6 +1192,7 @@ class MainWindow(QMainWindow):
             tab.view.selection_changed.disconnect(self._update_status)
             tab.view.reflow_progress.disconnect(self._on_reflow_progress)
             tab.view.reflow_ready.disconnect(self._on_reflow_ready)
+            tab.view.reflow_font_scale_changed.disconnect(self._on_reflow_font_scale_changed)
             tab.sidebar.goto_page_requested.disconnect(self._goto)
         except TypeError:
             pass
@@ -1200,8 +1222,9 @@ class MainWindow(QMainWindow):
         self.page_spin.setValue(view.current_page + 1)
         self.page_spin.blockSignals(False)
         self.page_label.setText(f"/ {view.page_count}")
-        self.zoom_label.setText(f"{int(round(view.zoom * 100))}%")
+        self._update_zoom_label(view)
         self.act_reflow.setChecked(view.reflow_mode)
+        self._update_zoom_actions(view.reflow_mode)
         self.act_dark_mode.setChecked(view.dark_mode)
         # search results belong to the previous document
         self.results.clear()
@@ -1257,7 +1280,9 @@ class MainWindow(QMainWindow):
         self.page_spin.setValue(1)
         self.page_label.setText("/ 0")
         self.zoom_label.setText("100%")
+        self.zoom_label.setToolTip("Zoom level")
         self.act_reflow.setChecked(False)
+        self._update_zoom_actions(False)
         self.results.clear()
         self.hit_label.setText("")
         self.status_left.setText("No document")
@@ -1341,8 +1366,37 @@ class MainWindow(QMainWindow):
         self._update_status()
 
     def _on_zoom_changed(self, zoom: float) -> None:
-        self.zoom_label.setText(f"{int(round(zoom * 100))}%")
+        self._update_zoom_label()
         self._update_status()
+
+    def _update_zoom_label(self, view: Optional['PDFView'] = None) -> None:
+        """Show the zoom factor, or the reflow text-size multiplier."""
+        if view is None:
+            view = self.view
+        if view is not None and view.reflow_mode:
+            self.zoom_label.setText(f"{int(round(view.reflow_font_scale * 100))}%")
+            self.zoom_label.setToolTip("Reflow text size (Ctrl++ / Ctrl+-)")
+        else:
+            zoom = int(round(view.zoom * 100)) if view is not None else 100
+            self.zoom_label.setText(f"{zoom}%")
+            self.zoom_label.setToolTip("Zoom level")
+
+    def _update_zoom_actions(self, reflow: bool) -> None:
+        """Keep Ctrl +/- labelled for what they actually do in this mode."""
+        if reflow:
+            self.act_zin.setText("Increase Text Size")
+            self.act_zin.setToolTip("Increase reflow text size (Ctrl++)")
+            self.act_zout.setText("Decrease Text Size")
+            self.act_zout.setToolTip("Decrease reflow text size (Ctrl+-)")
+            self.act_zoom_100.setText("Default Text Size")
+            self.act_zoom_100.setToolTip("Reset reflow text size (Ctrl+0)")
+        else:
+            self.act_zin.setText("Zoom In")
+            self.act_zin.setToolTip("Zoom in (Ctrl++)")
+            self.act_zout.setText("Zoom Out")
+            self.act_zout.setToolTip("Zoom out (Ctrl+-)")
+            self.act_zoom_100.setText("100%")
+            self.act_zoom_100.setToolTip("Actual size (Ctrl+0)")
 
     def _update_status(self) -> None:
         if not self.view:
@@ -1350,6 +1404,12 @@ class MainWindow(QMainWindow):
             return
         sel = self.view.selected_text()
         extra = f"   |   {len(sel)} chars selected" if sel else ""
+        if self.view.reflow_mode:
+            self.status_right.setText(
+                f"Page {self.view.current_page + 1}/{self.view.page_count}   |   "
+                f"Reflow — text {int(round(self.view.reflow_font_scale * 100))}%"
+                f"{extra}")
+            return
         self.status_right.setText(
             f"Page {self.view.current_page + 1}/{self.view.page_count}   |   "
             f"{int(round(self.view.zoom * 100))}%   |   "

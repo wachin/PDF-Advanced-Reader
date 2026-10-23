@@ -54,7 +54,7 @@ Fixes in 2.0 (there were ten other bugs behind it):
 - **Zoom** — fit-page, fit-width, presets 50 %–400 %, `Ctrl` + mouse wheel zooms around the cursor.
 - **Rotation** — 90° steps, with selection and highlights staying on the right words.
 - **Encrypted PDFs** — password prompt, credentials are passed to the render workers only.
-- **Reflow mode** — single-column text view for comfortable reading on any window size; text is extracted and laid out in the background, with a clear fallback when a document has no text layer.
+- **Reflow mode** — single-column text view for comfortable reading on any window size; text is extracted and laid out in the background, with adjustable text size and a clear fallback when a document has no text layer.
 - **Comfort** — drag & drop to open, open from the command line, recent-file memory, remembered window layout, page spinner, status bar.
 
 ### Keyboard shortcuts
@@ -64,7 +64,7 @@ Fixes in 2.0 (there were ten other bugs behind it):
 | `Ctrl+O` | Open PDF |
 | `Ctrl+F` / `Ctrl+L` | Focus search |
 | `F3` / `Shift+F3` | Next / previous search hit |
-| `Ctrl++` / `Ctrl+-` | Zoom in / out |
+| `Ctrl++` / `Ctrl+-` | Zoom in / out; reflow text size when reflow is active |
 | `Ctrl+0` / `Ctrl+1` / `Ctrl+2` | Fit page / 100 % / fit width |
 | `Ctrl+Left` / `Ctrl+Right` | Rotate view |
 | `Space` / `PgDown` / `PgUp` | Page down / up |
@@ -96,7 +96,10 @@ transformation:
 - **Images, figures and vector graphics are not shown** in reflow; only text is
   extracted and re-laid out.
 - **Zoom and rotation do not apply while reflow is active** — the column is
-  sized to the window and re-wraps when the window is resized.
+  sized to the window and re-wraps when the window is resized. Use
+  `Ctrl++` / `Ctrl+-` to increase or decrease the text size and `Ctrl+0` to
+  reset it; the page and reading position are preserved while the column is
+  rebuilt.
 - Returning to normal view restores the original page layout and the page you
   were reading.
 

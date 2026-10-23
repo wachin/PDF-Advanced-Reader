@@ -18,8 +18,10 @@ from PyQt6.QtWidgets import QMessageBox
 
 from pdfar.main import MainWindow
 from pdfar.reflow import (
-    REFLOW_MAX_WIDTH, REFLOW_MIN_WIDTH, Line, extract_paragraphs,
-    layout_paragraphs, reflow_text_width,
+    REFLOW_FONT_SCALE_MAX, REFLOW_FONT_SCALE_MIN, REFLOW_MAX_WIDTH,
+    REFLOW_MIN_WIDTH, REFLOW_UI_MAX_FONT, REFLOW_UI_MIN_FONT, Line,
+    clamp_font_scale, extract_paragraphs, layout_paragraphs,
+    measure_text, reflow_text_width, scaled_font_size,
 )
 from pdfar.viewer import PDFView
 
@@ -111,6 +113,41 @@ def test_layout_wraps_lines_within_width(qapp, tmp_path):
         assert line_w <= width + 1, f"line overflows: {line_w} > {width}"
 
 
+def test_font_scale_is_clamped(qapp):
+    assert clamp_font_scale(0.01) == REFLOW_FONT_SCALE_MIN
+    assert clamp_font_scale(99) == REFLOW_FONT_SCALE_MAX
+    assert clamp_font_scale("bad") == 1.0
+    assert scaled_font_size(34, 99) == REFLOW_UI_MAX_FONT
+    assert scaled_font_size(10, 99) == 30
+    assert scaled_font_size(10, 0.01) == REFLOW_UI_MIN_FONT
+
+
+def test_layout_font_scale_grows_text_and_keeps_width(qapp, tmp_path):
+    path = build_text_pdf(tmp_path / "text.pdf", pages=1)
+    doc = fitz.open(path)
+    try:
+        paragraphs = extract_paragraphs(doc[0], 0)
+    finally:
+        doc.close()
+
+    width = 300
+    small = layout_paragraphs(paragraphs, width, 0, size_scale=0.7)
+    normal = layout_paragraphs(paragraphs, width, 0)
+    big = layout_paragraphs(paragraphs, width, 0, size_scale=1.6)
+
+    assert small.height < normal.height < big.height
+    assert small.lines[0].runs[0][2] < normal.lines[0].runs[0][2]
+    assert normal.lines[0].runs[0][2] < big.lines[0].runs[0][2]
+
+    for layout in (small, normal, big):
+        for line in layout.lines:
+            line_w = sum(
+                measure_text(text, family, size, bold, italic)
+                for text, family, size, bold, italic in line.runs
+            )
+            assert line_w <= width + 1, f"line overflows: {line_w} > {width}"
+
+
 def test_layout_marks_image_only_page_as_empty(qapp, tmp_path):
     doc = fitz.open()
     page = doc.new_page(width=200, height=200)
@@ -173,6 +210,53 @@ def test_reflow_anchors_requested_page_after_preparation(qapp, tmp_path):
         assert view.current_page == 8
         scroll = view.verticalScrollBar().value()
         assert 0 <= view._reflow_tops[8] - scroll < 2, "page top not aligned"
+    finally:
+        view.shutdown()
+        view.deleteLater()
+        qapp.processEvents()
+
+
+def test_reflow_text_size_controls_preserve_position(qapp, tmp_path):
+    path = build_text_pdf(tmp_path / "text.pdf", pages=8)
+    view = PDFView(path)
+    view.resize(800, 600)
+    view.show()
+    try:
+        _enable_reflow(view, qapp)
+        view.goto_page(4, center=False)
+        qapp.processEvents()
+        base_height = view._reflow_pages[4].height
+        base_size = view._reflow_pages[4].lines[0].runs[0][2]
+        emitted = []
+        view.reflow_font_scale_changed.connect(emitted.append)
+
+        view.reflow_text_bigger()
+        assert wait_until(qapp, lambda: view._reflow_worker is None)
+        qapp.processEvents()
+        assert view.reflow_font_scale > 1.0
+        assert emitted and emitted[-1] == view.reflow_font_scale
+        assert view.current_page == 4
+        assert view._reflow_pages[4].height > base_height
+        assert view._reflow_pages[4].lines[0].runs[0][2] > base_size
+        assert 0 <= view._reflow_tops[4] - view.verticalScrollBar().value() < 2
+
+        view.reflow_text_smaller()
+        assert wait_until(qapp, lambda: view._reflow_worker is None)
+        qapp.processEvents()
+        assert view.reflow_font_scale == pytest.approx(1.0)
+        assert view.current_page == 4
+
+        view.reflow_text_smaller()
+        assert wait_until(qapp, lambda: view._reflow_worker is None)
+        qapp.processEvents()
+        assert view.reflow_font_scale < 1.0
+        assert view._reflow_pages[4].height < base_height
+
+        view.set_reflow_font_scale(1.0)
+        assert wait_until(qapp, lambda: view._reflow_worker is None)
+        qapp.processEvents()
+        assert view.reflow_font_scale == pytest.approx(1.0)
+        assert view._reflow_pages[4].height == pytest.approx(base_height)
     finally:
         view.shutdown()
         view.deleteLater()
@@ -321,6 +405,39 @@ def test_reflow_shutdown_while_preparing_is_clean(qapp, tmp_path):
 
 
 # ---------------------------------------------------------- main window
+def test_main_window_zoom_actions_switch_with_reflow(qapp, tmp_path):
+    win = MainWindow()
+    win.show()
+    try:
+        win.open_document(build_text_pdf(tmp_path / "a.pdf", pages=3))
+        assert win.act_zin.text() == "Zoom In"
+
+        win._toggle_reflow()
+        assert wait_until(qapp, lambda: win.view._reflow_worker is None)
+        assert win.act_zin.text() == "Increase Text Size"
+        assert win.act_zout.text() == "Decrease Text Size"
+        assert win.zoom_label.text() == "100%"
+
+        win._zoom_in()
+        assert wait_until(qapp, lambda: win.view._reflow_worker is None)
+        assert win.view.reflow_font_scale == pytest.approx(1.15)
+        assert win.zoom_label.text() == "115%"
+        assert "text 115%" in win.status_right.text()
+        # zoom itself must not change while reflow is active
+        assert win.view.zoom != pytest.approx(1.25)
+
+        win._zoom_out()
+        assert wait_until(qapp, lambda: win.view._reflow_worker is None)
+        assert win.view.reflow_font_scale == pytest.approx(1.0)
+        assert win.zoom_label.text() == "100%"
+
+        win._toggle_reflow()
+        assert win.act_zin.text() == "Zoom In"
+        assert win.zoom_label.text() == f"{int(round(win.view.zoom * 100))}%"
+    finally:
+        win.close()
+
+
 def test_main_window_reflow_is_per_tab(qapp, tmp_path):
     win = MainWindow()
     win.show()

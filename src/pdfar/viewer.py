@@ -32,7 +32,10 @@ from PyQt6.QtWidgets import QAbstractScrollArea, QFrame, QScroller
 
 from .cache import PageCache
 from .geometry import display_size, map_rect, normalize_rotation
-from .reflow import PageLayout, REFLOW_PAGE_GAP, ReflowWorker, reflow_text_width
+from .reflow import (
+    PageLayout, REFLOW_FONT_STEP, REFLOW_PAGE_GAP, ReflowWorker,
+    clamp_font_scale, reflow_text_width,
+)
 from .render import RenderPool, RenderResult
 from .search import SearchHit
 from .tiles import Tile, TileGrid, TILE_SIZE
@@ -102,6 +105,7 @@ class PDFView(QAbstractScrollArea):
     doc_error = pyqtSignal(str)
     reflow_progress = pyqtSignal(int, int)  # (pages laid out, page count)
     reflow_ready = pyqtSignal(bool, int)    # (has_text, pages without text)
+    reflow_font_scale_changed = pyqtSignal(float)  # text-size multiplier
 
     def __init__(self, doc_path: str, parent=None, password: str = ""):
         super().__init__(parent)
@@ -139,6 +143,8 @@ class PDFView(QAbstractScrollArea):
         self._reflow_empty_pages = 0
         self._reflow_pending_page: Optional[int] = None
         self._reflow_pending_center = False
+        self._reflow_pending_ratio: Optional[float] = None
+        self._reflow_font_scale = 1.0
         self._reflow_error = ""
         self._reflow_fonts: Dict[Tuple[str, int, bool, bool], QFont] = {}
         self._reflow_metrics: Dict[Tuple[str, int, bool, bool], QFontMetrics] = {}
@@ -377,6 +383,37 @@ class PDFView(QAbstractScrollArea):
     def is_reflow_mode(self) -> bool:
         return self.reflow_mode
 
+    @property
+    def reflow_font_scale(self) -> float:
+        """Text-size multiplier used by the reflow layout (1.0 = default)."""
+        return self._reflow_font_scale
+
+    def reflow_text_bigger(self) -> None:
+        self.set_reflow_font_scale(self._reflow_font_scale * REFLOW_FONT_STEP)
+
+    def reflow_text_smaller(self) -> None:
+        self.set_reflow_font_scale(self._reflow_font_scale / REFLOW_FONT_STEP)
+
+    def set_reflow_font_scale(self, scale: float) -> None:
+        """Change the reflow text size and rebuild the column.
+
+        The viewport keeps the same reading position: the page and the
+        relative offset inside it are restored once the new layout of that
+        page is ready.
+        """
+        scale = clamp_font_scale(scale)
+        if abs(scale - self._reflow_font_scale) < 1e-6:
+            return
+        self._reflow_font_scale = scale
+        if self.reflow_mode and self.page_count:
+            page = self.current_page
+            ratio = self._reflow_view_ratio(page)
+            self._enter_reflow()
+            self._reflow_pending_page = page
+            self._reflow_pending_center = False
+            self._reflow_pending_ratio = ratio
+        self.reflow_font_scale_changed.emit(scale)
+
     def _enter_reflow(self) -> None:
         self._stop_reflow_worker()
         self._reflow_pages.clear()
@@ -387,6 +424,7 @@ class PDFView(QAbstractScrollArea):
         self._reflow_error = ""
         self._reflow_pending_page = None
         self._reflow_pending_center = False
+        self._reflow_pending_ratio = None
 
         # Reserve the scrollbar so the column width does not change (and the
         # layout does not need rebuilding) once the height becomes known.
@@ -400,7 +438,8 @@ class PDFView(QAbstractScrollArea):
 
         if self.page_count:
             worker = ReflowWorker(self.doc_path, self._reflow_width,
-                                  password=self._password, parent=None)
+                                  password=self._password,
+                                  font_scale=self._reflow_font_scale, parent=None)
             worker.page_ready.connect(self._on_reflow_page)
             worker.progress.connect(self._on_reflow_progress)
             worker.failed.connect(self._on_reflow_failed)
@@ -424,6 +463,7 @@ class PDFView(QAbstractScrollArea):
         self._reflow_total = 0
         self._reflow_pending_page = None
         self._reflow_pending_center = False
+        self._reflow_pending_ratio = None
         self.setVerticalScrollBarPolicy(self._vbar_policy_before_reflow)
         page = self.current_page
         self._relayout()
@@ -495,7 +535,12 @@ class PDFView(QAbstractScrollArea):
         pending = self._reflow_pending_page
         if pending is not None and pending in self._reflow_pages:
             self._reflow_pending_page = None
-            self._scroll_to_reflow_page(pending, center=self._reflow_pending_center)
+            ratio = self._reflow_pending_ratio
+            self._reflow_pending_ratio = None
+            if ratio is None:
+                self._scroll_to_reflow_page(pending, center=self._reflow_pending_center)
+            else:
+                self._scroll_to_reflow_ratio(pending, ratio)
             self._reflow_pending_center = False
         self.viewport().update()
 
@@ -529,10 +574,14 @@ class PDFView(QAbstractScrollArea):
             return 0.0
         w, h = self.page_sizes[page]
         # A reflowed column is roughly as tall as the original page's text,
-        # scaled by the width ratio.
+        # scaled by the width ratio.  At a fixed column width the text area
+        # grows roughly with the square of the font scale (fewer characters
+        # per line, taller lines).
         text_w = max(1, self._reflow_width)
         ratio = (w / text_w) if text_w else 1.0
-        return max(200.0, float(h) * max(0.5, min(ratio, 2.0)))
+        estimate = float(h) * max(0.5, min(ratio, 2.0))
+        estimate *= self._reflow_font_scale ** 2
+        return max(200.0, estimate)
 
     def _recompute_reflow_layout(self) -> None:
         top = float(PAD)
@@ -557,8 +606,30 @@ class PDFView(QAbstractScrollArea):
         if width == self._reflow_width:
             return
         page = self.current_page
+        ratio = self._reflow_view_ratio(page)
         self._enter_reflow()
-        self.goto_page(page, center=True)
+        self._reflow_pending_page = page
+        self._reflow_pending_center = False
+        self._reflow_pending_ratio = ratio
+
+    def _reflow_view_ratio(self, page: int) -> float:
+        """Relative offset of the viewport top inside *page*'s section."""
+        if page < 0 or page >= len(self._reflow_tops):
+            return 0.0
+        layout = self._reflow_pages.get(page)
+        height = layout.height if layout is not None else self._reflow_estimate_height(page)
+        if height <= 0:
+            return 0.0
+        offset = (self.verticalScrollBar().value() - self._reflow_tops[page]) / height
+        return max(0.0, min(1.0, offset))
+
+    def _scroll_to_reflow_ratio(self, page: int, ratio: float) -> None:
+        if page < 0 or page >= len(self._reflow_tops):
+            return
+        layout = self._reflow_pages.get(page)
+        height = layout.height if layout is not None else self._reflow_estimate_height(page)
+        value = self._reflow_tops[page] + max(0.0, min(1.0, ratio)) * height
+        self.verticalScrollBar().setValue(int(max(0, value)))
 
     def _scroll_to_reflow_page(self, page: int, center: bool = True) -> None:
         if page < 0 or page >= len(self._reflow_tops):
@@ -1396,6 +1467,11 @@ class PDFView(QAbstractScrollArea):
             if index not in self._reflow_pages and self._reflow_worker is not None:
                 self._reflow_pending_page = index
                 self._reflow_pending_center = center
+                self._reflow_pending_ratio = None
+            else:
+                # Explicit navigation wins over a queued re-anchor.
+                self._reflow_pending_page = None
+                self._reflow_pending_ratio = None
             self._scroll_to_reflow_page(index, center=center)
             self.current_page = index
             self.page_changed.emit(index)
@@ -1542,10 +1618,16 @@ class PDFView(QAbstractScrollArea):
             self.next_highlight_color()
             event.accept()
         elif ctrl and key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
-            self.zoom_in()
+            if self.reflow_mode:
+                self.reflow_text_bigger()
+            else:
+                self.zoom_in()
             event.accept()
         elif ctrl and key == Qt.Key.Key_Minus:
-            self.zoom_out()
+            if self.reflow_mode:
+                self.reflow_text_smaller()
+            else:
+                self.zoom_out()
             event.accept()
         elif key in (Qt.Key.Key_PageDown, Qt.Key.Key_Space):
             self.page_step(+1)
