@@ -5,9 +5,10 @@ import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pytest
 import pymupdf as fitz
-from PyQt6.QtCore import QPoint, Qt
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import QPoint, QPointF, Qt
+from PyQt6.QtGui import QColor, QWheelEvent
 from PyQt6.QtTest import QTest
 
 from pdfar.geometry import map_rect
@@ -141,6 +142,63 @@ def test_zoom_rescales_layout_and_renders(qapp, sample_pdf):
         img = wait_page(view, qapp, 0)
         assert img.width() == int(200 * 2) or abs(img.width() - 400) <= 1
         assert is_dark(sample(img, BLACK_SQ, view.page_sizes[0], view.zoom, view.rotation))
+    finally:
+        view.shutdown()
+        view.deleteLater()
+        qapp.processEvents()
+
+
+def test_zoom_in_out_use_additive_step(qapp, sample_pdf):
+    view = PDFView(sample_pdf)
+    view.resize(500, 400)
+    view.show()
+    qapp.processEvents()
+    try:
+        view.set_zoom(1.03)
+        view.set_zoom_step(0.10)
+        view.zoom_in()
+        assert view.zoom == pytest.approx(1.13)
+        view.zoom_in()
+        assert view.zoom == pytest.approx(1.23)
+        view.zoom_out()
+        assert view.zoom == pytest.approx(1.13)
+        view.set_zoom_step(0.025)
+        view.zoom_in()
+        assert view.zoom == pytest.approx(1.155)
+    finally:
+        view.shutdown()
+        view.deleteLater()
+        qapp.processEvents()
+
+
+def _ctrl_wheel(view, delta):
+    pos = QPointF(view.viewport().rect().center())
+    event = QWheelEvent(
+        pos, QPointF(view.viewport().mapToGlobal(pos.toPoint())),
+        QPoint(0, 0), QPoint(0, delta),
+        Qt.MouseButton.NoButton, Qt.KeyboardModifier.ControlModifier,
+        Qt.ScrollPhase.NoScrollPhase, False)
+    view.wheelEvent(event)
+
+
+def test_ctrl_wheel_step_and_fluid_modes(qapp, sample_pdf):
+    view = PDFView(sample_pdf)
+    view.resize(500, 400)
+    view.show()
+    qapp.processEvents()
+    try:
+        view.set_zoom_step(0.10)
+        view.set_zoom(1.0)
+        view.set_ctrl_wheel_step(True)
+        _ctrl_wheel(view, 120)
+        assert view.zoom == pytest.approx(1.10)
+        _ctrl_wheel(view, 120)
+        assert view.zoom == pytest.approx(1.20)
+
+        view.set_ctrl_wheel_step(False)
+        view.set_zoom(1.0)
+        _ctrl_wheel(view, 120)
+        assert view.zoom == pytest.approx(1.15)
     finally:
         view.shutdown()
         view.deleteLater()

@@ -124,6 +124,8 @@ class PDFView(QAbstractScrollArea):
             self.page_sizes.append((r.width, r.height))
 
         self.zoom = 1.0
+        self.zoom_step = 0.10           # additive step for buttons / shortcuts
+        self.ctrl_wheel_step = True     # Ctrl+wheel uses zoom_step, not fluid zoom
         self.rotation = 0
         self.fit_mode = "none"          # 'none' | 'width' | 'page'
         self.current_page = 0
@@ -1317,10 +1319,18 @@ class PDFView(QAbstractScrollArea):
         self.viewport().update()
 
     def zoom_in(self) -> None:
-        self.set_zoom(self.zoom * 1.25)
+        self.set_zoom(self.zoom + self.zoom_step)
 
     def zoom_out(self) -> None:
-        self.set_zoom(self.zoom / 1.25)
+        self.set_zoom(self.zoom - self.zoom_step)
+
+    def set_zoom_step(self, step: float) -> None:
+        """Set the additive zoom increment (0.10 == +10 percentage points)."""
+        self.zoom_step = max(0.001, min(1.0, float(step)))
+
+    def set_ctrl_wheel_step(self, enabled: bool) -> None:
+        """Use the discrete zoom step for Ctrl+wheel instead of fluid zoom."""
+        self.ctrl_wheel_step = bool(enabled)
 
     def set_fit_mode(self, mode: str) -> None:
         self.fit_mode = mode
@@ -1529,7 +1539,11 @@ class PDFView(QAbstractScrollArea):
                 and not self.reflow_mode):
             steps = event.angleDelta().y() / 120.0
             if steps:
-                self.set_zoom(self.zoom * (1.15 ** steps), anchor=event.position().toPoint())
+                if self.ctrl_wheel_step:
+                    zoom = self.zoom + self.zoom_step * steps
+                else:
+                    zoom = self.zoom * (1.15 ** steps)
+                self.set_zoom(zoom, anchor=event.position().toPoint())
             event.accept()
             return
         delta = event.angleDelta().y()

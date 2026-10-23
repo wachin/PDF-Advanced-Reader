@@ -37,6 +37,10 @@ _ASSET_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "assets", "icons")
 
+ZOOM_STEP_PRESETS = (0.025, 0.05, 0.075, 0.10, 0.125,
+                     0.15, 0.175, 0.20, 0.225, 0.25)
+DEFAULT_ZOOM_STEP = 0.10
+
 
 def _asset_path(name: str) -> str:
     """Resolve an asset from the source checkout, falling back to the CWD."""
@@ -54,6 +58,8 @@ class MainWindow(QMainWindow):
         self._search_tab: Optional[DocumentTab] = None
         self._presentation = False
         self.memory_level = "normal"     # preload level applied to new views
+        self.zoom_step = DEFAULT_ZOOM_STEP
+        self.ctrl_wheel_step = True
         self.search_thread: Optional[QThread] = None
         self.search_worker: Optional[SearchWorker] = None
         self.settings = QSettings(APP_NAME, APP_NAME)
@@ -214,6 +220,14 @@ class MainWindow(QMainWindow):
         self.act_fit_page.setToolTip("Fit page (Ctrl+2)")
         self.act_fit_page.triggered.connect(self._fit_page)
 
+        self.act_ctrl_wheel_step = QAction("Ctrl+Wheel Uses Zoom Step", self)
+        self.act_ctrl_wheel_step.setCheckable(True)
+        self.act_ctrl_wheel_step.setChecked(True)
+        self.act_ctrl_wheel_step.setToolTip(
+            "When checked, Ctrl+wheel zooms by the selected step; "
+            "otherwise it zooms fluidly")
+        self.act_ctrl_wheel_step.triggered.connect(self._toggle_ctrl_wheel_step)
+
         # Tools menu actions
         self.act_rotate_left = QAction("Rotate Left", self)
         self.act_rotate_left.setShortcut("Ctrl+Left")
@@ -304,6 +318,7 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         view_menu.addAction(self.act_zin)
         view_menu.addAction(self.act_zout)
+        view_menu.addAction(self.act_ctrl_wheel_step)
         view_menu.addSeparator()
         view_menu.addAction(self.act_sidebar)
         view_menu.addAction(self.act_dark_mode)
@@ -370,6 +385,23 @@ class MainWindow(QMainWindow):
         self.zoom_combo.setFixedWidth(104)
         self.zoom_combo.currentTextChanged.connect(self._apply_zoom_preset)
         tb.addWidget(self.zoom_combo)
+
+        step_label = QLabel("Step")
+        step_label.setToolTip("Zoom increment used by Zoom In/Out, Ctrl++/Ctrl+- "
+                              "and Ctrl+wheel")
+        tb.addWidget(step_label)
+        self.zoom_step_combo = QComboBox()
+        for step in ZOOM_STEP_PRESETS:
+            self.zoom_step_combo.addItem(f"{step * 100:g}%", step)
+        default_index = min(
+            range(self.zoom_step_combo.count()),
+            key=lambda i: abs(self.zoom_step_combo.itemData(i) - DEFAULT_ZOOM_STEP))
+        self.zoom_step_combo.setCurrentIndex(default_index)
+        self.zoom_step_combo.setFixedWidth(62)
+        self.zoom_step_combo.setToolTip(
+            "Zoom step for Zoom In/Out, Ctrl++/Ctrl+- and Ctrl+wheel")
+        self.zoom_step_combo.currentIndexChanged.connect(self._apply_zoom_step)
+        tb.addWidget(self.zoom_step_combo)
         tb.addSeparator()
 
         # Memory level
@@ -1165,6 +1197,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Open", f"Could not render PDF:\n{exc}")
             return False
 
+        tab.view.set_zoom_step(self.zoom_step)
+        tab.view.set_ctrl_wheel_step(self.ctrl_wheel_step)
+
         # left dock: created once, its widget follows the active tab
         if not hasattr(self, "side_dock") or self.side_dock is None:
             self.side_dock = QDockWidget("Pages", self)
@@ -1352,6 +1387,26 @@ class MainWindow(QMainWindow):
             self._set_fit("width")
         elif text.endswith("%"):
             self._set_zoom(int(text[:-1]) / 100.0)
+
+    def _apply_zoom_step(self, _index: int = -1) -> None:
+        step = self.zoom_step_combo.currentData()
+        if step is None:
+            return
+        self.zoom_step = float(step)
+        self.settings.setValue("zoom_step", self.zoom_step)
+        self._apply_zoom_settings()
+
+    def _toggle_ctrl_wheel_step(self, checked: bool) -> None:
+        self.ctrl_wheel_step = checked
+        self.settings.setValue("ctrl_wheel_zoom_step", checked)
+        self._apply_zoom_settings()
+
+    def _apply_zoom_settings(self) -> None:
+        for i in range(self.tabs.count()):
+            tab = self.tabs.widget(i)
+            if isinstance(tab, DocumentTab):
+                tab.view.set_zoom_step(self.zoom_step)
+                tab.view.set_ctrl_wheel_step(self.ctrl_wheel_step)
 
     def _apply_memory_level(self, text: str) -> None:
         """Apply the chosen preload memory level to the active view and persist
@@ -1597,6 +1652,22 @@ class MainWindow(QMainWindow):
             lvl = "normal"
         self.memory_level = lvl
         self.mem_combo.setCurrentText(lvl.capitalize())
+        # restore the additive zoom step and the Ctrl+wheel behaviour
+        try:
+            step = float(self.settings.value("zoom_step", DEFAULT_ZOOM_STEP,
+                                             type=float))
+        except (TypeError, ValueError):
+            step = DEFAULT_ZOOM_STEP
+        step = max(0.001, min(1.0, step))
+        idx = min(range(self.zoom_step_combo.count()),
+                  key=lambda i: abs(self.zoom_step_combo.itemData(i) - step))
+        self.zoom_step = float(self.zoom_step_combo.itemData(idx))
+        self.zoom_step_combo.blockSignals(True)
+        self.zoom_step_combo.setCurrentIndex(idx)
+        self.zoom_step_combo.blockSignals(False)
+        self.ctrl_wheel_step = self.settings.value(
+            "ctrl_wheel_zoom_step", True, type=bool)
+        self.act_ctrl_wheel_step.setChecked(self.ctrl_wheel_step)
         # restore dark mode
         dark = self.settings.value("dark_mode", False, type=bool)
         self.act_dark_mode.setChecked(dark)

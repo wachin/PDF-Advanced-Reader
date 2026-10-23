@@ -7,8 +7,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
+from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import QMessageBox
 
+from pdfar import APP_NAME
 from pdfar.main import MainWindow
 
 
@@ -149,6 +151,56 @@ def test_zoom_preset_and_rotation_actions(qapp, sample_pdf):
         win.close()
         win.deleteLater()
         qapp.processEvents()
+
+
+def test_zoom_step_presets_and_ctrl_wheel_option(qapp, sample_pdf):
+    settings = QSettings(APP_NAME, APP_NAME)
+    old_step = settings.value("zoom_step")
+    old_wheel = settings.value("ctrl_wheel_zoom_step")
+    settings.setValue("zoom_step", 0.10)
+    settings.setValue("ctrl_wheel_zoom_step", True)
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        labels = [win.zoom_step_combo.itemText(i)
+                  for i in range(win.zoom_step_combo.count())]
+        assert labels == ["2.5%", "5%", "7.5%", "10%", "12.5%",
+                          "15%", "17.5%", "20%", "22.5%", "25%"]
+        assert win.zoom_step_combo.currentText() == "10%"
+        assert win.act_ctrl_wheel_step.isCheckable()
+        assert win.act_ctrl_wheel_step.isChecked()
+
+        assert win.open_document(sample_pdf) is True
+        win.zoom_combo.setCurrentText("100%")
+        assert win.view.zoom == pytest.approx(1.0)
+        win._zoom_in()
+        assert win.view.zoom == pytest.approx(1.10)
+        assert win.view.zoom_step == pytest.approx(0.10)
+        assert win.view.ctrl_wheel_step is True
+
+        win.zoom_step_combo.setCurrentText("5%")
+        assert win.zoom_step == pytest.approx(0.05)
+        assert win.view.zoom_step == pytest.approx(0.05)
+        assert win.settings.value("zoom_step", type=float) == pytest.approx(0.05)
+        win._zoom_in()
+        assert win.view.zoom == pytest.approx(1.15)
+
+        win.act_ctrl_wheel_step.trigger()
+        assert win.ctrl_wheel_step is False
+        assert win.view.ctrl_wheel_step is False
+        assert win.settings.value("ctrl_wheel_zoom_step", type=bool) is False
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+        for key, old in (("zoom_step", old_step),
+                         ("ctrl_wheel_zoom_step", old_wheel)):
+            if old is None:
+                settings.remove(key)
+            else:
+                settings.setValue(key, old)
 
 
 def test_recent_files_menu(qapp, sample_pdf):
