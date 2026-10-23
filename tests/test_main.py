@@ -8,9 +8,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from PyQt6.QtCore import QSettings, Qt
-from PyQt6.QtWidgets import QMessageBox, QToolButton
+from PyQt6.QtWidgets import QLabel, QMessageBox, QToolButton
 
-from pdfar import APP_NAME
+from pdfar import APP_NAME, __version__
 from pdfar.main import MainWindow
 
 
@@ -124,6 +124,35 @@ def test_search_through_the_dock(qapp, sample_pdf):
         assert win.hit_label.text().startswith("Hit")
     finally:
         win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_about_dialog_content(qapp):
+    win = MainWindow()
+    try:
+        dlg = win._build_about_dialog()
+        labels = dlg.findChildren(QLabel)
+        rich = next(l for l in labels if "Copyright" in l.text())
+        text = rich.text()
+        assert "© 2026 Washington Indacochea Delgado" in text
+        assert "mailto:linuxfrontier@proton.me" in text
+        assert "linuxfrontier@proton.me" in text
+        assert "GPL3" in text
+        assert "https://github.com/wachin/PDF-Advanced-Reader" in text
+        assert "Technologies used" in text
+        assert "Python 3" in text and "PyQt6" in text and "PyMuPDF" in text
+        assert "A fast, feature-rich PDF reader" in text
+        assert f"Version {__version__}" in text
+        assert rich.openExternalLinks()
+        assert (rich.textInteractionFlags()
+                != Qt.TextInteractionFlag.NoTextInteraction)
+        icons = [l for l in labels if not l.pixmap().isNull()]
+        assert icons, "about dialog should show the program icon"
+        assert icons[0].pixmap().width() >= 128
+        dlg.deleteLater()
+    finally:
         win.close()
         win.deleteLater()
         qapp.processEvents()

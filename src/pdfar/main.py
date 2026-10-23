@@ -703,11 +703,76 @@ class MainWindow(QMainWindow):
 
     def _show_about(self) -> None:
         """Show the about dialog."""
-        QMessageBox.about(self, "About PDFAR",
-            "PDFAR — Advanced PDF Reader\n\n"
-            "A fast, feature-rich PDF reader for Linux.\n\n"
-            "Built with PyQt6 and PyMuPDF (fitz).\n\n"
-            "Version 2.0.0")
+        self._build_about_dialog().exec()
+
+    def _build_about_dialog(self):
+        """Build the About dialog (separate so it can be tested)."""
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"About {APP_NAME}")
+        dlg.setWindowIcon(QIcon(_asset_path("icon.svg")))
+        dlg.setModal(True)
+        dlg.setMinimumWidth(720)
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(28, 28, 28, 18)
+        content = QHBoxLayout()
+        content.setSpacing(26)
+
+        icon_side = 160
+        pixmap = QPixmap(icon_side, icon_side)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        renderer = QSvgRenderer(_asset_path("icon.svg"))
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        renderer.render(painter)
+        painter.end()
+        icon_label = QLabel()
+        icon_label.setPixmap(pixmap)
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_label.setStyleSheet("background: transparent;")
+        content.addWidget(icon_label, 0, Qt.AlignmentFlag.AlignCenter)
+
+        link_color = "#7dd3fc" if self.act_dark_mode.isChecked() else "#2563eb"
+        text = QLabel(
+            f"<h2 style='margin:0'>{APP_NAME}</h2>"
+            "<p style='margin:0 0 10px 0'><b>Advanced PDF Reader</b></p>"
+            "<p style='margin:0 0 10px 0'>A fast, feature-rich PDF reader for "
+            "Linux: continuous scrolling, text search and selection, reflow "
+            "mode, annotations, and tiled rendering that stays smooth on large "
+            "documents.</p>"
+            "<p style='margin:0 0 10px 0'><b>Technologies used</b><br>"
+            "Python 3 · PyQt6 · PyMuPDF (fitz)</p>"
+            "<p style='margin:0'><b>Copyright:</b> © 2026 Washington "
+            "Indacochea Delgado<br>"
+            f"<b>Email:</b> <a href='mailto:linuxfrontier@proton.me' "
+            f"style='color:{link_color}'>linuxfrontier@proton.me</a><br>"
+            "<b>License:</b> GPL3<br>"
+            "<b>Website:</b> <a "
+            "href='https://github.com/wachin/PDF-Advanced-Reader' "
+            f"style='color:{link_color}'>"
+            "https://github.com/wachin/PDF-Advanced-Reader</a></p>"
+            f"<p style='color:gray; margin:10px 0 0 0'>Version {__version__}</p>")
+        text.setTextFormat(Qt.TextFormat.RichText)
+        text.setWordWrap(True)
+        text.setMaximumWidth(470)
+        text.setOpenExternalLinks(True)
+        text.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction)
+        content.addWidget(text, 1)
+
+        layout.addLayout(content)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        if self.act_dark_mode.isChecked():
+            buttons.setStyleSheet(
+                "QPushButton { background-color: #3d3d3d; color: #e0e0e0;"
+                " border: 1px solid #505050; padding: 6px 18px;"
+                " border-radius: 6px; }"
+                "QPushButton:hover { background-color: #4a4a4a; }")
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        return dlg
 
     def _toggle_dark_mode(self) -> None:
         """Toggle dark mode on/off."""
