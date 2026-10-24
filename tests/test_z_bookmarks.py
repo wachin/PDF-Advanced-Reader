@@ -268,3 +268,25 @@ def test_outline_bookmarks_displayed(win, tmp_path):
     assert outline_bms[0].title == "Chapter 1"
     assert outline_bms[1].title == "Section 1.1"
     assert outline_bms[2].title == "Chapter 2"
+
+
+def test_bookmarks_tab_shows_only_user_bookmarks(win, tmp_path):
+    """The Bookmarks tab must not mirror the document outline."""
+    p = build_sample_pdf(tmp_path / "doc.pdf", pages=5)
+    import pymupdf as fitz
+    doc = fitz.open(p)
+    doc.set_toc([[1, "Chapter 1", 1], [1, "Chapter 2", 3]])
+    doc.save(p, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+    doc.close()
+
+    win.open_document(p)
+    tree = win.sidebar.bookmarks_tree
+    assert tree.topLevelItemCount() == 1
+    assert tree.topLevelItem(0).text(0) == "(no bookmarks)"
+
+    win.sidebar.add_bookmark_at_current_page(1, title="My Bookmark")
+    assert tree.topLevelItemCount() == 1
+    root = tree.topLevelItem(0)
+    assert root.text(0) == "📑 User Bookmarks"
+    assert root.childCount() == 1
+    assert root.child(0).text(0).strip() == "My Bookmark (p. 2)"

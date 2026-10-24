@@ -270,50 +270,24 @@ class Sidebar(QWidget):
 
     # ------------------------------------------------------------------ bookmarks
     def _build_bookmarks(self) -> None:
-        """Build the bookmarks tree from user bookmarks and PDF outline."""
+        """Build the bookmarks tree from user bookmarks only."""
         self.bookmarks_tree.clear()
-        all_bookmarks = self.bookmark_manager.get_all_bookmarks()
+        user_bookmarks = self.bookmark_manager.get_user_bookmarks()
 
-        if not all_bookmarks:
+        if not user_bookmarks:
             self.bookmarks_tree.addTopLevelItem(QTreeWidgetItem(["(no bookmarks)"]))
             return
 
-        # Separate user and outline bookmarks
-        user_bookmarks = [b for b in all_bookmarks if b.is_user]
-        outline_bookmarks = [b for b in all_bookmarks if not b.is_user]
-
-        # Build user bookmarks (flat list for now, can add hierarchy later)
-        if user_bookmarks:
-            user_root = QTreeWidgetItem(["📑 User Bookmarks"])
-            user_root.setData(0, Qt.ItemDataRole.UserRole, -1)  # marker
-            user_root.setExpanded(True)
-            for bm in user_bookmarks:
-                node = QTreeWidgetItem([f"  {bm.title} (p. {bm.page + 1})"])
-                node.setData(0, Qt.ItemDataRole.UserRole, bm.page)
-                node.setData(0, Qt.ItemDataRole.UserRole + 1, "user")  # type marker
-                user_root.addChild(node)
-            self.bookmarks_tree.addTopLevelItem(user_root)
-
-        # Build outline bookmarks with hierarchy
-        if outline_bookmarks:
-            outline_root = QTreeWidgetItem(["📖 Document Outline"])
-            outline_root.setData(0, Qt.ItemDataRole.UserRole, -1)
-            outline_root.setExpanded(True)
-            stack: Dict[int, QTreeWidgetItem] = {}
-            for bm in outline_bookmarks:
-                node = QTreeWidgetItem([bm.title])
-                node.setData(0, Qt.ItemDataRole.UserRole, bm.page)
-                node.setData(0, Qt.ItemDataRole.UserRole + 1, "outline")
-                parent = stack.get(bm.level - 1) if bm.level > 1 else outline_root
-                if parent is not None:
-                    parent.addChild(node)
-                else:
-                    outline_root.addChild(node)
-                stack[bm.level] = node
-                for deeper in [k for k in stack if k > bm.level]:
-                    stack.pop(deeper, None)
-            self.bookmarks_tree.addTopLevelItem(outline_root)
-
+        # Flat list for now, can add hierarchy later
+        user_root = QTreeWidgetItem(["📑 User Bookmarks"])
+        user_root.setData(0, Qt.ItemDataRole.UserRole, -1)  # marker
+        user_root.setExpanded(True)
+        for bm in user_bookmarks:
+            node = QTreeWidgetItem([f"  {bm.title} (p. {bm.page + 1})"])
+            node.setData(0, Qt.ItemDataRole.UserRole, bm.page)
+            node.setData(0, Qt.ItemDataRole.UserRole + 1, "user")  # type marker
+            user_root.addChild(node)
+        self.bookmarks_tree.addTopLevelItem(user_root)
         self.bookmarks_tree.expandAll()
 
     def _on_bookmark_activated(self, item: QTreeWidgetItem, _col: int) -> None:
