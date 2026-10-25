@@ -273,14 +273,13 @@ class Sidebar(QWidget):
         self.thumb_minus.setFixedSize(20, 20)
         self.thumb_minus.setToolTip("Smaller thumbnails")
         self.thumb_minus.clicked.connect(lambda: self._step_thumb_size(-8))
-        layout.addWidget(self.thumb_minus)
         layout.addStretch(1)
+        layout.addWidget(self.thumb_minus)
 
         self.thumb_size_label = QLabel(f"{self._thumb_settings.width} px", row)
         self.thumb_size_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.thumb_size_label.setToolTip("Page thumbnail size")
         layout.addWidget(self.thumb_size_label)
-        layout.addStretch(1)
 
         self.thumb_plus = QToolButton(row)
         self.thumb_plus.setText("+")
@@ -289,6 +288,7 @@ class Sidebar(QWidget):
         self.thumb_plus.setToolTip("Larger thumbnails")
         self.thumb_plus.clicked.connect(lambda: self._step_thumb_size(8))
         layout.addWidget(self.thumb_plus)
+        layout.addStretch(1)
 
         self._update_thumb_size_controls()
         return row
