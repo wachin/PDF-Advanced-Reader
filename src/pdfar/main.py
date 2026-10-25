@@ -29,7 +29,9 @@ from PyQt6.QtWidgets import (
 from . import APP_NAME, __version__
 from .i18n import I18n
 from .search import SearchParams, SearchWorker, normalize_space
-from .sidebar import Sidebar
+from .sidebar import (
+    Sidebar, ThumbnailSettings, THUMB_MAX_WIDTH, THUMB_MIN_WIDTH,
+)
 from .tabs import DocumentTab
 from .viewer import PDFView, MEMORY_LEVELS
 
@@ -276,7 +278,12 @@ class MainWindow(QMainWindow):
         self.act_attachments.setToolTip("Show Attachments (Ctrl+Shift+A)")
         self.act_attachments.triggered.connect(self._show_attachments)
 
-        # Help menu
+        # Settings and Help menu actions
+        self.act_settings = QAction("Settings…", self)
+        self.act_settings.setShortcut("Ctrl+,")
+        self.act_settings.setToolTip("Configure thumbnail appearance (Ctrl+,)")
+        self.act_settings.triggered.connect(self._show_settings)
+
         self.act_about = QAction("About", self)
         self.act_about.triggered.connect(self._show_about)
 
@@ -346,6 +353,8 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.act_rotate_left)
         tools_menu.addAction(self.act_rotate_right)
         tools_menu.addAction(self.act_save_annotations)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self.act_settings)
 
         # Help menu
         help_menu = menubar.addMenu("&Help")
@@ -700,6 +709,72 @@ class MainWindow(QMainWindow):
         """Go to the last page."""
         if self.view:
             self.view.goto_page(self.view.page_count - 1)
+
+    def _show_settings(self) -> None:
+        """Show the settings dialog."""
+        self._build_settings_dialog().exec()
+
+    def _build_settings_dialog(self):
+        """Build the Settings dialog (separate so it can be tested)."""
+        from PyQt6.QtWidgets import (
+            QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
+        )
+
+        current = ThumbnailSettings.load()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Settings")
+        dlg.setWindowIcon(QIcon(_asset_path("icon.svg")))
+        dlg.setModal(True)
+        dlg.setMinimumWidth(420)
+
+        layout = QVBoxLayout(dlg)
+        group = QGroupBox("Thumbnails", dlg)
+        form = QFormLayout(group)
+
+        size = QSpinBox(group)
+        size.setRange(THUMB_MIN_WIDTH, THUMB_MAX_WIDTH)
+        size.setSingleStep(8)
+        size.setSuffix(" px")
+        size.setValue(current.width)
+        form.addRow("Page size:", size)
+
+        border = QComboBox(group)
+        for px in (1, 2, 3):
+            border.addItem(f"{px} px", px)
+        border.setCurrentIndex(current.border_width - 1)
+        form.addRow("Border width:", border)
+
+        shadow = QCheckBox("Draw a drop shadow behind each page", group)
+        shadow.setChecked(current.shadow)
+        form.addRow("Shadow:", shadow)
+
+        layout.addWidget(group)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel,
+            dlg,
+        )
+
+        def apply() -> None:
+            settings = ThumbnailSettings(
+                width=size.value(),
+                border_width=int(border.currentData()),
+                shadow=shadow.isChecked(),
+            )
+            settings.save()
+            self._apply_thumbnail_settings(settings)
+            dlg.accept()
+
+        buttons.accepted.connect(apply)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        return dlg
+
+    def _apply_thumbnail_settings(self, settings: ThumbnailSettings) -> None:
+        for i in range(self.tabs.count()):
+            tab = self.tabs.widget(i)
+            if isinstance(tab, DocumentTab) and getattr(tab, "sidebar", None):
+                tab.sidebar.apply_thumbnail_settings(settings)
 
     def _show_about(self) -> None:
         """Show the about dialog."""

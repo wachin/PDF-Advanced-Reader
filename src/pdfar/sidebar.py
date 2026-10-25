@@ -2,26 +2,60 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
 except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
-from PyQt6.QtCore import QRect, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QIcon, QPixmap, QColor
+from PyQt6.QtCore import QRect, QSettings, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QIcon, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget, QMenu, QInputDialog, QMessageBox, QHBoxLayout,
     QPushButton, QComboBox, QFileDialog, QProgressBar, QStyle,
     QStyledItemDelegate,
 )
+from . import APP_NAME
 from .render import RenderPool, RenderResult
 from .bookmarks import BookmarkManager
 from .annotations import AnnotationManager, HIGHLIGHT_COLORS, AnnotationType
 
-THUMB_W = 120
-THUMB_H = int(THUMB_W * 1.414)
+THUMB_DEFAULT_WIDTH = 140
+THUMB_MIN_WIDTH = 96
+THUMB_MAX_WIDTH = 200
+THUMB_RATIO = 1.414
+
+
+@dataclass
+class ThumbnailSettings:
+    """User preferences for the thumbnail strip."""
+
+    width: int = THUMB_DEFAULT_WIDTH
+    border_width: int = 1
+    shadow: bool = True
+
+    @property
+    def height(self) -> int:
+        return int(self.width * THUMB_RATIO)
+
+    @classmethod
+    def load(cls) -> "ThumbnailSettings":
+        settings = QSettings(APP_NAME, APP_NAME)
+        width = int(settings.value("thumbnail_width", THUMB_DEFAULT_WIDTH))
+        border = int(settings.value("thumbnail_border_width", 1))
+        return cls(
+            width=max(THUMB_MIN_WIDTH, min(THUMB_MAX_WIDTH, width)),
+            border_width=max(1, min(3, border)),
+            shadow=settings.value("thumbnail_shadow", True, type=bool),
+        )
+
+    def save(self) -> None:
+        settings = QSettings(APP_NAME, APP_NAME)
+        settings.setValue("thumbnail_width", self.width)
+        settings.setValue("thumbnail_border_width", self.border_width)
+        settings.setValue("thumbnail_shadow", self.shadow)
 
 
 class ThumbnailDelegate(QStyledItemDelegate):
@@ -29,8 +63,16 @@ class ThumbnailDelegate(QStyledItemDelegate):
 
     PAD = 6
 
+    def __init__(self, settings: ThumbnailSettings,
+                 parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.settings = settings
+
     def sizeHint(self, option, index) -> QSize:  # noqa: N802 (Qt naming)
-        return QSize(THUMB_W + 24, self.PAD * 2 + THUMB_H + 2 + option.fontMetrics.height())
+        return QSize(
+            self.settings.width + 24,
+            self.PAD * 2 + self.settings.height + 2 + option.fontMetrics.height(),
+        )
 
     def paint(self, painter, option, index) -> None:  # noqa: N802 (Qt naming)
         painter.save()
@@ -40,17 +82,26 @@ class ThumbnailDelegate(QStyledItemDelegate):
 
         icon = index.data(Qt.ItemDataRole.DecorationRole)
         if isinstance(icon, QIcon):
-            pixmap = icon.pixmap(QSize(THUMB_W, THUMB_H))
+            pixmap = icon.pixmap(QSize(self.settings.width, self.settings.height))
             if not pixmap.isNull():
                 x = option.rect.center().x() - pixmap.width() // 2
-                y = option.rect.top() + self.PAD + (THUMB_H - pixmap.height()) // 2
+                y = option.rect.top() + self.PAD + (self.settings.height - pixmap.height()) // 2
+                if self.settings.shadow:
+                    for offset, alpha in ((3, 26), (2, 20), (1, 12)):
+                        painter.fillRect(
+                            QRect(x + offset, y + offset, pixmap.width(), pixmap.height()),
+                            QColor(0, 0, 0, alpha),
+                        )
                 painter.drawPixmap(x, y, pixmap)
+                painter.setPen(QPen(QColor(0, 0, 0), self.settings.border_width))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(QRect(x, y, pixmap.width() - 1, pixmap.height() - 1))
 
         painter.setPen(option.palette.highlightedText().color() if selected
                        else option.palette.text().color())
         text_rect = QRect(
             option.rect.left(),
-            option.rect.top() + self.PAD + THUMB_H + 2,
+            option.rect.top() + self.PAD + self.settings.height + 2,
             option.rect.width(),
             option.fontMetrics.height(),
         )
@@ -65,14 +116,22 @@ class ThumbnailDelegate(QStyledItemDelegate):
 class ThumbnailList(QListWidget):
     """Page thumbnails in one centered column, regardless of sidebar width."""
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, settings: ThumbnailSettings,
+                 parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
+        self.delegate = ThumbnailDelegate(settings, self)
         self.setViewMode(QListWidget.ViewMode.ListMode)
         self.setMovement(QListWidget.Movement.Static)
         self.setUniformItemSizes(True)
-        self.setIconSize(QSize(THUMB_W, THUMB_H))
+        self.setIconSize(QSize(settings.width, settings.height))
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setItemDelegate(ThumbnailDelegate(self))
+        self.setItemDelegate(self.delegate)
+
+    def apply_settings(self, settings: ThumbnailSettings) -> None:
+        self.delegate.settings = settings
+        self.setIconSize(QSize(settings.width, settings.height))
+        self.doItemsLayout()
+        self.viewport().update()
 
 
 class Sidebar(QWidget):
@@ -86,6 +145,7 @@ class Sidebar(QWidget):
         self.pool = pool
         self.doc_path = doc_path
         self._thumb_zoom: Dict[int, float] = {}
+        self._thumb_settings = ThumbnailSettings.load()
 
         self.bookmark_manager = BookmarkManager(doc_path, doc)
 
@@ -95,7 +155,7 @@ class Sidebar(QWidget):
         layout.addWidget(self.tabs)
 
         # ---- thumbnails -------------------------------------------------
-        self.thumbs = ThumbnailList()
+        self.thumbs = ThumbnailList(self._thumb_settings)
         self.thumbs.itemDoubleClicked.connect(self._on_thumb)
         self.tabs.addTab(self.thumbs, "Thumbnails")
 
@@ -255,8 +315,22 @@ class Sidebar(QWidget):
                 w0 = max(1.0, r.width)
             except Exception:
                 w0 = 595.0
-            zoom = THUMB_W / w0
-            self._thumb_zoom[i] = zoom
+            self._thumb_zoom[i] = self._thumb_settings.width / w0
+
+    def apply_thumbnail_settings(self, settings: ThumbnailSettings) -> None:
+        previous_width = self._thumb_settings.width
+        self._thumb_settings = settings
+        self.thumbs.apply_settings(settings)
+
+        if settings.width != previous_width:
+            scale = settings.width / previous_width
+            for page in self._thumb_zoom:
+                self._thumb_zoom[page] *= scale
+            for i in range(self.thumbs.count()):
+                item = self.thumbs.item(i)
+                if item is not None:
+                    item.setIcon(QIcon())
+            self._request_visible_thumbs()
 
     def _build_outline(self) -> None:
         try:
