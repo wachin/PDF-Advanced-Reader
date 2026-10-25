@@ -776,6 +776,16 @@ class MainWindow(QMainWindow):
             if isinstance(tab, DocumentTab) and getattr(tab, "sidebar", None):
                 tab.sidebar.apply_thumbnail_settings(settings)
 
+    def _on_thumbnail_size_changed(self, width: int) -> None:
+        current = ThumbnailSettings.load()
+        settings = ThumbnailSettings(
+            width=width,
+            border_width=current.border_width,
+            shadow=current.shadow,
+        )
+        settings.save()
+        self._apply_thumbnail_settings(settings)
+
     def _show_about(self) -> None:
         """Show the about dialog."""
         self._build_about_dialog().exec()
@@ -1386,6 +1396,7 @@ class MainWindow(QMainWindow):
         tab.view.reflow_ready.connect(self._on_reflow_ready)
         tab.view.reflow_font_scale_changed.connect(self._on_reflow_font_scale_changed)
         tab.sidebar.goto_page_requested.connect(self._goto)
+        tab.sidebar.thumbnail_size_changed.connect(self._on_thumbnail_size_changed)
         # Connect annotation manager to sidebar
         tab.sidebar.set_annotation_manager(tab.view.annotation_manager)
         self._connected_tab = tab
@@ -1400,6 +1411,7 @@ class MainWindow(QMainWindow):
             tab.view.reflow_ready.disconnect(self._on_reflow_ready)
             tab.view.reflow_font_scale_changed.disconnect(self._on_reflow_font_scale_changed)
             tab.sidebar.goto_page_requested.disconnect(self._goto)
+            tab.sidebar.thumbnail_size_changed.disconnect(self._on_thumbnail_size_changed)
         except TypeError:
             pass
         if self._connected_tab is tab:

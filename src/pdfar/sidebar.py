@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget, QMenu, QInputDialog, QMessageBox, QHBoxLayout,
     QPushButton, QComboBox, QFileDialog, QProgressBar, QStyle,
-    QStyledItemDelegate,
+    QStyledItemDelegate, QLabel, QToolButton,
 )
 from . import APP_NAME
 from .render import RenderPool, RenderResult
@@ -138,6 +138,7 @@ class Sidebar(QWidget):
     """Thumbnails + table of contents + user bookmarks."""
 
     goto_page_requested = pyqtSignal(int)
+    thumbnail_size_changed = pyqtSignal(int)
 
     def __init__(self, doc: fitz.Document, pool: RenderPool, doc_path: str, parent=None):
         super().__init__(parent)
@@ -157,7 +158,13 @@ class Sidebar(QWidget):
         # ---- thumbnails -------------------------------------------------
         self.thumbs = ThumbnailList(self._thumb_settings)
         self.thumbs.itemDoubleClicked.connect(self._on_thumb)
-        self.tabs.addTab(self.thumbs, "Thumbnails")
+        self.thumbs_tab = QWidget()
+        thumbs_layout = QVBoxLayout(self.thumbs_tab)
+        thumbs_layout.setContentsMargins(0, 0, 0, 0)
+        thumbs_layout.setSpacing(0)
+        thumbs_layout.addWidget(self._build_thumb_size_row())
+        thumbs_layout.addWidget(self.thumbs, 1)
+        self.tabs.addTab(self.thumbs_tab, "Thumbnails")
 
         # ---- outline ----------------------------------------------------
         self.outline = QTreeWidget()
@@ -252,6 +259,50 @@ class Sidebar(QWidget):
         self.tabs.currentChanged.connect(self._on_sidebar_tab_changed)
         self._request_visible_thumbs()
 
+    def _build_thumb_size_row(self) -> QWidget:
+        """Slim row with minus, current size, and plus controls."""
+        row = QWidget()
+        row.setFixedHeight(24)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(6, 0, 6, 0)
+        layout.setSpacing(4)
+
+        self.thumb_minus = QToolButton(row)
+        self.thumb_minus.setText("−")
+        self.thumb_minus.setAutoRaise(True)
+        self.thumb_minus.setFixedSize(20, 20)
+        self.thumb_minus.setToolTip("Smaller thumbnails")
+        self.thumb_minus.clicked.connect(lambda: self._step_thumb_size(-8))
+        layout.addWidget(self.thumb_minus)
+        layout.addStretch(1)
+
+        self.thumb_size_label = QLabel(f"{self._thumb_settings.width} px", row)
+        self.thumb_size_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumb_size_label.setToolTip("Page thumbnail size")
+        layout.addWidget(self.thumb_size_label)
+        layout.addStretch(1)
+
+        self.thumb_plus = QToolButton(row)
+        self.thumb_plus.setText("+")
+        self.thumb_plus.setAutoRaise(True)
+        self.thumb_plus.setFixedSize(20, 20)
+        self.thumb_plus.setToolTip("Larger thumbnails")
+        self.thumb_plus.clicked.connect(lambda: self._step_thumb_size(8))
+        layout.addWidget(self.thumb_plus)
+
+        self._update_thumb_size_controls()
+        return row
+
+    def _step_thumb_size(self, delta: int) -> None:
+        width = self._thumb_settings.width + delta
+        if THUMB_MIN_WIDTH <= width <= THUMB_MAX_WIDTH:
+            self.thumbnail_size_changed.emit(width)
+
+    def _update_thumb_size_controls(self) -> None:
+        self.thumb_size_label.setText(f"{self._thumb_settings.width} px")
+        self.thumb_minus.setEnabled(self._thumb_settings.width > THUMB_MIN_WIDTH)
+        self.thumb_plus.setEnabled(self._thumb_settings.width < THUMB_MAX_WIDTH)
+
     # ------------------------------------------------------------------
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -271,7 +322,7 @@ class Sidebar(QWidget):
             return
 
         # If thumbnails tab or sidebar is not visible, only queue a tiny initial batch
-        if not self.isVisible() or self.tabs.currentWidget() != self.thumbs:
+        if not self.isVisible() or self.tabs.currentWidget() != self.thumbs_tab:
             start, end = 0, min(self.thumbs.count() - 1, 4)
         else:
             vp_rect = self.thumbs.viewport().rect()
@@ -321,6 +372,7 @@ class Sidebar(QWidget):
         previous_width = self._thumb_settings.width
         self._thumb_settings = settings
         self.thumbs.apply_settings(settings)
+        self._update_thumb_size_controls()
 
         if settings.width != previous_width:
             scale = settings.width / previous_width

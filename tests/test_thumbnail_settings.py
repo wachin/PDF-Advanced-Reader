@@ -74,6 +74,42 @@ def test_apply_settings_rescales_thumbnail_jobs(win, tmp_path):
     assert sidebar.thumbs.item(0).icon().isNull()
 
 
+def test_inline_size_controls(win, tmp_path):
+    win.open_document(build_sample_pdf(tmp_path / "doc.pdf", pages=3))
+    sidebar = win.sidebar
+    win.sidebar.tabs.setCurrentIndex(0)
+
+    assert sidebar.thumb_size_label.text() == "140 px"
+
+    sidebar.thumb_plus.click()
+    assert sidebar._thumb_settings.width == 148
+    assert sidebar.thumb_size_label.text() == "148 px"
+    assert ThumbnailSettings.load().width == 148
+
+    sidebar.thumb_minus.click()
+    assert sidebar._thumb_settings.width == 140
+
+    sidebar.apply_thumbnail_settings(
+        ThumbnailSettings(width=THUMB_MAX_WIDTH, border_width=1, shadow=True))
+    assert not sidebar.thumb_plus.isEnabled()
+    assert sidebar.thumb_minus.isEnabled()
+
+    sidebar.apply_thumbnail_settings(
+        ThumbnailSettings(width=THUMB_MIN_WIDTH, border_width=1, shadow=True))
+    assert sidebar.thumb_plus.isEnabled()
+    assert not sidebar.thumb_minus.isEnabled()
+
+
+def test_inline_size_updates_all_tabs(win, tmp_path):
+    win.open_document(build_sample_pdf(tmp_path / "one.pdf", pages=3))
+    win.open_document(build_sample_pdf(tmp_path / "two.pdf", pages=3))
+
+    win.sidebar.thumb_plus.click()
+
+    for i in range(win.tabs.count()):
+        assert win.tabs.widget(i).sidebar._thumb_settings.width == 148
+
+
 def test_settings_dialog_saves_and_applies(win, tmp_path):
     win.open_document(build_sample_pdf(tmp_path / "doc.pdf", pages=3))
 
