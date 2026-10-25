@@ -26,13 +26,16 @@ except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 from PyQt6.QtCore import QPoint, QPointF, QRect, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import (
-    QColor, QFont, QFontMetrics, QImage, QKeyEvent, QMouseEvent, QPaintEvent, QPainter,
-    QPen, QWheelEvent, QGuiApplication, QResizeEvent,
+    QColor, QFont, QFontMetrics, QFontMetricsF, QImage, QKeyEvent, QMouseEvent,
+    QPaintEvent, QPainter, QPen, QWheelEvent, QGuiApplication, QResizeEvent,
 )
 from PyQt6.QtWidgets import QAbstractScrollArea, QFrame, QScroller
 
 from .cache import PageCache
-from .geometry import display_size, map_rect, normalize_rotation
+from .geometry import display_size, map_point, map_rect, normalize_rotation
+from .page_numbers import (
+    PageNumberSettings, layout_number, page_range, preview_font,
+)
 from .reflow import (
     PageLayout, REFLOW_FONT_STEP, REFLOW_PAGE_GAP, ReflowWorker,
     clamp_font_scale, reflow_text_width,
@@ -135,6 +138,8 @@ class PDFView(QAbstractScrollArea):
         self.current_page = 0
         self.memory_level = DEFAULT_MEMORY_LEVEL
         self.dark_mode = False
+        self._numbering_preview: Optional[PageNumberSettings] = None
+        self._numbering_font = None
 
         # Reflow (P1-5): page layouts are prepared by a background worker and
         # cached here; painting only walks the lines that intersect the view.
@@ -348,6 +353,23 @@ class PDFView(QAbstractScrollArea):
         self.dark_mode = enabled
         self._apply_theme()
         self.viewport().update()
+
+    # ------------------------------------------------------ numbering preview
+    def set_numbering_preview(self, settings: Optional[PageNumberSettings]) -> None:
+        """Draw red page numbers where they would be stamped (live preview)."""
+        self._numbering_preview = settings
+        if settings is None:
+            self._numbering_font = None
+        else:
+            try:
+                self._numbering_font = fitz.Font(settings.font_family)
+            except Exception:
+                self._numbering_font = fitz.Font("helv")
+        self.viewport().update()
+
+    def clear_numbering_preview(self) -> None:
+        if self._numbering_preview is not None:
+            self.set_numbering_preview(None)
 
     def _apply_theme(self) -> None:
         """Apply theme colors to the widget."""
@@ -1136,6 +1158,49 @@ class PDFView(QAbstractScrollArea):
             x0, y0, x1, y1 = rect
             painter.fillRect(QRect(int(x + x0 * z), int(y + y0 * z),
                                    max(1, int((x1 - x0) * z)), max(1, int((y1 - y0) * z))), SEL_COLOR)
+
+        if self._numbering_preview is not None:
+            self._paint_numbering_preview(painter, page, x, y)
+
+    def _paint_numbering_preview(self, painter: QPainter, page: int,
+                                 x: float, y: float) -> None:
+        settings = self._numbering_preview
+        if settings is None:
+            return
+        first, last = page_range(settings, self.page_count)
+        if not (first <= page <= last):
+            return
+        w0, h0 = self.page_sizes[page]
+        total = last - first + 1
+        text, anchor_x, baseline, alignment = layout_number(
+            settings, w0, h0, settings.start_number + (page - first), total,
+            font=self._numbering_font)
+        u, v = map_point(anchor_x, baseline, w0, h0, self.rotation)
+        z = self.zoom
+        px = x + u * z
+        py = y + v * z
+
+        qfont = preview_font(
+            settings, max(1, int(round(settings.font_size * z))))
+        width = QFontMetricsF(qfont).horizontalAdvance(text)
+        offset = 0.0
+        if alignment == "center":
+            offset = -width / 2.0
+        elif alignment == "right":
+            offset = -width
+
+        dw, dh = self._disp_sizes[page]
+        painter.save()
+        painter.setClipRect(QRect(int(round(x)), int(round(y)),
+                                  int(round(dw)), int(round(dh))))
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.translate(px, py)
+        if self.rotation:
+            painter.rotate(self.rotation)
+        painter.setPen(QColor(220, 30, 30, 215))
+        painter.setFont(qfont)
+        painter.drawText(QPointF(offset, 0.0), text)
+        painter.restore()
 
     def _paint_annotations(self, painter: QPainter, page: int, x: float, y: float) -> None:
         """Draw annotations (highlights) for a page."""

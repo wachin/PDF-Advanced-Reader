@@ -29,6 +29,9 @@ from PyQt6.QtWidgets import (
 from . import APP_NAME, __version__
 from .i18n import I18n
 from .icons import asset_path as _asset_path, tinted_icon
+from .page_numbers import (
+    PageNumbersDialog, PageNumberSettings, numbered_copy_path, stamp_copy,
+)
 from .search import SearchParams, SearchWorker, normalize_space
 from .sidebar import (
     Sidebar, ThumbnailSettings, THUMB_MAX_WIDTH, THUMB_MIN_WIDTH,
@@ -269,6 +272,11 @@ class MainWindow(QMainWindow):
         self.act_attachments.setToolTip("Show Attachments (Ctrl+Shift+A)")
         self.act_attachments.triggered.connect(self._show_attachments)
 
+        self.act_page_numbers = QAction("Page &Numbers…", self)
+        self.act_page_numbers.setToolTip(
+            "Add page numbers to a new copy of the PDF")
+        self.act_page_numbers.triggered.connect(self._show_page_numbers)
+
         # Settings and Help menu actions
         self.act_settings = QAction("Settings…", self)
         self.act_settings.setShortcut("Ctrl+,")
@@ -340,6 +348,8 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.act_add_bookmark)
         tools_menu.addAction(self.act_properties)
         tools_menu.addAction(self.act_attachments)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self.act_page_numbers)
         tools_menu.addSeparator()
         tools_menu.addAction(self.act_rotate_left)
         tools_menu.addAction(self.act_rotate_right)
@@ -680,6 +690,89 @@ class MainWindow(QMainWindow):
                 self.status_left.setText(f"Document saved to {path}")
             except Exception as exc:
                 QMessageBox.critical(self, "Save As", f"Could not save document:\n{exc}")
+
+    def _build_page_numbers_dialog(self):
+        """Build the Page Numbers dialog (separate so it can be tested)."""
+        return PageNumbersDialog(
+            self.view.page_count, PageNumberSettings.load(), self)
+
+    def _show_page_numbers(self) -> None:
+        """Configure page numbers with a live preview, then save a copy."""
+        from PyQt6.QtWidgets import QDialog
+
+        view = self.view
+        if not view:
+            return
+
+        # Reflow has no page geometry, so leave it to show the in-page preview.
+        was_reflow = view.reflow_mode
+        if was_reflow:
+            view.set_reflow_mode(False)
+            self.act_reflow.setChecked(False)
+            self._update_zoom_actions(False)
+            self._update_zoom_label(view)
+
+        dlg = self._build_page_numbers_dialog()
+        view.set_numbering_preview(dlg.settings())
+        dlg.settings_changed.connect(view.set_numbering_preview)
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        view.clear_numbering_preview()
+
+        if was_reflow:
+            view.set_reflow_mode(True)
+            self.act_reflow.setChecked(True)
+            self._update_zoom_actions(True)
+            self._update_zoom_label(view)
+        if not accepted:
+            return
+
+        settings = dlg.settings()
+        source_path = os.path.realpath(view.doc_path)
+        default_path = numbered_copy_path(view.doc_path)
+        while True:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save Numbered Copy", default_path,
+                "PDF Files (*.pdf)")
+            if not path:
+                return
+            if not path.lower().endswith(".pdf"):
+                path += ".pdf"
+            if os.path.realpath(path) != source_path:
+                break
+            QMessageBox.warning(
+                self, "Page Numbers",
+                "Choose a different file name: the numbered copy never "
+                "overwrites the document you have open.")
+            default_path = numbered_copy_path(view.doc_path)
+        path = os.path.abspath(path)
+
+        self.status_left.setText("Saving numbered copy…")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            numbered = stamp_copy(view.doc, path, settings)
+        except Exception as exc:
+            error = exc
+        else:
+            error = None
+        finally:
+            QApplication.restoreOverrideCursor()
+        if error is not None:
+            self.status_left.setText("Could not save numbered copy")
+            QMessageBox.critical(
+                self, "Page Numbers",
+                f"Could not save the numbered copy:\n{error}")
+            return
+
+        settings.save()
+        self.status_left.setText(f"Saved numbered copy: {path}")
+        open_copy = QMessageBox.question(
+            self, "Page Numbers",
+            f"Added numbers to {numbered} page(s).\n\nSaved to:\n{path}\n\n"
+            "Open the new copy?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if open_copy == QMessageBox.StandardButton.Yes:
+            self.open_document(path)
 
     def _print_document(self) -> None:
         """Print the document."""
