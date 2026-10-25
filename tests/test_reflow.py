@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -22,8 +23,8 @@ from pdfar.main import MainWindow
 from pdfar.reflow import (
     REFLOW_FONT_SCALE_MAX, REFLOW_FONT_SCALE_MIN, REFLOW_MAX_WIDTH,
     REFLOW_MIN_WIDTH, REFLOW_UI_MAX_FONT, REFLOW_UI_MIN_FONT, Line,
-    clamp_font_scale, extract_page, extract_paragraphs, layout_paragraphs,
-    measure_text, reflow_text_width, scaled_font_size,
+    _detect_gutter, clamp_font_scale, extract_page, extract_paragraphs,
+    layout_paragraphs, measure_text, reflow_text_width, scaled_font_size,
 )
 from pdfar.viewer import PDFView
 
@@ -291,6 +292,177 @@ def test_extract_page_renders_ruled_tables_once(qapp, tmp_path):
     assert layout.media
     assert any(line.y < layout.media[0].y for line in layout.lines)
     assert any(line.y >= layout.media[0].y for line in layout.lines)
+
+
+def _column_page(path, *, image=False, band=False, page_number=False):
+    """Two columns (x=40 and x=270) on a 500x640 page."""
+    doc = fitz.open()
+    page = doc.new_page(width=500, height=640)
+    page.insert_text((40, 46), "A page-wide title spanning both columns here",
+                     fontsize=15, fontname="hebo")
+
+    def para(x, y, text):
+        page.insert_textbox(fitz.Rect(x, y, x + 215, y + 50), text,
+                            fontsize=9.5)
+
+    para(40, 70, "Left one. The first paragraph of the left column.")
+    para(40, 140, "Left two. The second paragraph of the left column.")
+    para(270, 70, "Right one. The first paragraph of the right column.")
+    para(270, 140, "Right two. The second paragraph of the right column.")
+    if image:
+        image_path = _save_image(path.parent / "column.png", "#2457a6", 80, 50)
+        page.insert_image(fitz.Rect(40, 220, 240, 300), filename=image_path)
+        para(40, 320, "Left three. The paragraph after the column figure.")
+        para(270, 220, "Right three. More text in the right column.")
+    if band:
+        image_path = _save_image(path.parent / "band.png", "#a65724", 160, 60)
+        page.insert_image(fitz.Rect(40, 340, 460, 440), filename=image_path)
+        page.insert_textbox(
+            fitz.Rect(40, 448, 460, 470),
+            "Figure 1. A page-wide caption under the full-width figure, long "
+            "enough to reach across the gutter.",
+            fontsize=9)
+        para(40, 490, "Left four. The paragraph below the full-width figure.")
+        para(270, 515, "Right four. The paragraph below the full-width figure.")
+    if page_number:
+        # Centred on the gutter between x=255 (left edge) and x=270.
+        page.insert_text((260, 600), "7", fontsize=8)
+    doc.save(str(path))
+    doc.close()
+    return str(path)
+
+
+def _ordered_items(paragraphs, media) -> list:
+    items = [(p.order, " ".join(r.text for r in p.runs)) for p in paragraphs]
+    items += [(m.order, m.kind) for m in media]
+    return [label for _order, label in sorted(items)]
+
+
+def test_two_column_text_reads_left_column_first(qapp, tmp_path):
+    path = _column_page(tmp_path / "columns.pdf")
+    doc = fitz.open(path)
+    try:
+        paragraphs, media = extract_page(doc[0], 0, width=700)
+        gutter = _detect_gutter(paragraphs + media)
+    finally:
+        doc.close()
+
+    assert media == []
+    assert gutter is not None and 240 < gutter < 270
+    text = [p for p in paragraphs if p.runs]
+    labels = [" ".join(r.text for r in p.runs) for p in text]
+    assert labels[0].startswith("A page-wide title")
+    joined = " | ".join(labels)
+    assert joined.index("Left one") < joined.index("Left two")
+    assert joined.index("Left two") < joined.index("Right one")
+    assert joined.index("Right one") < joined.index("Right two")
+
+
+def test_two_column_media_stays_in_its_column(qapp, tmp_path):
+    path = _column_page(tmp_path / "columns.pdf", image=True)
+    doc = fitz.open(path)
+    try:
+        paragraphs, media = extract_page(doc[0], 0, width=700)
+    finally:
+        doc.close()
+
+    assert len(media) == 1 and media[0].kind == "image"
+    labels = _ordered_items(paragraphs, media)
+    assert labels.index("image") > labels.index(
+        "Left two. The second paragraph of the left column.")
+    # The left column is complete before the right column starts.
+    assert labels.index("image") < labels.index(
+        "Right one. The first paragraph of the right column.")
+    assert labels.index("Left three. The paragraph after the column figure.") \
+        < labels.index("Right one. The first paragraph of the right column.")
+
+
+def test_full_width_band_splits_the_columns(qapp, tmp_path):
+    path = _column_page(tmp_path / "columns.pdf", band=True)
+    doc = fitz.open(path)
+    try:
+        paragraphs, media = extract_page(doc[0], 0, width=700)
+    finally:
+        doc.close()
+
+    assert len(media) == 1
+    labels = _ordered_items(paragraphs, media)
+    band_index = labels.index("image")
+    assert labels.index("Left two. The second paragraph of the left column.") < band_index
+    assert labels.index("Right two. The second paragraph of the right column.") < band_index
+    assert band_index < labels.index(
+        "Left four. The paragraph below the full-width figure.")
+    # The caption is page-wide and follows the figure.
+    caption = next(i for i, label in enumerate(labels) if "Figure 1." in label)
+    assert caption == band_index + 1
+
+
+def test_centered_page_number_is_placed_last(qapp, tmp_path):
+    path = _column_page(tmp_path / "columns.pdf", page_number=True)
+    doc = fitz.open(path)
+    try:
+        paragraphs, media = extract_page(doc[0], 0, width=700)
+    finally:
+        doc.close()
+
+    numbers = [p for p in paragraphs
+               if " ".join(r.text for r in p.runs).strip() == "7"]
+    assert len(numbers) == 1
+    assert numbers[0].order == max(p.order for p in paragraphs)
+
+
+def test_single_column_has_no_gutter(qapp, tmp_path):
+    doc = fitz.open()
+    page = doc.new_page(width=400, height=500)
+    for index in range(4):
+        page.insert_textbox(fitz.Rect(40, 50 + index * 90, 360, 130 + index * 90),
+                            f"Paragraph {index} of a single wide column.",
+                            fontsize=11)
+    path = str(tmp_path / "single.pdf")
+    doc.save(path)
+    doc.close()
+
+    doc = fitz.open(path)
+    try:
+        paragraphs, media = extract_page(doc[0], 0, width=600)
+        assert _detect_gutter(paragraphs + media) is None
+    finally:
+        doc.close()
+    assert [p.top for p in paragraphs] == sorted(p.top for p in paragraphs)
+
+
+def test_committed_two_column_demo_reading_order(qapp):
+    demo = Path(__file__).resolve().parents[1] / "demo-two-columns.pdf"
+    if not demo.exists():
+        pytest.skip("demo-two-columns.pdf is not present")
+    doc = fitz.open(demo)
+    try:
+        assert doc.page_count == 4
+        orders = []
+        for index in range(doc.page_count):
+            paragraphs, media = extract_page(doc[index], index, width=760)
+            assert _detect_gutter(paragraphs + media) is not None
+            orders.append(_ordered_items(paragraphs, media))
+    finally:
+        doc.close()
+
+    # Page 3: the column figure and the table sit in different columns, and
+    # the left column is emitted before the right one.
+    page3 = " | ".join(orders[2])
+    assert page3.index("Figure 2.") < page3.index("Table 1.")
+    # The lower column figure belongs to the left column, so it is read
+    # before the table at the top of the right column.
+    assert page3.index("Figure 3.") < page3.index("Table 1.")
+    assert page3.index("Table 1.") < page3.index("3.4 Implementation Notes")
+    # Page 4: the full-width table is followed by both body columns, then the
+    # references heading, then the reference columns.
+    page4 = " | ".join(orders[3])
+    assert page4.index("Table 2.") < page4.index("4. Evaluation")
+    assert page4.index("References") < page4.index("Breuel")
+    assert page4.index("References") < page4.index("Nagy")
+    # Page-wide figure caption sits between the figure and the lower columns.
+    page2 = " | ".join(orders[1])
+    assert page2.index("Figure 1.") < page2.index("3. Method")
 
 
 # ---------------------------------------------------------- integration

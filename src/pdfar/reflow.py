@@ -79,6 +79,18 @@ REFLOW_TABLE_MIN_H_LINES = 4   # cheap pre-check before running find_tables()
 REFLOW_TABLE_MIN_V_LINES = 3
 REFLOW_TABLE_MERGE_GAP = 4
 
+# Two-column reading order.  A gutter is a mostly empty vertical corridor
+# between two blocks of text; items that cross it (titles, full-width figures
+# and tables, captions) split the page into bands that are read left column
+# first, then right column.
+REFLOW_COLUMN_MIN_GAP = 8.0        # narrowest acceptable gutter (pt)
+REFLOW_COLUMN_GAP_RATIO = 0.02     # ... or this share of the content width
+REFLOW_COLUMN_MAX_BLOCK_RATIO = 0.55  # wider blocks are page-wide, not columns
+REFLOW_COLUMN_MIN_OVERLAP = 0.2    # columns must share this much vertical span
+REFLOW_COLUMN_WIDTH_TOLERANCE = 0.5  # narrower column / wider column
+REFLOW_COLUMN_EDGE_MARGIN = 4.0    # slack when testing gutter crossing (pt)
+REFLOW_COLUMN_CLUSTER_TOLERANCE = 12.0  # merge indented block starts (pt)
+
 _WS_RE = re.compile(r"\s+")
 
 
@@ -106,8 +118,11 @@ class Run:
 class Paragraph:
     page: int
     runs: List[Run] = field(default_factory=list)
-    top: float = 0.0      # source y in PDF points (reading order)
+    top: float = 0.0      # source bbox in PDF points
     left: float = 0.0
+    right: float = 0.0
+    bottom: float = 0.0
+    order: int = 0        # reading-order rank assigned by _reading_order()
 
 
 # A laid-out line: y/height/baseline in page-section coordinates and a list of
@@ -135,10 +150,13 @@ class Media:
 
     page: int
     kind: str             # "image" | "table"
-    top: float            # source y in PDF points (reading order)
+    top: float            # source bbox in PDF points
     left: float
     width: float
     height: float
+    right: float = 0.0
+    bottom: float = 0.0
+    order: int = 0        # reading-order rank assigned by _reading_order()
     data: bytes = b""
     y: float = 0.0
 
@@ -267,7 +285,8 @@ def _extract_paragraphs(data: Dict, page_num: int,
             continue          # image block: rendered separately as Media
         bbox = block.get("bbox") or (0, 0, 0, 0)
         para = Paragraph(page=page_num, top=float(bbox[1]),
-                         left=float(bbox[0]))
+                         left=float(bbox[0]), right=float(bbox[2]),
+                         bottom=float(bbox[3]))
         for line in block.get("lines", []):
             for span in line.get("spans", []):
                 if _in_regions(span.get("bbox"), regions):
@@ -463,7 +482,169 @@ def _render_media(page, rect, kind: str, page_num: int, width: int,
         return None
     return Media(page=page_num, kind=kind, top=float(rect.y0),
                  left=float(rect.x0), width=display_w, height=display_h,
-                 data=data)
+                 right=float(rect.x1), bottom=float(rect.y1), data=data)
+
+
+def _median(values: List[float]) -> float:
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def _item_width(item) -> float:
+    return max(0.0, float(item.right) - float(item.left))
+
+
+def _start_clusters(items: List[object]) -> List[List[float]]:
+    """Group block left edges into clusters of nearly equal x positions."""
+    clusters: List[List[float]] = []
+    for value in sorted(float(item.left) for item in items):
+        if clusters and value - clusters[-1][-1] <= REFLOW_COLUMN_CLUSTER_TOLERANCE:
+            clusters[-1].append(value)
+        else:
+            clusters.append([value])
+    return clusters
+
+
+def _detect_gutter(items: List[object]) -> Optional[float]:
+    """Find the x position of a two-column gutter, or ``None``.
+
+    Blocks are grouped by their left edge.  A two-column page produces two
+    strong start clusters (the two column edges), while centred metadata —
+    titles, authors, page numbers — produces isolated starts that are ignored.
+    The gap between two populated clusters is refined to the actual whitespace
+    corridor between the columns' inner edges, then a set of sanity checks
+    (two populated sides, similar column widths, overlapping vertical spans)
+    rejects single-column pages, sidebars and tables of contents.
+    """
+    boxes = [item for item in items
+             if _item_width(item) > 0 and float(item.bottom) > float(item.top)]
+    if len(boxes) < 4:
+        return None
+    left_edge = min(float(item.left) for item in boxes)
+    right_edge = max(float(item.right) for item in boxes)
+    content_w = right_edge - left_edge
+    if content_w <= 0:
+        return None
+    narrow = [item for item in boxes
+              if _item_width(item) <= REFLOW_COLUMN_MAX_BLOCK_RATIO * content_w]
+    if len(narrow) < 4:
+        return None
+
+    clusters = [cluster for cluster in _start_clusters(narrow)
+                if len(cluster) >= 2]
+    if len(clusters) < 2:
+        return None
+
+    min_gap = max(REFLOW_COLUMN_MIN_GAP, REFLOW_COLUMN_GAP_RATIO * content_w)
+    best: Optional[Tuple[float, float]] = None
+    for index, first in enumerate(clusters):
+        for second in clusters[index + 1:]:
+            left_items = [item for item in narrow
+                          if first[0] - 1.0 <= float(item.left) <= first[-1] + 1.0]
+            right_items = [item for item in narrow
+                           if second[0] - 1.0 <= float(item.left) <= second[-1] + 1.0]
+            if len(left_items) < 2 or len(right_items) < 2:
+                continue
+            left_max = max(float(item.right) for item in left_items)
+            right_min = min(float(item.left) for item in right_items)
+            gap = right_min - left_max
+            if gap < min_gap:
+                continue
+            gutter = (left_max + right_min) / 2.0
+            position = (gutter - left_edge) / content_w
+            if not 0.25 <= position <= 0.75:
+                continue
+
+            left_w = _median([_item_width(item) for item in left_items])
+            right_w = _median([_item_width(item) for item in right_items])
+            if min(left_w, right_w) < REFLOW_COLUMN_WIDTH_TOLERANCE * max(left_w, right_w):
+                continue
+
+            l_top = min(float(item.top) for item in left_items)
+            l_bottom = max(float(item.bottom) for item in left_items)
+            r_top = min(float(item.top) for item in right_items)
+            r_bottom = max(float(item.bottom) for item in right_items)
+            overlap = min(l_bottom, r_bottom) - max(l_top, r_top)
+            span = min(l_bottom - l_top, r_bottom - r_top)
+            if span <= 0 or overlap <= REFLOW_COLUMN_MIN_OVERLAP * span:
+                continue
+
+            score = gap
+            if best is None or score > best[0]:
+                best = (score, gutter)
+    return None if best is None else best[1]
+
+
+def _spans_gutter(item, gutter: float) -> bool:
+    """True when *item* crosses or straddles the gutter.
+
+    Full-width titles, figures and captions cross it; a centred page number
+    or heading sits on top of it.  Both are page-wide separators, not column
+    content, so they split bands instead of joining a column.
+    """
+    if _item_width(item) <= 0:
+        return False
+    left = float(item.left)
+    right = float(item.right)
+    center = (left + right) / 2.0
+    if abs(center - gutter) <= REFLOW_COLUMN_EDGE_MARGIN:
+        return True
+    return (left < gutter - REFLOW_COLUMN_EDGE_MARGIN
+            and right > gutter + REFLOW_COLUMN_EDGE_MARGIN)
+
+
+def _column_sort(items: List[object], gutter: float) -> List[object]:
+    def key(item):
+        center = (float(item.left) + float(item.right)) / 2.0
+        return (0 if center < gutter else 1,
+                round(float(item.top), 1), round(float(item.left), 1),
+                0 if isinstance(item, Paragraph) else 1)
+
+    return sorted(items, key=key)
+
+
+def _reading_order(paragraphs: List[Paragraph],
+                   media: List[Media]) -> Tuple[List[Paragraph], List[Media]]:
+    """Order a page's text and media for a single-column reading flow.
+
+    Single-column pages keep their top-to-bottom order.  On two-column pages
+    the page is split into horizontal bands at every item that crosses the
+    gutter (title, abstract, full-width figure/table and its caption); each
+    band is read down the left column and then down the right, and the bands
+    follow one another.  Items inside a column are ordered by their vertical
+    position, so figures and tables stay next to the text they belong to.
+    """
+    text = [para for para in paragraphs if para.runs]
+    entries: List[object] = list(text) + list(media)
+    if not entries:
+        return paragraphs, media
+
+    def position(item):
+        return (round(float(item.top), 1), round(float(item.left), 1),
+                0 if isinstance(item, Paragraph) else 1)
+
+    gutter = _detect_gutter(entries)
+    if gutter is None:
+        ordered = sorted(entries, key=position)
+    else:
+        ordered: List[object] = []
+        pending: List[object] = []
+        for item in sorted(entries, key=position):
+            if _spans_gutter(item, gutter):
+                ordered.extend(_column_sort(pending, gutter))
+                pending.clear()
+                ordered.append(item)
+            else:
+                pending.append(item)
+        ordered.extend(_column_sort(pending, gutter))
+
+    for index, item in enumerate(ordered):
+        item.order = index
+    return ([item for item in ordered if isinstance(item, Paragraph)],
+            [item for item in ordered if isinstance(item, Media)])
 
 
 def extract_page(page, page_num: int = 0, width: int = REFLOW_MAX_WIDTH,
@@ -481,7 +662,7 @@ def extract_page(page, page_num: int = 0, width: int = REFLOW_MAX_WIDTH,
         item = _render_media(page, rect, kind, page_num, width, scale)
         if item is not None:
             media.append(item)
-    return paragraphs, media
+    return _reading_order(paragraphs, media)
 
 
 # ------------------------------------------------------------------- layout
@@ -499,8 +680,10 @@ def layout_paragraphs(
     the wrapper can be unit-tested without a font backend.  ``size_scale``
     multiplies every run size before measuring and wrapping.
 
-    When *media* is given, images/tables are interleaved with the text by
-    their source y position so the column follows the page's reading order.
+    When *media* is given, images/tables are interleaved with the text in the
+    reading order assigned by :func:`extract_page` (top-to-bottom for simple
+    pages, left column then right column for two-column ones).  Without
+    *media* the paragraphs are taken in the order they are given.
     """
     width = max(1, int(width))
     size_scale = clamp_font_scale(size_scale)
@@ -557,13 +740,15 @@ def layout_paragraphs(
         y += min(20.0, max(5.0, para_size * 0.6))
 
     if media:
-        items: List[Tuple[float, float, int, object]] = [
-            (para.top, para.left, 0, para) for para in paragraphs if para.runs
+        items: List[Tuple[int, float, float, int, object]] = [
+            (para.order, para.top, para.left, 0, para)
+            for para in paragraphs if para.runs
         ]
-        items.extend((item.top, item.left, 1, item) for item in media)
-        items.sort(key=lambda entry: (round(entry[0], 1), round(entry[1], 1),
-                                      entry[2]))
-        for _top, _left, kind, item in items:
+        items.extend((item.order, item.top, item.left, 1, item)
+                     for item in media)
+        items.sort(key=lambda entry: (entry[0], round(entry[1], 1),
+                                      round(entry[2], 1), entry[3]))
+        for _order, _top, _left, kind, item in items:
             if kind == 0:
                 wrap_paragraph(item)
                 continue

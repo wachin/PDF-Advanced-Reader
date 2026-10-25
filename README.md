@@ -54,7 +54,7 @@ Fixes in 2.0 (there were ten other bugs behind it):
 - **Zoom** — fit-page, fit-width, and presets `50, 62.5, 75, 87.5, 100, 112.5, 125, 137.5, 150, 162.5, 175, 200, 250, 300, 350, 400 %`; `Ctrl` + mouse wheel zooms around the cursor. A compact **Step** selector (2.5 %–25 %, default 10 %) sets the additive increment used by Zoom In/Out and `Ctrl++`/`Ctrl+-`; `Ctrl` + wheel follows the same step by default and can be switched to fluid zoom in the View menu.
 - **Rotation** — 90° steps, with selection and highlights staying on the right words.
 - **Encrypted PDFs** — password prompt, credentials are passed to the render workers only.
-- **Reflow mode with figures and tables** — single-column reading on any window size; text is extracted and laid out in the background, raster images and detected tables are rendered inline in reading order, text size is adjustable, and scanned pages are shown as fit-to-column images.
+- **Reflow mode with figures and tables** — single-column reading on any window size; text is extracted and laid out in the background, raster images and detected tables are rendered inline in reading order, two-column papers are read left column first, text size is adjustable, and scanned pages are shown as fit-to-column images.
 - **Comfort** — drag & drop to open, open from the command line, recent-file memory, remembered window layout, page spinner, status bar.
 
 ### Keyboard shortcuts
@@ -91,14 +91,22 @@ transformation:
 - **Text is reflowed when a text layer exists.** Scanned or image-only PDFs
   have no text to wrap; their page images are shown fit-to-column instead.
   Run OCR on such files to get reflowable text.
-- **Reading order comes from the PDF's text blocks.** Multi-column pages,
-  sidebars and text boxes are linearized in block order, which may differ
-  from the visual order. Complex layouts may look different from the original
-  page.
+- **Reading order follows the page layout.** Multi-column pages are detected
+  from the empty vertical corridor (gutter) between two blocks of text, and
+  each column is read completely before the next one — the natural order for
+  scientific papers, where a figure or table can sit at the top, middle or
+  bottom of either column. Page-wide elements (title, abstract, a spanning
+  figure or table, a centred heading or page number) split the page into
+  bands: a band is read left to right, then the columns below it are read
+  left then right. Detection is deliberately conservative — a narrow sidebar,
+  a table of contents or ragged text is not mistaken for a second column, and
+  when no clear gutter is found the page falls back to the PDF's block order.
+  Complex layouts may still look different from the original page.
 - **Images are shown inline.** Raster figures are rendered at the column
   width (images narrower than the column keep their natural size and are
-  centred). A page-sized image beneath a text layer is treated as a
-  background and skipped so the text stays reflowable.
+  centred) and stay inside the column they belong to. A page-sized image
+  beneath a text layer is treated as a background and skipped so the text
+  stays reflowable.
 - **Ruled tables are shown as figures.** Tables detected from their grid
   lines are rendered as crisp images scaled to the column, preserving
   merges, alignment and styling. Tables without ruling lines are reflowed as
@@ -110,6 +118,14 @@ transformation:
   rebuilt. Figures scale with the text size.
 - Returning to normal view restores the original page layout and the page you
   were reading.
+
+`demo-two-columns.pdf` in the repository root is a four-page journal-style
+paper that exercises this ordering: a page-wide title and abstract, a
+full-width figure and table between column bands, and figures and tables
+placed at different heights inside individual columns. Open it and press
+`Ctrl+R` to compare the reflowed reading order with the original page.
+Regenerate it with `python3 tools/demo_pdf/make_two_column_demo.py`; `demo.pdf`
+(from `tools/demo_pdf/make_demo_pdf.py`) covers the rest of the feature set.
 
 ---
 
