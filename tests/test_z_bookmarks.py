@@ -163,10 +163,10 @@ def test_sidebar_bookmarks_tab(win, tmp_path):
     tab_count = sidebar.tabs.count()
     assert tab_count == 5
 
-    # Find bookmarks tab index
+    # Find bookmarks tab index (labels are hover tooltips)
     bookmarks_tab_idx = -1
     for i in range(tab_count):
-        if sidebar.tabs.tabText(i) == "Bookmarks":
+        if sidebar.tabs.tabToolTip(i) == "Bookmarks":
             bookmarks_tab_idx = i
             break
     assert bookmarks_tab_idx >= 0

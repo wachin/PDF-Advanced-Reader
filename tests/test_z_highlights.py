@@ -169,8 +169,8 @@ def test_sidebar_annotations_tab_and_tree(win, tmp_path):
     sidebar = win.sidebar
     assert sidebar is not None
 
-    # Check tab exists
-    tab_names = [sidebar.tabs.tabText(i) for i in range(sidebar.tabs.count())]
+    # Check tab exists (labels are hover tooltips on the icon-only tabs)
+    tab_names = [sidebar.tabs.tabToolTip(i) for i in range(sidebar.tabs.count())]
     assert "Annotations" in tab_names
 
     # Add a highlight

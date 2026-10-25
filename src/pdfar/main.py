@@ -31,6 +31,7 @@ from .i18n import I18n
 from .search import SearchParams, SearchWorker, normalize_space
 from .sidebar import (
     Sidebar, ThumbnailSettings, THUMB_MAX_WIDTH, THUMB_MIN_WIDTH,
+    TAB_ATTACHMENTS,
 )
 from .tabs import DocumentTab
 from .viewer import PDFView, MEMORY_LEVELS
@@ -871,6 +872,7 @@ class MainWindow(QMainWindow):
                 tab = self.tabs.widget(i)
                 if isinstance(tab, DocumentTab):
                     tab.view.set_dark_mode(dark_mode)
+                    tab.sidebar.apply_icon_palette(dark_mode)
             # Apply theme to entire application
             self._apply_dark_mode(dark_mode)
             self._update_zoom_actions(self.view.reflow_mode)
@@ -1067,11 +1069,7 @@ class MainWindow(QMainWindow):
         """Switch sidebar to Attachments tab."""
         if not self.sidebar:
             return
-        # Find the Attachments tab index
-        for i in range(self.sidebar.tabs.count()):
-            if self.sidebar.tabs.tabText(i) == "Attachments":
-                self.sidebar.tabs.setCurrentIndex(i)
-                break
+        self.sidebar.tabs.setCurrentIndex(TAB_ATTACHMENTS)
         # Ensure sidebar is visible
         self.act_sidebar.setChecked(True)
         self._toggle_sidebar(True)
@@ -1447,6 +1445,7 @@ class MainWindow(QMainWindow):
         self._update_zoom_label(view)
         self.act_reflow.setChecked(view.reflow_mode)
         self.act_dark_mode.setChecked(view.dark_mode)
+        tab.sidebar.apply_icon_palette(self.act_dark_mode.isChecked())
         self._update_zoom_actions(view.reflow_mode)
         # search results belong to the previous document
         self.results.clear()

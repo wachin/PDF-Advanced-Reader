@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Dict, List, Optional
 
 try:
@@ -10,7 +12,10 @@ try:
 except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 from PyQt6.QtCore import QRect, QSettings, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QPen, QPixmap
+from PyQt6.QtGui import (
+    QColor, QIcon, QPainter, QPen, QPixmap,
+)
+from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget, QMenu, QInputDialog, QMessageBox, QHBoxLayout,
@@ -26,6 +31,42 @@ THUMB_DEFAULT_WIDTH = 140
 THUMB_MIN_WIDTH = 96
 THUMB_MAX_WIDTH = 200
 THUMB_RATIO = 1.414
+
+# Sidebar tabs are icon-only; the label is the hover tooltip.
+TAB_LABELS = ("Thumbnails", "Index", "Bookmarks", "Annotations", "Attachments")
+TAB_ICONS = ("thumbnails.svg", "index.svg", "bookmarks.svg",
+             "annotations.svg", "attachments.svg")
+(TAB_THUMBNAILS, TAB_INDEX, TAB_BOOKMARKS, TAB_ANNOTATIONS,
+ TAB_ATTACHMENTS) = range(len(TAB_LABELS))
+
+_ASSET_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "assets", "icons")
+
+
+@lru_cache(maxsize=None)
+def _tab_icon(name: str, color: str) -> QIcon:
+    """Render a monochrome SVG asset in *color* at the tab icon sizes."""
+    path = os.path.join(_ASSET_DIR, name)
+    if not os.path.exists(path):
+        path = os.path.join("assets", "icons", name)
+    renderer = QSvgRenderer(path)
+    icon = QIcon()
+    if not renderer.isValid():
+        return icon
+    ink = QColor(color)
+    for size in (16, 20, 24, 32):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        renderer.render(painter)
+        painter.setCompositionMode(
+            QPainter.CompositionMode.CompositionMode_SourceIn)
+        painter.fillRect(pixmap.rect(), ink)
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
 
 
 @dataclass
@@ -153,6 +194,10 @@ class Sidebar(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.tabs = QTabWidget()
+        self.tabs.setIconSize(QSize(18, 18))
+        # Icon-only tabs need less padding than the theme's default, otherwise
+        # five tabs overflow the sidebar dock in dark mode.
+        self.tabs.tabBar().setStyleSheet("QTabBar::tab { padding: 4px 6px; }")
         layout.addWidget(self.tabs)
 
         # ---- thumbnails -------------------------------------------------
@@ -247,6 +292,7 @@ class Sidebar(QWidget):
         att_layout.addWidget(self.attachments_tree)
 
         self.tabs.addTab(self.attachments_panel, "Attachments")
+        self._install_tab_icons()
 
         self._build_thumbs()
         self._build_outline()
@@ -312,8 +358,23 @@ class Sidebar(QWidget):
         super().resizeEvent(event)
         self._request_visible_thumbs()
 
+    def _install_tab_icons(self) -> None:
+        """Show the tabs as icons only; each label appears on hover."""
+        for index, (label, _name) in enumerate(zip(TAB_LABELS, TAB_ICONS)):
+            self.tabs.setTabText(index, "")
+            self.tabs.setTabToolTip(index, label)
+            self.tabs.tabBar().setAccessibleTabName(index, label)
+        self.apply_icon_palette(False)
+
+    def apply_icon_palette(self, dark: bool) -> None:
+        """Re-tint the tab icons so they stay visible in the active theme."""
+        ink = "#e6e6e6" if dark else "#3c3c3c"
+        self._icon_color = ink
+        for index, name in enumerate(TAB_ICONS):
+            self.tabs.setTabIcon(index, _tab_icon(name, ink))
+
     def _on_sidebar_tab_changed(self, index: int) -> None:
-        if self.tabs.tabText(index) == "Thumbnails":
+        if self.tabs.widget(index) is self.thumbs_tab:
             self._request_visible_thumbs()
 
     def _request_visible_thumbs(self) -> None:
@@ -390,7 +451,6 @@ class Sidebar(QWidget):
         except Exception:
             toc = []
         if not toc:
-            self.tabs.setTabText(1, "Index")
             self.outline.addTopLevelItem(QTreeWidgetItem(["(no outline)"]))
             return
         stack: Dict[int, QTreeWidgetItem] = {}
