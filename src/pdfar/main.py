@@ -906,11 +906,15 @@ class MainWindow(QMainWindow):
         if self.sender() is not self.view:
             return
         if not has_text:
-            self.status_left.setText(
-                "Reflow unavailable: no extractable text (scanned PDF?)")
+            if self.view.reflow_has_media:
+                self.status_left.setText(
+                    "Reflow ready — no text layer; showing page images")
+            else:
+                self.status_left.setText(
+                    "Reflow unavailable: no extractable text (scanned PDF?)")
         elif empty_pages:
             self.status_left.setText(
-                f"Reflow ready — {empty_pages} page(s) without extractable text")
+                f"Reflow ready — {empty_pages} page(s) without content")
         else:
             self.status_left.setText("Reflow ready")
 

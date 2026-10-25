@@ -17,6 +17,7 @@ back through a Qt signal and are stored in a byte-budget LRU cache.
 from __future__ import annotations
 
 import bisect
+from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple
 
 try:
@@ -93,6 +94,9 @@ LIGHT_REFLOW_MUTED = QColor(128, 128, 128)
 DARK_REFLOW_BG = QColor(28, 28, 30)
 DARK_REFLOW_FG = QColor(225, 225, 225)
 DARK_REFLOW_MUTED = QColor(140, 140, 140)
+# Decoded reflow figures are cached per visible page; PNG bytes stay in the
+# layout, so this budget only covers images the user has actually looked at.
+REFLOW_MEDIA_CACHE_BYTES = 96 * 1024 * 1024
 
 
 class PDFView(QAbstractScrollArea):
@@ -104,7 +108,7 @@ class PDFView(QAbstractScrollArea):
     hit_changed = pyqtSignal(int, int)      # (current_hit, total_hits), 1-based
     doc_error = pyqtSignal(str)
     reflow_progress = pyqtSignal(int, int)  # (pages laid out, page count)
-    reflow_ready = pyqtSignal(bool, int)    # (has_text, pages without text)
+    reflow_ready = pyqtSignal(bool, int)    # (has_text, pages without content)
     reflow_font_scale_changed = pyqtSignal(float)  # text-size multiplier
 
     def __init__(self, doc_path: str, parent=None, password: str = ""):
@@ -142,7 +146,10 @@ class PDFView(QAbstractScrollArea):
         self._reflow_done = 0
         self._reflow_total = 0
         self._reflow_has_text = False
+        self._reflow_has_media = False
         self._reflow_empty_pages = 0
+        self._reflow_media_cache: "OrderedDict[int, QImage]" = OrderedDict()
+        self._reflow_media_bytes = 0
         self._reflow_pending_page: Optional[int] = None
         self._reflow_pending_center = False
         self._reflow_pending_ratio: Optional[float] = None
@@ -386,6 +393,11 @@ class PDFView(QAbstractScrollArea):
         return self.reflow_mode
 
     @property
+    def reflow_has_media(self) -> bool:
+        """True when at least one reflowed page contains an image or table."""
+        return self._reflow_has_media
+
+    @property
     def reflow_font_scale(self) -> float:
         """Text-size multiplier used by the reflow layout (1.0 = default)."""
         return self._reflow_font_scale
@@ -422,7 +434,10 @@ class PDFView(QAbstractScrollArea):
         self._reflow_done = 0
         self._reflow_total = self.page_count
         self._reflow_has_text = False
+        self._reflow_has_media = False
         self._reflow_empty_pages = 0
+        self._reflow_media_cache.clear()
+        self._reflow_media_bytes = 0
         self._reflow_error = ""
         self._reflow_pending_page = None
         self._reflow_pending_center = False
@@ -460,6 +475,8 @@ class PDFView(QAbstractScrollArea):
         self._reflow_timer.stop()
         self._stop_reflow_worker()
         self._reflow_pages.clear()
+        self._reflow_media_cache.clear()
+        self._reflow_media_bytes = 0
         self._reflow_tops = []
         self._reflow_done = 0
         self._reflow_total = 0
@@ -530,7 +547,9 @@ class PDFView(QAbstractScrollArea):
         self._reflow_done += 1
         if layout.has_text:
             self._reflow_has_text = True
-        else:
+        if layout.media:
+            self._reflow_has_media = True
+        if not layout.has_text and not layout.media:
             self._reflow_empty_pages += 1
         self._recompute_reflow_layout()
 
@@ -939,9 +958,10 @@ class PDFView(QAbstractScrollArea):
         painter.end()
 
     def _paint_reflow(self, painter: QPainter, rect: QRect) -> None:
-        """Paint the single-column text view.
+        """Paint the single-column reading view.
 
-        Only cached layouts are drawn; nothing is extracted or measured here.
+        Only cached layouts are drawn; nothing is extracted here.  Figures
+        arrive as PNG bytes and are decoded lazily, once per visible page.
         """
         if self.dark_mode:
             bg, fg, muted = DARK_REFLOW_BG, DARK_REFLOW_FG, DARK_REFLOW_MUTED
@@ -967,16 +987,17 @@ class PDFView(QAbstractScrollArea):
                              f"Preparing reflow… 0/{self._reflow_total}")
             return
 
-        if (not self._reflow_has_text and self._reflow_done >= self._reflow_total
+        if (not self._reflow_has_text and not self._reflow_has_media
+                and self._reflow_done >= self._reflow_total
                 and self._reflow_total):
             painter.setPen(fg)
             painter.setFont(self._reflow_font("Sans Serif", 15, False, False))
             painter.drawText(
                 rect.adjusted(40, 0, -40, 0),
                 Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
-                "This document has no extractable text.\n\n"
-                "Reflow only works on text-based PDFs. Scanned documents "
-                "require OCR first.",
+                "This document has no extractable text or images.\n\n"
+                "Reflow needs a text layer (or page images) to display "
+                "anything. Scanned documents require OCR first.",
             )
             return
 
@@ -987,13 +1008,14 @@ class PDFView(QAbstractScrollArea):
         x0 = max(0.0, (vw - text_w) / 2.0)
         first = self._reflow_page_at(float(vsy))
         small = self._reflow_font("Sans Serif", 11, False, False)
+        border = DARK_PAGE_BORDER if self.dark_mode else PAGE_BORDER
 
         for page in range(first, self.page_count):
             top = self._reflow_tops[page] - vsy
             layout = self._reflow_pages.get(page)
 
             if layout is not None:
-                if not layout.has_text:
+                if not layout.has_text and not layout.media:
                     if -20 <= top <= vh:
                         painter.setPen(muted)
                         painter.setFont(self._reflow_font("Sans Serif", 12, False, True))
@@ -1007,6 +1029,14 @@ class PDFView(QAbstractScrollArea):
                         if ly > vh + 2:
                             break
                         self._paint_reflow_line(painter, line, x0, top, fg)
+                    for media in layout.media:
+                        my = top + media.y
+                        if my > vh + 2:
+                            break
+                        if my + media.height < -2:
+                            continue
+                        self._paint_reflow_media(painter, media, x0, top,
+                                                 text_w, muted, border)
 
                 sep_y = top + layout.height + REFLOW_PAGE_GAP / 2.0
                 if page < self.page_count - 1 and -12 <= sep_y <= vh + 12:
@@ -1028,6 +1058,48 @@ class PDFView(QAbstractScrollArea):
             painter.setFont(self._reflow_font(family, size, bold, italic))
             painter.drawText(QPointF(x, section_top + line.baseline), text)
             x += self._reflow_metrics_for(family, size, bold, italic).horizontalAdvance(text)
+
+    def _reflow_media_image(self, media) -> QImage:
+        """Decode a media item's PNG on demand and keep it in the LRU cache."""
+        key = id(media)
+        image = self._reflow_media_cache.get(key)
+        if image is not None:
+            self._reflow_media_cache.move_to_end(key)
+            return image
+        if not media.data:
+            return QImage()
+        image = QImage.fromData(media.data, "PNG")
+        if image.isNull():
+            return image
+        self._reflow_media_cache[key] = image
+        self._reflow_media_bytes += int(image.sizeInBytes())
+        while (self._reflow_media_bytes > REFLOW_MEDIA_CACHE_BYTES
+               and len(self._reflow_media_cache) > 1):
+            _, old = self._reflow_media_cache.popitem(last=False)
+            self._reflow_media_bytes -= int(old.sizeInBytes())
+        return image
+
+    def _paint_reflow_media(self, painter: QPainter, media, x0: float,
+                            section_top: float, text_w: float,
+                            muted: QColor, border: QColor) -> None:
+        width = max(1, int(round(media.width)))
+        height = max(1, int(round(media.height)))
+        x = x0 + max(0.0, (text_w - media.width) / 2.0)
+        target = QRect(int(round(x)), int(round(section_top + media.y)),
+                       width, height)
+        image = self._reflow_media_image(media)
+        if not image.isNull():
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.drawImage(target, image)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+        else:
+            painter.fillRect(target, muted.lighter(160))
+            painter.setPen(muted)
+            painter.setFont(self._reflow_font("Sans Serif", 11, False, True))
+            painter.drawText(target, Qt.AlignmentFlag.AlignCenter,
+                             "Table" if media.kind == "table" else "Image")
+        painter.setPen(QPen(border, 1))
+        painter.drawRect(target)
 
     def _paint_tile_visible(self, painter: QPainter, tile_img: QImage,
                             tx: float, ty: float, tw: float, th: float,

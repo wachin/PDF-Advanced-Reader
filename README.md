@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/License-GPL%203.0-red.svg)](https://www.gnu.org/licenses/gpl-3.0.html)
 [![Platform](https://img.shields.io/badge/Platform-Linux-lightgrey.svg)](https://www.linux.org/)
 
-**PDFAR** is a fast, native-feeling PDF reader for Linux built with PyQt6 and PyMuPDF. Continuous scrolling, real text selection, instant search with highlighted hits, thumbnails, a document outline, fit modes, rotation and keyboard-first navigation.
+**PDFAR** is a fast, native-feeling PDF reader for Linux built with PyQt6 and PyMuPDF. Continuous scrolling, real text selection, instant search with highlighted hits, thumbnails, a document outline, fit modes, rotation, keyboard-first navigation, and a **reflow mode that keeps text, images and tables together** in one readable column.
 
 ---
 
@@ -54,7 +54,7 @@ Fixes in 2.0 (there were ten other bugs behind it):
 - **Zoom** — fit-page, fit-width, and presets `50, 62.5, 75, 87.5, 100, 112.5, 125, 137.5, 150, 162.5, 175, 200, 250, 300, 350, 400 %`; `Ctrl` + mouse wheel zooms around the cursor. A compact **Step** selector (2.5 %–25 %, default 10 %) sets the additive increment used by Zoom In/Out and `Ctrl++`/`Ctrl+-`; `Ctrl` + wheel follows the same step by default and can be switched to fluid zoom in the View menu.
 - **Rotation** — 90° steps, with selection and highlights staying on the right words.
 - **Encrypted PDFs** — password prompt, credentials are passed to the render workers only.
-- **Reflow mode** — single-column text view for comfortable reading on any window size; text is extracted and laid out in the background, with adjustable text size and a clear fallback when a document has no text layer.
+- **Reflow mode with figures and tables** — single-column reading on any window size; text is extracted and laid out in the background, raster images and detected tables are rendered inline in reading order, text size is adjustable, and scanned pages are shown as fit-to-column images.
 - **Comfort** — drag & drop to open, open from the command line, recent-file memory, remembered window layout, page spinner, status bar.
 
 ### Keyboard shortcuts
@@ -78,28 +78,36 @@ Fixes in 2.0 (there were ten other bugs behind it):
 ### Reflow mode: what it can and cannot do
 
 Reflow (`View → Reflow` or `Ctrl+R`) discards the fixed page geometry and
-re-wraps the document's text into one column sized to the window. Extraction
-and layout run on a worker thread with its own document handle, so opening
-reflow on a 500-page PDF does not freeze the UI; pages appear as they are
-prepared and a progress count is shown in the status bar.
+re-wraps the document into one column sized to the window. Text is
+re-flowed, and the page's images and detected tables are rendered inline in
+reading order, so figures no longer disappear. Extraction, table detection
+and figure rendering run on a worker thread with its own document handle, so
+opening reflow on a 500-page PDF does not freeze the UI; pages appear as they
+are prepared and a progress count is shown in the status bar.
 
 PDF is a fixed-layout format, so reflow is necessarily a best-effort
 transformation:
 
-- **A text layer is required.** Scanned or image-only PDFs cannot be reflowed;
-  PDFAR shows an explicit warning instead of an empty view. Run OCR on such
-  files first.
+- **Text is reflowed when a text layer exists.** Scanned or image-only PDFs
+  have no text to wrap; their page images are shown fit-to-column instead.
+  Run OCR on such files to get reflowable text.
 - **Reading order comes from the PDF's text blocks.** Multi-column pages,
-  sidebars, tables and text boxes are linearized in block order, which may
-  differ from the visual order. Complex layouts may look different from the
-  original page.
-- **Images, figures and vector graphics are not shown** in reflow; only text is
-  extracted and re-laid out.
+  sidebars and text boxes are linearized in block order, which may differ
+  from the visual order. Complex layouts may look different from the original
+  page.
+- **Images are shown inline.** Raster figures are rendered at the column
+  width (images narrower than the column keep their natural size and are
+  centred). A page-sized image beneath a text layer is treated as a
+  background and skipped so the text stays reflowable.
+- **Ruled tables are shown as figures.** Tables detected from their grid
+  lines are rendered as crisp images scaled to the column, preserving
+  merges, alignment and styling. Tables without ruling lines are reflowed as
+  ordinary text.
 - **Zoom and rotation do not apply while reflow is active** — the column is
   sized to the window and re-wraps when the window is resized. Use
   `Ctrl++` / `Ctrl+-` to increase or decrease the text size and `Ctrl+0` to
   reset it; the page and reading position are preserved while the column is
-  rebuilt.
+  rebuilt. Figures scale with the text size.
 - Returning to normal view restores the original page layout and the page you
   were reading.
 

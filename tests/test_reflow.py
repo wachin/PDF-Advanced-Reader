@@ -15,13 +15,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pymupdf as fitz
 import pytest
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor, QImage
 from PyQt6.QtWidgets import QMessageBox
 
 from pdfar.main import MainWindow
 from pdfar.reflow import (
     REFLOW_FONT_SCALE_MAX, REFLOW_FONT_SCALE_MIN, REFLOW_MAX_WIDTH,
     REFLOW_MIN_WIDTH, REFLOW_UI_MAX_FONT, REFLOW_UI_MIN_FONT, Line,
-    clamp_font_scale, extract_paragraphs, layout_paragraphs,
+    clamp_font_scale, extract_page, extract_paragraphs, layout_paragraphs,
     measure_text, reflow_text_width, scaled_font_size,
 )
 from pdfar.viewer import PDFView
@@ -51,6 +52,57 @@ def build_text_pdf(path, pages=3):
     doc.save(str(path))
     doc.close()
     return str(path)
+
+
+def _save_image(path, color, width=80, height=60):
+    image = QImage(width, height, QImage.Format.Format_RGB32)
+    image.fill(QColor(color))
+    image.save(str(path))
+    return str(path)
+
+
+def build_image_pdf(path):
+    """Text above and below a red raster figure."""
+    image_path = _save_image(path.parent / "figure.png", "#dc1e1e")
+    doc = fitz.open()
+    page = doc.new_page(width=400, height=600)
+    page.insert_text((40, 60), "Before the figure.", fontsize=12)
+    page.insert_image(fitz.Rect(40, 90, 240, 240), filename=image_path)
+    page.insert_text((40, 340), "After the figure.", fontsize=12)
+    doc.save(str(path))
+    doc.close()
+    return str(path)
+
+
+def build_table_pdf(path):
+    """A ruled 3x2 table between two paragraphs."""
+    doc = fitz.open()
+    page = doc.new_page(width=400, height=600)
+    page.insert_text((40, 60), "Before the table.", fontsize=12)
+    for y in (100, 160, 220, 280):
+        page.draw_line(fitz.Point(40, y), fitz.Point(360, y), color=(0, 0, 0))
+    for x in (40, 200, 360):
+        page.draw_line(fitz.Point(x, 100), fitz.Point(x, 280), color=(0, 0, 0))
+    for row, y in enumerate((135, 195, 255)):
+        page.insert_text((50, y), f"Left {row}", fontsize=11)
+        page.insert_text((210, y), f"Right {row}", fontsize=11)
+    page.insert_text((40, 330), "After the table.", fontsize=12)
+    doc.save(str(path))
+    doc.close()
+    return str(path)
+
+
+def _text_of(paragraphs) -> str:
+    return " ".join(run.text for para in paragraphs for run in para.runs)
+
+
+def _pixel_count(image, predicate) -> int:
+    return sum(
+        1
+        for y in range(0, image.height(), 4)
+        for x in range(0, image.width(), 4)
+        if predicate(QColor(image.pixel(x, y)))
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -166,6 +218,79 @@ def test_layout_marks_image_only_page_as_empty(qapp, tmp_path):
     assert not layout.has_text
     assert layout.lines == []
     assert layout.height > 0
+
+
+def test_extract_page_renders_images_inline(qapp, tmp_path):
+    path = build_image_pdf(tmp_path / "image.pdf")
+    doc = fitz.open(path)
+    try:
+        paragraphs, media = extract_page(doc[0], 0, width=320)
+    finally:
+        doc.close()
+
+    assert "Before the figure." in _text_of(paragraphs)
+    assert "After the figure." in _text_of(paragraphs)
+    assert len(media) == 1
+    figure = media[0]
+    assert figure.kind == "image"
+    assert figure.data.startswith(b"\x89PNG")
+    assert 0 < figure.width <= 320
+    assert figure.height > 0
+
+    layout = layout_paragraphs(paragraphs, 320, 0, media=media)
+    assert layout.has_text
+    assert len(layout.media) == 1
+    placed = layout.media[0]
+    assert placed.y > 0
+    assert any(line.y < placed.y for line in layout.lines)
+    assert any(line.y >= placed.y + placed.height for line in layout.lines)
+    assert layout.height >= placed.y + placed.height
+
+
+def test_extract_page_skips_background_image_under_text(qapp, tmp_path):
+    image_path = _save_image(tmp_path / "background.png", "#445566", 120, 160)
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=400)
+    page.insert_image(fitz.Rect(0, 0, 300, 400), filename=image_path)
+    page.insert_text((40, 60), "Text over a background image.", fontsize=12)
+    path = str(tmp_path / "background.pdf")
+    doc.save(path)
+    doc.close()
+
+    doc = fitz.open(path)
+    try:
+        paragraphs, media = extract_page(doc[0], 0, width=300)
+    finally:
+        doc.close()
+    assert "Text over a background image." in _text_of(paragraphs)
+    assert media == [], "page background must not be reflowed as a figure"
+
+
+def test_extract_page_renders_ruled_tables_once(qapp, tmp_path):
+    path = build_table_pdf(tmp_path / "table.pdf")
+    doc = fitz.open(path)
+    try:
+        paragraphs, media = extract_page(doc[0], 0, width=320)
+    finally:
+        doc.close()
+
+    text = _text_of(paragraphs)
+    assert "Before the table." in text
+    assert "After the table." in text
+    # Cell text belongs to the rendered table, not to the reflowed column.
+    assert "Left 0" not in text and "Right 2" not in text
+
+    tables = [item for item in media if item.kind == "table"]
+    assert len(tables) == 1
+    table = tables[0]
+    assert table.data.startswith(b"\x89PNG")
+    assert table.width == pytest.approx(320)
+    assert table.height > 0
+
+    layout = layout_paragraphs(paragraphs, 320, 0, media=media)
+    assert layout.media
+    assert any(line.y < layout.media[0].y for line in layout.lines)
+    assert any(line.y >= layout.media[0].y for line in layout.lines)
 
 
 # ---------------------------------------------------------- integration
@@ -290,6 +415,29 @@ def test_reflow_prepares_and_paints(qapp, tmp_path):
         qapp.processEvents()
 
 
+def test_reflow_paints_images_and_caches_them(qapp, tmp_path):
+    path = build_image_pdf(tmp_path / "image.pdf")
+    view = PDFView(path)
+    view.resize(800, 600)
+    view.show()
+    try:
+        _enable_reflow(view, qapp)
+        assert view.reflow_has_media is True
+        figure = view._reflow_pages[0].media[0]
+        image = view.grab().toImage()
+        red = _pixel_count(
+            image, lambda c: c.red() > 170 and c.green() < 100 and c.blue() < 100)
+        assert red > 50, "the inline figure was not painted"
+
+        first = view._reflow_media_image(figure)
+        assert not first.isNull()
+        assert view._reflow_media_image(figure) is first
+    finally:
+        view.shutdown()
+        view.deleteLater()
+        qapp.processEvents()
+
+
 def test_reflow_does_not_render_pages(qapp, tmp_path):
     path = build_text_pdf(tmp_path / "text.pdf", pages=2)
     view = PDFView(path)
@@ -365,6 +513,34 @@ def test_reflow_scanned_pdf_reports_no_text(qapp, tmp_path):
         assert view._reflow_empty_pages == 2
         assert ready and ready[-1] == (False, 2)
         assert view.grab().toImage().width() > 0
+    finally:
+        view.shutdown()
+        view.deleteLater()
+        qapp.processEvents()
+
+
+def test_reflow_scanned_pages_are_shown_as_images(qapp, tmp_path):
+    image_path = _save_image(tmp_path / "scan.png", "#d21e1e", 120, 160)
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=400)
+    page.insert_image(fitz.Rect(0, 0, 300, 400), filename=image_path)
+    path = str(tmp_path / "scan.pdf")
+    doc.save(path)
+    doc.close()
+
+    view = PDFView(path)
+    view.resize(700, 500)
+    view.show()
+    try:
+        ready = _enable_reflow(view, qapp)
+        assert view._reflow_has_text is False
+        assert view.reflow_has_media is True
+        assert view._reflow_empty_pages == 0
+        assert ready and ready[-1] == (False, 0)
+        image = view.grab().toImage()
+        red = _pixel_count(
+            image, lambda c: c.red() > 170 and c.green() < 100 and c.blue() < 100)
+        assert red > 50, "scanned page image was not painted"
     finally:
         view.shutdown()
         view.deleteLater()

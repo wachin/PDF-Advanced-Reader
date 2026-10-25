@@ -347,7 +347,7 @@ Use a functional comparison matrix to identify gaps.
 | Presentation | No | Fullscreen/slideshow | Pending |
 | Dark mode | Yes | Full theme | Implemented |
 | Resumption | Partial | Per-document position | Pending |
-| Reflow | Yes | Adaptive reading | Implemented (text PDFs) |
+| Reflow | Yes | Adaptive reading | Implemented (text + figures) |
 | Bookmarks | No | Full bookmarks | Pending |
 | Properties | Partial | Full inspector | Pending |
 | Attachments | Yes | Full management | Implemented |
@@ -444,11 +444,18 @@ Save per file:
 
 ## P1-5 Reflow
 
-Investigate the actual limitations of the PDF format.
+Implemented: text is extracted and wrapped into a single column, raster images
+and ruled tables are rendered inline in reading order, figures scale with the
+text size, and scanned pages are shown as fit-to-column page images. Table
+detection is best-effort: PDF has no semantic reading order, multi-column
+layouts are linearized by block position, and tables without ruling lines
+reflow as ordinary text.
 
 Do not pretend that all PDFs can reflow perfectly.
 
-There must be a warning or fallback for PDFs where this is not possible. ---
+There must be a warning or fallback for PDFs where this is not possible.
+
+---
 
 # P2 — NAVIGATION AND SEARCH
 
