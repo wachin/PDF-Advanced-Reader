@@ -8,18 +8,71 @@ try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
 except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
-from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QRect, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QIcon, QPixmap, QColor
 from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget, QMenu, QInputDialog, QMessageBox, QHBoxLayout,
-    QPushButton, QComboBox, QFileDialog, QProgressBar,
+    QPushButton, QComboBox, QFileDialog, QProgressBar, QStyle,
+    QStyledItemDelegate,
 )
 from .render import RenderPool, RenderResult
 from .bookmarks import BookmarkManager
 from .annotations import AnnotationManager, HIGHLIGHT_COLORS, AnnotationType
 
 THUMB_W = 120
+THUMB_H = int(THUMB_W * 1.414)
+
+
+class ThumbnailDelegate(QStyledItemDelegate):
+    """Draw one page thumbnail and its label centered in a full-width row."""
+
+    PAD = 6
+
+    def sizeHint(self, option, index) -> QSize:  # noqa: N802 (Qt naming)
+        return QSize(THUMB_W + 24, self.PAD * 2 + THUMB_H + 2 + option.fontMetrics.height())
+
+    def paint(self, painter, option, index) -> None:  # noqa: N802 (Qt naming)
+        painter.save()
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        if selected:
+            painter.fillRect(option.rect, option.palette.highlight())
+
+        icon = index.data(Qt.ItemDataRole.DecorationRole)
+        if isinstance(icon, QIcon):
+            pixmap = icon.pixmap(QSize(THUMB_W, THUMB_H))
+            if not pixmap.isNull():
+                x = option.rect.center().x() - pixmap.width() // 2
+                y = option.rect.top() + self.PAD + (THUMB_H - pixmap.height()) // 2
+                painter.drawPixmap(x, y, pixmap)
+
+        painter.setPen(option.palette.highlightedText().color() if selected
+                       else option.palette.text().color())
+        text_rect = QRect(
+            option.rect.left(),
+            option.rect.top() + self.PAD + THUMB_H + 2,
+            option.rect.width(),
+            option.fontMetrics.height(),
+        )
+        painter.drawText(
+            text_rect,
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+            str(index.data(Qt.ItemDataRole.DisplayRole)),
+        )
+        painter.restore()
+
+
+class ThumbnailList(QListWidget):
+    """Page thumbnails in one centered column, regardless of sidebar width."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setViewMode(QListWidget.ViewMode.ListMode)
+        self.setMovement(QListWidget.Movement.Static)
+        self.setUniformItemSizes(True)
+        self.setIconSize(QSize(THUMB_W, THUMB_H))
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setItemDelegate(ThumbnailDelegate(self))
 
 
 class Sidebar(QWidget):
@@ -42,13 +95,7 @@ class Sidebar(QWidget):
         layout.addWidget(self.tabs)
 
         # ---- thumbnails -------------------------------------------------
-        self.thumbs = QListWidget()
-        self.thumbs.setViewMode(QListWidget.ViewMode.IconMode)
-        self.thumbs.setResizeMode(QListWidget.ResizeMode.Adjust)
-        self.thumbs.setMovement(QListWidget.Movement.Static)
-        self.thumbs.setIconSize(QSize(THUMB_W, THUMB_W * 2))
-        self.thumbs.setSpacing(8)
-        self.thumbs.setWordWrap(True)
+        self.thumbs = ThumbnailList()
         self.thumbs.itemDoubleClicked.connect(self._on_thumb)
         self.tabs.addTab(self.thumbs, "Thumbnails")
 
@@ -249,7 +296,6 @@ class Sidebar(QWidget):
         item = self.thumbs.item(result.page)
         if item is not None:
             item.setIcon(QIcon(QPixmap.fromImage(img)))
-            self.thumbs.setIconSize(QSize(THUMB_W, int(THUMB_W * result.height / max(1, result.width))))
 
     def _on_thumb(self, item: QListWidgetItem) -> None:
         page = item.data(Qt.ItemDataRole.UserRole)
