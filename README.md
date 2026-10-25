@@ -126,6 +126,9 @@ placed at different heights inside individual columns. Open it and press
 `Ctrl+R` to compare the reflowed reading order with the original page.
 Regenerate it with `python3 tools/demo_pdf/make_two_column_demo.py`; `demo.pdf`
 (from `tools/demo_pdf/make_demo_pdf.py`) covers the rest of the feature set.
+Open-access research papers used to validate the column detection against
+real publisher layouts live in `external/two-column-test-pdfs/` — see its
+`CREDITS.md` for sources and CC BY 4.0 attribution.
 
 ---
 

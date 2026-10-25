@@ -508,6 +508,38 @@ def _start_clusters(items: List[object]) -> List[List[float]]:
     return clusters
 
 
+def _spans_gutter(item, gutter: float) -> bool:
+    """True when *item* crosses or straddles the gutter.
+
+    Full-width titles, figures and captions cross it; a centred page number
+    or heading sits on top of it.  Both are page-wide separators, not column
+    content, so they split bands instead of joining a column.
+    """
+    if _item_width(item) <= 0:
+        return False
+    left = float(item.left)
+    right = float(item.right)
+    center = (left + right) / 2.0
+    if abs(center - gutter) <= REFLOW_COLUMN_EDGE_MARGIN:
+        return True
+    return (left < gutter - REFLOW_COLUMN_EDGE_MARGIN
+            and right > gutter + REFLOW_COLUMN_EDGE_MARGIN)
+
+
+def _split_columns(items: List[object], gutter: float):
+    """Assign every non-spanning item to the left or right column."""
+    left: List[object] = []
+    right: List[object] = []
+    for item in items:
+        if _spans_gutter(item, gutter):
+            continue
+        center = (float(item.left) + float(item.right)) / 2.0
+        (left if center < gutter else right).append(item)
+    if len(left) < 2 or len(right) < 2:
+        return None
+    return left, right
+
+
 def _detect_gutter(items: List[object]) -> Optional[float]:
     """Find the x position of a two-column gutter, or ``None``.
 
@@ -515,9 +547,12 @@ def _detect_gutter(items: List[object]) -> Optional[float]:
     strong start clusters (the two column edges), while centred metadata —
     titles, authors, page numbers — produces isolated starts that are ignored.
     The gap between two populated clusters is refined to the actual whitespace
-    corridor between the columns' inner edges, then a set of sanity checks
-    (two populated sides, similar column widths, overlapping vertical spans)
-    rejects single-column pages, sidebars and tables of contents.
+    corridor between the columns' inner edges.  The candidate is then checked
+    against *all* text on each side (not only the narrow cluster members), so
+    a narrow metadata sidebar beside a wide body column is not mistaken for a
+    pair of columns; similar column widths, overlapping vertical spans and a
+    gutter near the middle reject single-column pages, sidebars and tables of
+    contents.
     """
     boxes = [item for item in items
              if _item_width(item) > 0 and float(item.bottom) > float(item.top)]
@@ -554,19 +589,29 @@ def _detect_gutter(items: List[object]) -> Optional[float]:
             if gap < min_gap:
                 continue
             gutter = (left_max + right_min) / 2.0
+
+            sides = _split_columns(boxes, gutter)
+            if sides is None:
+                continue
+            left_side, right_side = sides
+            left_max = max(float(item.right) for item in left_side)
+            right_min = min(float(item.left) for item in right_side)
+            if right_min - left_max < min_gap:
+                continue
+            gutter = (left_max + right_min) / 2.0
             position = (gutter - left_edge) / content_w
             if not 0.25 <= position <= 0.75:
                 continue
 
-            left_w = _median([_item_width(item) for item in left_items])
-            right_w = _median([_item_width(item) for item in right_items])
+            left_w = _median([_item_width(item) for item in left_side])
+            right_w = _median([_item_width(item) for item in right_side])
             if min(left_w, right_w) < REFLOW_COLUMN_WIDTH_TOLERANCE * max(left_w, right_w):
                 continue
 
-            l_top = min(float(item.top) for item in left_items)
-            l_bottom = max(float(item.bottom) for item in left_items)
-            r_top = min(float(item.top) for item in right_items)
-            r_bottom = max(float(item.bottom) for item in right_items)
+            l_top = min(float(item.top) for item in left_side)
+            l_bottom = max(float(item.bottom) for item in left_side)
+            r_top = min(float(item.top) for item in right_side)
+            r_bottom = max(float(item.bottom) for item in right_side)
             overlap = min(l_bottom, r_bottom) - max(l_top, r_top)
             span = min(l_bottom - l_top, r_bottom - r_top)
             if span <= 0 or overlap <= REFLOW_COLUMN_MIN_OVERLAP * span:
@@ -576,24 +621,6 @@ def _detect_gutter(items: List[object]) -> Optional[float]:
             if best is None or score > best[0]:
                 best = (score, gutter)
     return None if best is None else best[1]
-
-
-def _spans_gutter(item, gutter: float) -> bool:
-    """True when *item* crosses or straddles the gutter.
-
-    Full-width titles, figures and captions cross it; a centred page number
-    or heading sits on top of it.  Both are page-wide separators, not column
-    content, so they split bands instead of joining a column.
-    """
-    if _item_width(item) <= 0:
-        return False
-    left = float(item.left)
-    right = float(item.right)
-    center = (left + right) / 2.0
-    if abs(center - gutter) <= REFLOW_COLUMN_EDGE_MARGIN:
-        return True
-    return (left < gutter - REFLOW_COLUMN_EDGE_MARGIN
-            and right > gutter + REFLOW_COLUMN_EDGE_MARGIN)
 
 
 def _column_sort(items: List[object], gutter: float) -> List[object]:

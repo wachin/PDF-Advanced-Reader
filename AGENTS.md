@@ -74,6 +74,20 @@ performance/loading/scroll testing. Do **not** compile, import into
 
 ---
 
+## ⚠️ Important: about `external/two-column-test-pdfs`
+
+This directory is **NOT a library of this project** — nothing inside is
+compiled, imported or linked. It holds unmodified, openly licensed research
+articles (CC BY 4.0) used as real-world fixtures for reflow's two-column
+reading order, referenced by `tests/test_reflow.py`.
+
+**How to apply:** use these PDFs to test gutter detection and column-major
+reading order, and keep their attribution intact in `CREDITS.md`. Only add
+papers whose license explicitly permits redistribution; do not commit
+publisher-copyrighted downloads.
+
+---
+
 ## Project structure
 
 ```

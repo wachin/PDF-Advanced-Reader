@@ -431,6 +431,64 @@ def test_single_column_has_no_gutter(qapp, tmp_path):
     assert [p.top for p in paragraphs] == sorted(p.top for p in paragraphs)
 
 
+def test_sidebar_beside_wide_body_is_not_two_columns(qapp, tmp_path):
+    """A narrow metadata sidebar next to one wide body column has no gutter."""
+    doc = fitz.open()
+    page = doc.new_page(width=520, height=640)
+    for index in range(5):
+        page.insert_textbox(fitz.Rect(40, 80 + index * 45, 140, 120 + index * 45),
+                            f"Metadata line {index} in the sidebar.", fontsize=8)
+    page.insert_textbox(fitz.Rect(220, 60, 500, 80), "1 Introduction", fontsize=11)
+    for index in range(5):
+        page.insert_textbox(
+            fitz.Rect(220, 90 + index * 90, 500, 170 + index * 90),
+            "A wide body paragraph that fills most of the page width; it is "
+            "the main column, not one half of a two-column layout.",
+            fontsize=10)
+    page.insert_textbox(fitz.Rect(220, 560, 500, 585), "2 Methods", fontsize=11)
+    path = tmp_path / "sidebar.pdf"
+    doc.save(str(path))
+    doc.close()
+
+    doc = fitz.open(path)
+    try:
+        paragraphs, media = extract_page(doc[0], 0, width=700)
+        assert _detect_gutter(paragraphs + media) is None
+    finally:
+        doc.close()
+
+
+def _two_column_fixtures():
+    folder = (Path(__file__).resolve().parents[1]
+              / "external" / "two-column-test-pdfs")
+    return sorted(folder.glob("*.pdf"))
+
+
+@pytest.mark.parametrize("path", _two_column_fixtures(), ids=lambda path: path.name)
+def test_real_world_two_column_fixtures(qapp, path):
+    """CC BY research papers: most pages expose a gutter near the page middle.
+
+    Title pages mix a sidebar with a wide body and a full-width abstract, so
+    they legitimately have no gutter; the body pages must.
+    """
+    doc = fitz.open(path)
+    try:
+        page_width = doc[0].rect.width
+        detected = 0
+        for index in range(doc.page_count):
+            paragraphs, media = extract_page(doc[index], index, width=760)
+            gutter = _detect_gutter(paragraphs + media)
+            if gutter is None:
+                continue
+            detected += 1
+            assert page_width / 3 <= gutter <= page_width * 2 / 3, (
+                f"{path.name} page {index + 1}: gutter {gutter:.1f} off-centre")
+        assert detected >= max(3, doc.page_count // 2), (
+            f"{path.name}: only {detected}/{doc.page_count} pages two-column")
+    finally:
+        doc.close()
+
+
 def test_committed_two_column_demo_reading_order(qapp):
     demo = Path(__file__).resolve().parents[1] / "demo-two-columns.pdf"
     if not demo.exists():
