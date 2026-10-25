@@ -34,7 +34,9 @@ def test_sidebar_tabs_show_only_icons_with_hover_labels(win, tmp_path):
         assert tabs.tabText(index) == ""
         icon = tabs.tabIcon(index)
         assert not icon.isNull(), f"tab {index} has no icon"
-        assert not icon.pixmap(QSize(18, 18)).isNull()
+        pixmap = icon.pixmap(QSize(18, 18))
+        assert not pixmap.isNull()
+        assert pixmap.size() == QSize(18, 18)
 
 
 def test_sidebar_tab_icons_follow_dark_mode(win, tmp_path):

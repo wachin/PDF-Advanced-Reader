@@ -15,7 +15,7 @@ import time
 
 from PyQt6.QtCore import QSettings, QSize, QThread, Qt
 from PyQt6.QtGui import (
-    QAction, QCloseEvent, QColor, QDragEnterEvent, QDropEvent, QIcon,
+    QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QIcon,
     QKeySequence, QPainter, QPixmap, QShortcut,
 )
 from PyQt6.QtSvg import QSvgRenderer
@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
 
 from . import APP_NAME, __version__
 from .i18n import I18n
+from .icons import asset_path as _asset_path, tinted_icon
 from .search import SearchParams, SearchWorker, normalize_space
 from .sidebar import (
     Sidebar, ThumbnailSettings, THUMB_MAX_WIDTH, THUMB_MIN_WIDTH,
@@ -36,19 +37,9 @@ from .sidebar import (
 from .tabs import DocumentTab
 from .viewer import PDFView, MEMORY_LEVELS
 
-_ASSET_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "assets", "icons")
-
 ZOOM_STEP_PRESETS = (0.025, 0.05, 0.075, 0.10, 0.125,
                      0.15, 0.175, 0.20, 0.225, 0.25)
 DEFAULT_ZOOM_STEP = 0.10
-
-
-def _asset_path(name: str) -> str:
-    """Resolve an asset from the source checkout, falling back to the CWD."""
-    path = os.path.join(_ASSET_DIR, name)
-    return path if os.path.exists(path) else os.path.join("assets", "icons", name)
 
 
 def _format_zoom(zoom: float) -> str:
@@ -74,7 +65,6 @@ class MainWindow(QMainWindow):
         self.search_thread: Optional[QThread] = None
         self.search_worker: Optional[SearchWorker] = None
         self.settings = QSettings(APP_NAME, APP_NAME)
-        self._icon_cache = {}
 
         self.tabs.setDocumentMode(True)
         self.tabs.setTabsClosable(True)
@@ -1622,30 +1612,6 @@ class MainWindow(QMainWindow):
             self.zoom_label.setText(zoom)
             self.zoom_label.setToolTip("Zoom level")
 
-    def _tinted_icon(self, name: str, color: str) -> QIcon:
-        """Render one of the monochrome SVG assets in *color*."""
-        key = (name, color)
-        icon = self._icon_cache.get(key)
-        if icon is not None:
-            return icon
-        renderer = QSvgRenderer(_asset_path(name))
-        icon = QIcon()
-        if renderer.isValid():
-            ink = QColor(color)
-            for size in (16, 24, 32, 48):
-                pixmap = QPixmap(size, size)
-                pixmap.fill(Qt.GlobalColor.transparent)
-                painter = QPainter(pixmap)
-                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-                renderer.render(painter)
-                painter.setCompositionMode(
-                    QPainter.CompositionMode.CompositionMode_SourceIn)
-                painter.fillRect(pixmap.rect(), ink)
-                painter.end()
-                icon.addPixmap(pixmap)
-        self._icon_cache[key] = icon
-        return icon
-
     def _set_compact_toolbar_buttons(self) -> None:
         """Show these toolbar actions as icons only; hover shows the label."""
         toolbar = getattr(self, "toolbar", None)
@@ -1661,14 +1627,14 @@ class MainWindow(QMainWindow):
     def _update_zoom_actions(self, reflow: bool) -> None:
         """Keep Ctrl +/- labelled for what they actually do in this mode."""
         ink = "#e6e6e6" if self.act_dark_mode.isChecked() else "#3c3c3c"
-        self.act_prev.setIcon(self._tinted_icon("previous_page.svg", ink))
-        self.act_next.setIcon(self._tinted_icon("next_page.svg", ink))
-        self.act_rotl.setIcon(self._tinted_icon("rotate_left.svg", ink))
-        self.act_rotr.setIcon(self._tinted_icon("rotate_right.svg", ink))
-        self.act_reflow.setIcon(self._tinted_icon("reflow.svg", ink))
+        self.act_prev.setIcon(tinted_icon("previous_page.svg", ink))
+        self.act_next.setIcon(tinted_icon("next_page.svg", ink))
+        self.act_rotl.setIcon(tinted_icon("rotate_left.svg", ink))
+        self.act_rotr.setIcon(tinted_icon("rotate_right.svg", ink))
+        self.act_reflow.setIcon(tinted_icon("reflow.svg", ink))
         if reflow:
-            self.act_zin.setIcon(self._tinted_icon("text_increase.svg", ink))
-            self.act_zout.setIcon(self._tinted_icon("text_decrease.svg", ink))
+            self.act_zin.setIcon(tinted_icon("text_increase.svg", ink))
+            self.act_zout.setIcon(tinted_icon("text_decrease.svg", ink))
             self.act_zin.setText("Increase Text Size")
             self.act_zin.setToolTip("Increase Text Size (Ctrl++)")
             self.act_zout.setText("Decrease Text Size")
@@ -1676,8 +1642,8 @@ class MainWindow(QMainWindow):
             self.act_zoom_100.setText("Default Text Size")
             self.act_zoom_100.setToolTip("Reset reflow text size (Ctrl+0)")
         else:
-            self.act_zin.setIcon(self._tinted_icon("zoom_in.svg", ink))
-            self.act_zout.setIcon(self._tinted_icon("zoom_out.svg", ink))
+            self.act_zin.setIcon(tinted_icon("zoom_in.svg", ink))
+            self.act_zout.setIcon(tinted_icon("zoom_out.svg", ink))
             self.act_zin.setText("Zoom In")
             self.act_zin.setToolTip("Zoom in (Ctrl++)")
             self.act_zout.setText("Zoom Out")

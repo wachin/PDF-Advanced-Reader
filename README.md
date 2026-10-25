@@ -56,6 +56,7 @@ Fixes in 2.0 (there were ten other bugs behind it):
 - **Encrypted PDFs** — password prompt, credentials are passed to the render workers only.
 - **Reflow mode with figures and tables** — single-column reading on any window size; text is extracted and laid out in the background, raster images and detected tables are rendered inline in reading order, two-column papers are read left column first, text size is adjustable, and scanned pages are shown as fit-to-column images.
 - **Comfort** — drag & drop to open, open from the command line, recent-file memory, remembered window layout, page spinner, status bar.
+- **Crisp vector icons** — toolbar and sidebar icons are drawn by a `QIconEngine` at the exact requested size and device pixel ratio (see [`docs/en/developers/ui/vector-icons.md`](docs/en/developers/ui/vector-icons.md)).
 
 ### Keyboard shortcuts
 
@@ -249,6 +250,7 @@ On a 200-page A4 document (headless container, one page per page of text and cha
 - **Rendering** happens off the GUI thread in `RenderPool` worker threads (priority queue → visible pages first). Results are PNG buffers, converted to `QImage` on the GUI thread — `QPixmap`/`QImage` must never be touched from worker threads.
 - **Painting** is done directly in `PDFView.paintEvent`, so partial updates are cheap and overlays (highlights, selection) never corrupt the cached page.
 - **Geometry** (`geometry.py`) is pure Python: all rotation/coordinate mapping is unit-tested so text selection and highlights cannot drift out of sync.
+- **Icons** (`icons.py`) are vector-rendered on demand by a `QIconEngine` at the exact requested size and device pixel ratio; pre-rasterizing them into fixed sizes made Qt rescale 18 px icons and softened their strokes.
 
 ---
 

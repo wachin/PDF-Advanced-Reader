@@ -168,6 +168,7 @@ def test_toolbar_icon_actions(qapp):
                          (win.act_rotl, "Rotate left"),
                          (win.act_rotr, "Rotate right")):
             assert not act.icon().isNull()
+            assert act.icon().pixmap(win.toolbar.iconSize()).size() == win.toolbar.iconSize()
             assert act.toolTip() == tip
             button = win.toolbar.widgetForAction(act)
             assert isinstance(button, QToolButton)

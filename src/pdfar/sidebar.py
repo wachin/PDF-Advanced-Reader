@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Dict, List, Optional
 
 try:
@@ -13,9 +11,8 @@ except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 from PyQt6.QtCore import QRect, QSettings, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import (
-    QColor, QIcon, QPainter, QPen, QPixmap,
+    QColor, QIcon, QPen, QPixmap,
 )
-from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget, QMenu, QInputDialog, QMessageBox, QHBoxLayout,
@@ -23,6 +20,7 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate, QLabel, QToolButton,
 )
 from . import APP_NAME
+from .icons import tinted_icon
 from .render import RenderPool, RenderResult
 from .bookmarks import BookmarkManager
 from .annotations import AnnotationManager, HIGHLIGHT_COLORS, AnnotationType
@@ -38,35 +36,6 @@ TAB_ICONS = ("thumbnails.svg", "index.svg", "bookmarks.svg",
              "annotations.svg", "attachments.svg")
 (TAB_THUMBNAILS, TAB_INDEX, TAB_BOOKMARKS, TAB_ANNOTATIONS,
  TAB_ATTACHMENTS) = range(len(TAB_LABELS))
-
-_ASSET_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "assets", "icons")
-
-
-@lru_cache(maxsize=None)
-def _tab_icon(name: str, color: str) -> QIcon:
-    """Render a monochrome SVG asset in *color* at the tab icon sizes."""
-    path = os.path.join(_ASSET_DIR, name)
-    if not os.path.exists(path):
-        path = os.path.join("assets", "icons", name)
-    renderer = QSvgRenderer(path)
-    icon = QIcon()
-    if not renderer.isValid():
-        return icon
-    ink = QColor(color)
-    for size in (16, 20, 24, 32):
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        renderer.render(painter)
-        painter.setCompositionMode(
-            QPainter.CompositionMode.CompositionMode_SourceIn)
-        painter.fillRect(pixmap.rect(), ink)
-        painter.end()
-        icon.addPixmap(pixmap)
-    return icon
 
 
 @dataclass
@@ -371,7 +340,7 @@ class Sidebar(QWidget):
         ink = "#e6e6e6" if dark else "#3c3c3c"
         self._icon_color = ink
         for index, name in enumerate(TAB_ICONS):
-            self.tabs.setTabIcon(index, _tab_icon(name, ink))
+            self.tabs.setTabIcon(index, tinted_icon(name, ink))
 
     def _on_sidebar_tab_changed(self, index: int) -> None:
         if self.tabs.widget(index) is self.thumbs_tab:
