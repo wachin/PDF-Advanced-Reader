@@ -9,7 +9,9 @@ try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
 except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
-from PyQt6.QtCore import QRect, QSettings, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import (
+    QPoint, QRect, QSettings, QSize, Qt, pyqtSignal,
+)
 from PyQt6.QtGui import (
     QColor, QIcon, QPen, QPixmap,
 )
@@ -17,7 +19,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget, QMenu, QInputDialog, QMessageBox, QHBoxLayout,
     QPushButton, QComboBox, QFileDialog, QProgressBar, QStyle,
-    QStyledItemDelegate, QLabel, QToolButton,
+    QStyledItemDelegate, QLabel, QToolButton, QLayout, QLayoutItem,
 )
 from . import APP_NAME
 from .icons import tinted_icon
@@ -144,6 +146,81 @@ class ThumbnailList(QListWidget):
         self.viewport().update()
 
 
+class _FlowLayout(QLayout):
+    """Lay widgets left to right, wrapping onto new rows when space runs out.
+
+    The annotations and attachments toolbars use this so they do not force a
+    wide minimum width on the sidebar dock.
+    """
+
+    def __init__(self, parent=None, spacing: int = 4):
+        super().__init__(parent)
+        self._items: List[QLayoutItem] = []
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(spacing)
+
+    def addItem(self, item) -> None:  # noqa: N802 - Qt API
+        self._items.append(item)
+
+    def count(self) -> int:  # noqa: N802 - Qt API
+        return len(self._items)
+
+    def itemAt(self, index: int):  # noqa: N802 - Qt API
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index: int):  # noqa: N802 - Qt API
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):  # noqa: N802 - Qt API
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt API
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt API
+        return self._layout_rows(QRect(0, 0, width, 0), apply=False)
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802 - Qt API
+        super().setGeometry(rect)
+        self._layout_rows(rect, apply=True)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt API
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:  # noqa: N802 - Qt API
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        return size.expandedTo(QSize(
+            margins.left() + margins.right(),
+            margins.top() + margins.bottom()))
+
+    def _layout_rows(self, rect: QRect, apply: bool) -> int:
+        margins = self.contentsMargins()
+        area = rect.adjusted(margins.left(), margins.top(),
+                             -margins.right(), -margins.bottom())
+        x, y, row_height = area.x(), area.y(), 0
+        spacing = self.spacing()
+        for item in self._items:
+            hint = item.sizeHint()
+            next_x = x + hint.width() + spacing
+            if next_x - spacing > area.right() and row_height > 0:
+                x = area.x()
+                y += row_height + spacing
+                next_x = x + hint.width() + spacing
+                row_height = 0
+            if apply:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            row_height = max(row_height, hint.height())
+        return y + row_height - rect.y() + margins.bottom()
+
+
 class Sidebar(QWidget):
     """Thumbnails + table of contents + user bookmarks."""
 
@@ -200,7 +277,7 @@ class Sidebar(QWidget):
         ann_layout.setContentsMargins(4, 4, 4, 4)
 
         # Toolbar for annotations
-        ann_toolbar = QHBoxLayout()
+        ann_toolbar = _FlowLayout()
         self.ann_new_highlight = QPushButton("New Highlight")
         self.ann_new_highlight.setToolTip("Create highlight from current selection (Ctrl+H)")
         self.ann_new_highlight.clicked.connect(self._on_new_highlight)
@@ -219,7 +296,6 @@ class Sidebar(QWidget):
         self.ann_save_btn.clicked.connect(self._on_save_annotations)
         ann_toolbar.addWidget(self.ann_save_btn)
 
-        ann_toolbar.addStretch()
         ann_layout.addLayout(ann_toolbar)
 
         self.annotations_tree = QTreeWidget()
@@ -237,7 +313,7 @@ class Sidebar(QWidget):
         att_layout.setContentsMargins(4, 4, 4, 4)
 
         # Toolbar for attachments
-        att_toolbar = QHBoxLayout()
+        att_toolbar = _FlowLayout()
         self.att_extract_btn = QPushButton("Extract")
         self.att_extract_btn.setToolTip("Extract selected attachment")
         self.att_extract_btn.clicked.connect(self._extract_attachment)
@@ -249,7 +325,6 @@ class Sidebar(QWidget):
         self.att_extract_all_btn.clicked.connect(self._extract_all_attachments)
         att_toolbar.addWidget(self.att_extract_all_btn)
 
-        att_toolbar.addStretch()
         att_layout.addLayout(att_toolbar)
 
         self.attachments_tree = QTreeWidget()

@@ -7,11 +7,11 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PyQt6.QtCore import QSize
+from PyQt6.QtCore import QSize, Qt
 
 from conftest import build_sample_pdf
 from pdfar.main import MainWindow
-from pdfar.sidebar import TAB_LABELS
+from pdfar.sidebar import TAB_LABELS, TAB_ANNOTATIONS
 
 
 @pytest.fixture
@@ -53,3 +53,27 @@ def test_sidebar_tab_icons_follow_dark_mode(win, tmp_path):
         if win.view is not None and win.view.dark_mode:
             win._toggle_dark_mode()
         win.settings.setValue("dark_mode", saved)
+
+
+def test_sidebar_can_shrink_for_more_document_space(win, qapp, tmp_path):
+    win.open_document(build_sample_pdf(tmp_path / "doc.pdf", pages=1))
+    sidebar = win.sidebar
+    sidebar.tabs.setCurrentIndex(TAB_ANNOTATIONS)
+
+    win.resizeDocks([win.side_dock], [160], Qt.Orientation.Horizontal)
+    for _ in range(4):
+        qapp.processEvents()
+
+    assert win.side_dock.width() < 200
+    assert sidebar.minimumSizeHint().width() < 200
+
+    # The annotation controls wrap onto extra rows instead of forcing a
+    # wider panel, and stay fully inside it.
+    assert sidebar.ann_save_btn.y() > sidebar.ann_new_highlight.y()
+    panel = sidebar.annotations_panel.rect()
+    for control in (sidebar.ann_new_highlight, sidebar.ann_color_combo,
+                    sidebar.ann_save_btn):
+        geometry = control.geometry()
+        assert geometry.width() > 0
+        assert geometry.height() > 0
+        assert panel.contains(geometry)
