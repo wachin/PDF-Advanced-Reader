@@ -261,7 +261,14 @@ class Sidebar(QWidget):
         self.outline = QTreeWidget()
         self.outline.setHeaderHidden(True)
         self.outline.itemActivated.connect(self._on_outline)
-        self.tabs.addTab(self.outline, "Index")
+        self.outline_panel = QWidget()
+        outline_layout = QVBoxLayout(self.outline_panel)
+        outline_layout.setContentsMargins(0, 0, 0, 0)
+        outline_layout.setSpacing(0)
+        self.outline_toolbar = self._build_outline_toolbar()
+        outline_layout.addWidget(self.outline_toolbar)
+        outline_layout.addWidget(self.outline, 1)
+        self.tabs.addTab(self.outline_panel, "Index")
 
         # ---- bookmarks --------------------------------------------------
         self.bookmarks_tree = QTreeWidget()
@@ -383,6 +390,59 @@ class Sidebar(QWidget):
         self._update_thumb_size_controls()
         return row
 
+    def _build_outline_toolbar(self) -> QWidget:
+        """Slim T1–T4 level controls above the outline tree."""
+        row = QWidget()
+        row.setFixedHeight(24)
+        row.setStyleSheet(
+            "QToolButton { border-radius: 3px; }"
+            "QToolButton:checked {"
+            "  background-color: palette(highlight);"
+            "  color: palette(highlighted-text);"
+            "}")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(6, 0, 6, 0)
+        layout.setSpacing(2)
+        self.outline_buttons = []
+        for level in range(1, 5):
+            button = QToolButton(row)
+            button.setText(f"T{level}")
+            button.setAutoRaise(True)
+            button.setCheckable(True)
+            button.setFixedSize(28, 20)
+            if level == 1:
+                hint = "Show only Heading 1 entries"
+            else:
+                hint = f"Expand headings up to level {level}"
+            button.setToolTip(hint + "; click again to expand everything")
+            button.clicked.connect(
+                lambda _checked=False, lvl=level:
+                self._apply_outline_level(lvl))
+            button.setEnabled(False)
+            layout.addWidget(button)
+            self.outline_buttons.append(button)
+        layout.addStretch(1)
+        return row
+
+    def _apply_outline_level(self, level: int) -> None:
+        """Collapse to *level* headings, or expand everything when repeated."""
+        button = self.outline_buttons[level - 1]
+        active = button.isChecked()
+        for other in self.outline_buttons:
+            other.setChecked(other is button and active)
+        if not active:
+            self.outline.expandAll()
+            return
+        root = self.outline.invisibleRootItem()
+        for index in range(root.childCount()):
+            self._set_outline_depth(root.child(index), 1, level)
+
+    def _set_outline_depth(self, item: QTreeWidgetItem, depth: int,
+                           level: int) -> None:
+        item.setExpanded(depth < level)
+        for index in range(item.childCount()):
+            self._set_outline_depth(item.child(index), depth + 1, level)
+
     def _step_thumb_size(self, delta: int) -> None:
         width = self._thumb_settings.width + delta
         if THUMB_MIN_WIDTH <= width <= THUMB_MAX_WIDTH:
@@ -494,6 +554,9 @@ class Sidebar(QWidget):
             toc = self.doc.get_toc() or []
         except Exception:
             toc = []
+        for button in self.outline_buttons:
+            button.setChecked(False)
+            button.setEnabled(bool(toc))
         if not toc:
             self.outline.addTopLevelItem(QTreeWidgetItem(["(no outline)"]))
             return
