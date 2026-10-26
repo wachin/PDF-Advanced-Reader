@@ -13,7 +13,7 @@ except ImportError:  # pragma: no cover - older PyMuPDF
 import hashlib
 import time
 
-from PyQt6.QtCore import QSettings, QSize, QThread, Qt
+from PyQt6.QtCore import QEvent, QObject, QPoint, QSettings, QSize, QThread, QTimer, Qt
 from PyQt6.QtGui import (
     QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QIcon,
     QKeySequence, QPainter, QPixmap, QShortcut,
@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSpinBox,
-    QStatusBar, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget,
+    QStatusBar, QTabWidget, QToolBar, QToolButton, QToolTip, QVBoxLayout, QWidget,
 )
 
 from . import APP_NAME, __version__
@@ -46,6 +46,104 @@ from .viewer import PDFView, MEMORY_LEVELS
 ZOOM_STEP_PRESETS = (0.025, 0.05, 0.075, 0.10, 0.125,
                      0.15, 0.175, 0.20, 0.225, 0.25)
 DEFAULT_ZOOM_STEP = 0.10
+
+SEARCH_MODE_DESCRIPTIONS = (
+    "AND — every word must appear on the same page.\n\n"
+    "Example: \"invoice 2024\" finds pages containing both words, in any order.\n\n"
+    "Example: \"budget approved\" finds a page that mentions both concepts.\n\n"
+    "Use AND to narrow results with several required keywords. "
+    "For exact wording or word order, use PHRASE instead.",
+    "OR — any of the words may appear on the page.\n\n"
+    "Example: \"invoice receipt\" finds pages with either word.\n\n"
+    "Example: \"color colour\" covers both spellings.\n\n"
+    "Example: \"cat dog\" finds notes about either animal.\n\n"
+    "Use OR to gather pages about alternatives, synonyms or spelling variants.",
+    "PHRASE — the whole query must appear as one exact phrase.\n\n"
+    "Example: \"terms and conditions\" only matches that exact sequence of words.\n\n"
+    "Example: \"John Smith\" keeps the first and last name together.\n\n"
+    "Example: \"Figure 3\" finds that caption without pages that merely mention "
+    "\"figure\" and \"3\" separately.\n\n"
+    "Use PHRASE for names, titles, quotations and any wording where order matters.",
+    "REGEX — match a regular expression (Python syntax).\n\n"
+    "Example: \\d{4}-\\d{2}-\\d{2} finds dates such as 2026-10-26.\n\n"
+    "Example: (invoice|receipt)s? finds singular or plural forms of either word.\n\n"
+    "Example: colou?r finds both \"color\" and \"colour\".\n\n"
+    "Use REGEX for patterns, optional parts and structured data. "
+    "\"Match case\" controls case sensitivity.",
+)
+
+
+class DelayedItemTooltip(QObject):
+    """Show a combo-box item's ToolTipRole text after the pointer rests on it."""
+
+    def __init__(self, combo: QComboBox, delay_ms: int = 1000) -> None:
+        super().__init__(combo)
+        self.delay_ms = delay_ms
+        self._combo = combo
+        self._view = combo.view()
+        self._index = -1
+        self._pos = QPoint()
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(delay_ms)
+        self._timer.timeout.connect(self._show)
+        self._view.setMouseTracking(True)
+        self._viewport = self._view.viewport()
+        self._viewport.installEventFilter(self)
+        popup = self._view.window()
+        if popup is not self._view:
+            popup.installEventFilter(self)
+
+    def _text(self, index: int) -> str:
+        if index < 0:
+            return ""
+        try:
+            return self._combo.itemData(index, Qt.ItemDataRole.ToolTipRole) or ""
+        except RuntimeError:  # the combo is being destroyed
+            return ""
+
+    def _reset(self) -> None:
+        self._index = -1
+        self._timer.stop()
+        QToolTip.hideText()
+
+    def _hover(self, index: int, pos: QPoint) -> None:
+        if index != self._index:
+            self._index = index
+            self._timer.stop()
+            QToolTip.hideText()
+            if self._text(index):
+                self._timer.start()
+        self._pos = pos
+
+    def _show(self) -> None:
+        text = self._text(self._index)
+        if not text:
+            return
+        try:
+            visible = self._view.isVisible()
+        except RuntimeError:  # the combo is being destroyed
+            return
+        if visible:
+            QToolTip.showText(self._pos, text, self._viewport)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        etype = event.type()
+        if obj is self._viewport:
+            if etype == QEvent.Type.MouseMove:
+                try:
+                    index = self._view.indexAt(event.position().toPoint()).row()
+                except RuntimeError:  # the combo is being destroyed
+                    return False
+                self._hover(index, event.globalPosition().toPoint())
+            elif etype in (QEvent.Type.Leave, QEvent.Type.Wheel, QEvent.Type.Hide):
+                self._reset()
+            elif etype == QEvent.Type.ToolTip:
+                return True  # suppress the popup's built-in tooltip
+        elif etype == QEvent.Type.Hide:
+            self._reset()
+        return False
+
 
 
 def _format_zoom(zoom: float) -> str:
@@ -524,7 +622,10 @@ class MainWindow(QMainWindow):
 
         self.mode = QComboBox()
         self.mode.addItems(["AND", "OR", "PHRASE", "REGEX"])
+        for index, description in enumerate(SEARCH_MODE_DESCRIPTIONS):
+            self.mode.setItemData(index, description, Qt.ItemDataRole.ToolTipRole)
         self.mode.setToolTip("AND: all terms must match; OR: any term matches; PHRASE: exact phrase; REGEX: regular expression")
+        self._mode_tooltips = DelayedItemTooltip(self.mode)
         v.addWidget(self.mode)
 
         opts = QHBoxLayout()

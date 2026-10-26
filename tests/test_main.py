@@ -8,7 +8,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from PyQt6.QtCore import QSettings, Qt
-from PyQt6.QtWidgets import QLabel, QMessageBox, QToolButton
+from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QLabel, QMessageBox, QToolButton, QToolTip
 
 from pdfar import APP_NAME, __version__
 from pdfar.main import MainWindow
@@ -194,6 +195,52 @@ def test_stale_search_results_are_ignored(qapp, sample_pdf):
         assert win.view._hit_flat == []
     finally:
         win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_search_mode_items_explain_themselves(qapp):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        expected = (
+            ("AND", "every word"),
+            ("OR", "any of the words"),
+            ("PHRASE", "exact phrase"),
+            ("REGEX", "regular expression"),
+        )
+        assert win.mode.count() == len(expected)
+        for index, (name, needle) in enumerate(expected):
+            assert win.mode.itemText(index) == name
+            tip = win.mode.itemData(index, Qt.ItemDataRole.ToolTipRole)
+            assert tip.startswith(name) and needle in tip.lower()
+            assert tip.count("Example:") >= 2
+            assert "\n\n" in tip, "examples should be split into paragraphs"
+
+        assert win._mode_tooltips.delay_ms == 1000
+
+        win.mode.showPopup()
+        qapp.processEvents()
+        view = win.mode.view()
+        QTest.mouseMove(view.viewport(),
+                        view.visualRect(view.model().index(2, 0)).center())
+        qapp.processEvents()
+        assert win._mode_tooltips._timer.isActive()
+        assert not QToolTip.isVisible()
+
+        deadline = time.time() + 1.2
+        while time.time() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert QToolTip.isVisible()
+        assert QToolTip.text().startswith("PHRASE")
+
+        win.mode.hidePopup()
+        qapp.processEvents()
+        assert not QToolTip.isVisible()
+    finally:
         win.close()
         win.deleteLater()
         qapp.processEvents()
