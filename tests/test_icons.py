@@ -46,5 +46,17 @@ def test_tinted_icons_are_cached_per_color(qapp):
     assert light is not dark
 
 
+def test_right_dock_icons_have_solid_strokes(qapp):
+    """The icon-only dock tabs must stay bold enough to read at 18 px."""
+    for name, minimum in (("search.svg", 50), ("page_numbers.svg", 90)):
+        image = tinted_icon(name, "#3c3c3c").pixmap(QSize(18, 18)).toImage()
+        solid = sum(
+            1
+            for y in range(image.height())
+            for x in range(image.width())
+            if QColor.fromRgba(image.pixel(x, y)).alpha() > 200)
+        assert solid >= minimum, f"{name} has only {solid} solid pixels"
+
+
 def test_missing_asset_gives_empty_icon(qapp):
     assert tinted_icon("does-not-exist.svg", "#3c3c3c").isNull()

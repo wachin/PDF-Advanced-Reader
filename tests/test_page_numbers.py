@@ -8,8 +8,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 import pymupdf as fitz
-from PyQt6.QtCore import QEvent, QPointF, QRect, Qt
-from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtCore import QEvent, QPointF, QRect, QSize, Qt
+from PyQt6.QtGui import QColor, QMouseEvent
 from PyQt6.QtWidgets import QFileDialog, QMessageBox
 
 from conftest import build_sample_pdf
@@ -360,6 +360,14 @@ def win(qapp):
     qapp.processEvents()
 
 
+def test_right_dock_tabs_match_sidebar_tab_height(win, qapp, tmp_path):
+    win.open_document(build_sample_pdf(tmp_path / "doc.pdf", pages=2))
+    qapp.processEvents()
+    assert win.sidebar is not None
+    assert (win.right_tabs.tabBar().height()
+            == win.sidebar.tabs.tabBar().height())
+
+
 def _red_pixels(image) -> int:
     count = 0
     for y in range(image.height()):
@@ -402,9 +410,37 @@ def test_right_dock_has_two_icon_only_tabs(win):
     assert tabs.tabToolTip(1) == "Page Numbers"
     assert not tabs.tabIcon(0).isNull()
     assert not tabs.tabIcon(1).isNull()
+    assert tabs.iconSize() == QSize(18, 18)
     assert tabs.widget(0) is win.search_panel
     assert tabs.widget(1) is win.page_numbers_panel
     assert win.search_dock.windowTitle() == "Tools"
+
+
+def _icon_ink(icon) -> QColor:
+    image = icon.pixmap(QSize(18, 18)).toImage()
+    answer = QColor(0, 0, 0, 0)
+    for y in range(image.height()):
+        for x in range(image.width()):
+            color = QColor.fromRgba(image.pixel(x, y))
+            if color.alpha() > answer.alpha():
+                answer = color
+    return answer
+
+
+def test_right_dock_icons_follow_the_visible_theme(win):
+    """A saved dark-mode flag must not tint the icons white on a light UI."""
+    saved = win.settings.value("dark_mode", False, type=bool)
+    try:
+        win.settings.setValue("dark_mode", True)
+        win._restore_state()
+        assert _icon_ink(win.right_tabs.tabIcon(0)).lightness() < 100
+        assert _icon_ink(win.right_tabs.tabIcon(1)).lightness() < 100
+
+        win._apply_dark_mode(True)
+        assert _icon_ink(win.right_tabs.tabIcon(0)).lightness() > 150
+    finally:
+        win._apply_dark_mode(False)
+        win.settings.setValue("dark_mode", saved)
 
 
 def test_page_numbers_tab_drives_the_live_preview(win, qapp, tmp_path):

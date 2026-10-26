@@ -69,6 +69,7 @@ class MainWindow(QMainWindow):
         self.search_thread: Optional[QThread] = None
         self.search_worker: Optional[SearchWorker] = None
         self.settings = QSettings(APP_NAME, APP_NAME)
+        self._ui_dark = False
 
         self.tabs.setDocumentMode(True)
         self.tabs.setTabsClosable(True)
@@ -565,6 +566,8 @@ class MainWindow(QMainWindow):
         self.right_tabs.setDocumentMode(True)
         self.right_tabs.setTabPosition(QTabWidget.TabPosition.North)
         self.right_tabs.tabBar().setExpanding(False)
+        self.right_tabs.tabBar().setStyleSheet(
+            "QTabBar::tab { padding: 4px 6px; }")
         self.right_tabs.setIconSize(QSize(18, 18))
         self.right_tabs.addTab(self.search_panel, QIcon(), "")
         self.right_tabs.addTab(self.page_numbers_panel, QIcon(), "")
@@ -576,13 +579,13 @@ class MainWindow(QMainWindow):
         dock.setWidget(self.right_tabs)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         self.search_dock = dock
-        self._apply_right_tab_icons(False)
+        self._apply_right_tab_icons()
 
-    def _apply_right_tab_icons(self, dark: bool) -> None:
-        """Tint the right dock tabs; their labels appear only on hover."""
+    def _apply_right_tab_icons(self) -> None:
+        """Tint the right dock tabs to match the theme actually on screen."""
         if not hasattr(self, "right_tabs"):
             return
-        ink = "#e6e6e6" if dark else "#3c3c3c"
+        ink = "#e6e6e6" if self._ui_dark else "#3c3c3c"
         self.right_tabs.setTabIcon(0, tinted_icon("search.svg", ink))
         self.right_tabs.setTabIcon(
             1, tinted_icon("page_numbers.svg", ink))
@@ -1012,7 +1015,6 @@ class MainWindow(QMainWindow):
                     tab.sidebar.apply_icon_palette(dark_mode)
             # Apply theme to entire application
             self._apply_dark_mode(dark_mode)
-            self._apply_right_tab_icons(dark_mode)
             self._update_zoom_actions(self.view.reflow_mode)
 
     def _toggle_reflow(self) -> None:
@@ -1217,6 +1219,7 @@ class MainWindow(QMainWindow):
 
     def _apply_dark_mode(self, enabled: bool) -> None:
         """Apply dark mode to the entire application UI."""
+        self._ui_dark = enabled
         if enabled:
             self.setStyleSheet("""
                 QMainWindow {
@@ -1452,6 +1455,7 @@ class MainWindow(QMainWindow):
             """)
         else:
             self.setStyleSheet("")
+        self._apply_right_tab_icons()
 
     # ---------------------------------------------------------- document
     def open_dialog(self) -> None:
@@ -1974,7 +1978,7 @@ class MainWindow(QMainWindow):
         # restore dark mode
         dark = self.settings.value("dark_mode", False, type=bool)
         self.act_dark_mode.setChecked(dark)
-        self._apply_right_tab_icons(dark)
+        self._apply_right_tab_icons()
         # NOTE: we deliberately do NOT restore the Qt windowState. saveState()
         # persists dock/toolbar/tabbar visibility, and a previous session saved
         # while the UI was collapsed (e.g. presentation mode) makes the window
