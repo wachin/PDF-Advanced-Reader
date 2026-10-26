@@ -93,6 +93,10 @@ class DelayedItemTooltip(QObject):
         popup = self._view.window()
         if popup is not self._view:
             popup.installEventFilter(self)
+        # the closed selector should explain the mode it currently shows
+        self._combo.setMouseTracking(True)
+        self._combo.installEventFilter(self)
+        self._combo.currentIndexChanged.connect(self._reset)
 
     def _text(self, index: int) -> str:
         if index < 0:
@@ -121,7 +125,9 @@ class DelayedItemTooltip(QObject):
         if not text:
             return
         try:
-            visible = self._view.isVisible()
+            # the popup view is hidden while hovering the closed selector, so
+            # visibility is judged by the selector itself
+            visible = self._combo.isVisible()
         except RuntimeError:  # the combo is being destroyed
             return
         if visible:
@@ -140,6 +146,17 @@ class DelayedItemTooltip(QObject):
                 self._reset()
             elif etype == QEvent.Type.ToolTip:
                 return True  # suppress the popup's built-in tooltip
+        elif obj is self._combo:
+            if etype == QEvent.Type.MouseMove:
+                try:
+                    index = self._combo.currentIndex()
+                except RuntimeError:  # the combo is being destroyed
+                    return False
+                self._hover(index, event.globalPosition().toPoint())
+            elif etype in (QEvent.Type.Leave, QEvent.Type.MouseButtonPress):
+                self._reset()
+            elif etype == QEvent.Type.ToolTip:
+                return True  # we show the selected item's description ourselves
         elif etype == QEvent.Type.Hide:
             self._reset()
         return False
@@ -624,7 +641,6 @@ class MainWindow(QMainWindow):
         self.mode.addItems(["AND", "OR", "PHRASE", "REGEX"])
         for index, description in enumerate(SEARCH_MODE_DESCRIPTIONS):
             self.mode.setItemData(index, description, Qt.ItemDataRole.ToolTipRole)
-        self.mode.setToolTip("AND: all terms must match; OR: any term matches; PHRASE: exact phrase; REGEX: regular expression")
         self._mode_tooltips = DelayedItemTooltip(self.mode)
         v.addWidget(self.mode)
 

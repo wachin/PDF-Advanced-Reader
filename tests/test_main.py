@@ -221,6 +221,23 @@ def test_search_mode_items_explain_themselves(qapp):
 
         assert win._mode_tooltips.delay_ms == 1000
 
+        def wait_for_tooltip():
+            deadline = time.time() + 1.2
+            while time.time() < deadline:
+                qapp.processEvents()
+                time.sleep(0.01)
+
+        # hovering the closed selector explains the mode it currently shows
+        QTest.mouseMove(win.mode, win.mode.rect().center())
+        qapp.processEvents()
+        assert win._mode_tooltips._timer.isActive()
+        assert not QToolTip.isVisible()
+        wait_for_tooltip()
+        assert QToolTip.isVisible()
+        assert QToolTip.text().startswith("AND")
+        assert "Example:" in QToolTip.text()
+
+        # hovering an option in the open menu explains that option
         win.mode.showPopup()
         qapp.processEvents()
         view = win.mode.view()
@@ -230,10 +247,7 @@ def test_search_mode_items_explain_themselves(qapp):
         assert win._mode_tooltips._timer.isActive()
         assert not QToolTip.isVisible()
 
-        deadline = time.time() + 1.2
-        while time.time() < deadline:
-            qapp.processEvents()
-            time.sleep(0.01)
+        wait_for_tooltip()
         assert QToolTip.isVisible()
         assert QToolTip.text().startswith("PHRASE")
 
