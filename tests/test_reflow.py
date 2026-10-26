@@ -19,7 +19,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QImage
 from PyQt6.QtWidgets import QMessageBox
 
-from pdfar.main import MainWindow
+from pdfar.main import MainWindow, _format_zoom
 from pdfar.reflow import (
     REFLOW_FONT_SCALE_MAX, REFLOW_FONT_SCALE_MIN, REFLOW_MAX_WIDTH,
     REFLOW_MIN_WIDTH, REFLOW_UI_MAX_FONT, REFLOW_UI_MIN_FONT, Line,
@@ -858,7 +858,7 @@ def test_main_window_zoom_actions_switch_with_reflow(qapp, tmp_path):
         assert win.act_zout.toolTip() == "Zoom out (Ctrl+-)"
         assert (win.toolbar.widgetForAction(win.act_zin).toolButtonStyle()
                 == Qt.ToolButtonStyle.ToolButtonIconOnly)
-        assert win.zoom_label.text() == f"{int(round(win.view.zoom * 100))}%"
+        assert win.zoom_label.text() == _format_zoom(win.view.zoom)
     finally:
         win.close()
 

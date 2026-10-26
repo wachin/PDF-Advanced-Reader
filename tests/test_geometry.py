@@ -3,7 +3,8 @@
 import math
 
 from pdfar.geometry import (
-    display_size, map_point, map_rect, normalize_rotation, unmap_point, unmap_rect,
+    display_size, map_point, map_rect, normalize_rotation, unmap_delta,
+    unmap_point, unmap_rect,
 )
 
 
@@ -58,6 +59,13 @@ def test_map_rect_known_values():
     assert map_rect((10, 10, 40, 40), 200, 100, 90) == (60, 10, 90, 40)    # top-right
     assert map_rect((10, 10, 40, 40), 200, 100, 180) == (160, 60, 190, 90)  # bottom-right
     assert map_rect((10, 10, 40, 40), 200, 100, 270) == (10, 160, 40, 190)  # bottom-left
+
+
+def test_unmap_delta_rotates_displacements():
+    assert unmap_delta(10, 5, 0) == (10, 5)
+    assert unmap_delta(10, 5, 90) == (5, -10)
+    assert unmap_delta(10, 5, 180) == (-10, -5)
+    assert unmap_delta(10, 5, 270) == (-5, 10)
 
 
 def test_unmap_rect_matches_map_inverse():

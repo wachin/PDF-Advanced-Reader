@@ -30,7 +30,7 @@ from . import APP_NAME, __version__
 from .i18n import I18n
 from .icons import asset_path as _asset_path, tinted_icon
 from .page_numbers import (
-    PageNumbersDialog, PageNumberSettings, numbered_copy_path, stamp_copy,
+    PageNumbersPanel, PageNumberSettings, numbered_copy_path, stamp_copy,
 )
 from .search import SearchParams, SearchWorker, normalize_space
 from .sidebar import (
@@ -62,6 +62,7 @@ class MainWindow(QMainWindow):
         self._connected_tab: Optional[DocumentTab] = None
         self._search_tab: Optional[DocumentTab] = None
         self._presentation = False
+        self._numbering_prior_reflow = False
         self.memory_level = "normal"     # preload level applied to new views
         self.zoom_step = DEFAULT_ZOOM_STEP
         self.ctrl_wheel_step = True
@@ -274,7 +275,7 @@ class MainWindow(QMainWindow):
 
         self.act_page_numbers = QAction("Page &Numbers…", self)
         self.act_page_numbers.setToolTip(
-            "Add page numbers to a new copy of the PDF")
+            "Number pages with a live preview and save a new copy")
         self.act_page_numbers.triggered.connect(self._show_page_numbers)
 
         # Settings and Help menu actions
@@ -468,6 +469,7 @@ class MainWindow(QMainWindow):
             return
         self._presentation = True
         self._prev_fit_mode = self.view.fit_mode
+        self.view.clear_numbering_preview()
         self.toolbar.hide()
         self.statusBar().hide()
         self.search_dock.hide()
@@ -491,6 +493,7 @@ class MainWindow(QMainWindow):
         self.tabs.cornerWidget().show()
         if getattr(self, "_prev_fit_mode", "width"):
             self._set_fit(self._prev_fit_mode)
+        self._apply_numbering_preview()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         if getattr(self, "_presentation", False) and event.key() == Qt.Key.Key_Escape:
@@ -500,11 +503,12 @@ class MainWindow(QMainWindow):
         super().keyPressEvent(event)
 
     def _build_search_dock(self) -> None:
-        dock = QDockWidget("Search", self)
+        dock = QDockWidget("Tools", self)
         dock.setObjectName("searchDock")
         dock.setMinimumWidth(280)
-        panel = QWidget()
-        v = QVBoxLayout(panel)
+
+        self.search_panel = QWidget()
+        v = QVBoxLayout(self.search_panel)
 
         row = QHBoxLayout()
         self.query_edit = QLineEdit()
@@ -550,9 +554,80 @@ class MainWindow(QMainWindow):
         self.hit_label = QLabel("")
         v.addWidget(self.hit_label)
 
-        dock.setWidget(panel)
+        self.page_numbers_panel = PageNumbersPanel(
+            0, PageNumberSettings.load())
+        self.page_numbers_panel.settings_changed.connect(
+            self._on_numbering_settings)
+        self.page_numbers_panel.save_requested.connect(
+            self._save_numbered_copy)
+
+        self.right_tabs = QTabWidget()
+        self.right_tabs.setDocumentMode(True)
+        self.right_tabs.setTabPosition(QTabWidget.TabPosition.North)
+        self.right_tabs.tabBar().setExpanding(False)
+        self.right_tabs.setIconSize(QSize(18, 18))
+        self.right_tabs.addTab(self.search_panel, QIcon(), "")
+        self.right_tabs.addTab(self.page_numbers_panel, QIcon(), "")
+        for index, label in enumerate(("Search", "Page Numbers")):
+            self.right_tabs.setTabToolTip(index, label)
+            self.right_tabs.tabBar().setAccessibleTabName(index, label)
+        self.right_tabs.currentChanged.connect(self._on_right_tab_changed)
+
+        dock.setWidget(self.right_tabs)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         self.search_dock = dock
+        self._apply_right_tab_icons(False)
+
+    def _apply_right_tab_icons(self, dark: bool) -> None:
+        """Tint the right dock tabs; their labels appear only on hover."""
+        if not hasattr(self, "right_tabs"):
+            return
+        ink = "#e6e6e6" if dark else "#3c3c3c"
+        self.right_tabs.setTabIcon(0, tinted_icon("search.svg", ink))
+        self.right_tabs.setTabIcon(
+            1, tinted_icon("page_numbers.svg", ink))
+
+    def _numbering_panel_active(self) -> bool:
+        return (hasattr(self, "right_tabs")
+                and self.right_tabs.currentWidget() is self.page_numbers_panel)
+
+    def _apply_numbering_preview(self) -> None:
+        """Show the preview only while the Page Numbers tab is selected."""
+        view = self.view
+        if view is None or not hasattr(self, "page_numbers_panel"):
+            return
+        self.page_numbers_panel.set_page_count(view.page_count)
+        if self._numbering_panel_active() and not view.reflow_mode:
+            view.set_numbering_preview(self.page_numbers_panel.settings())
+        else:
+            view.clear_numbering_preview()
+
+    def _on_numbering_settings(self, settings) -> None:
+        view = self.view
+        if view is None or not self._numbering_panel_active():
+            return
+        if not view.reflow_mode:
+            view.set_numbering_preview(settings)
+
+    def _on_right_tab_changed(self, index: int) -> None:
+        del index
+        active = self._numbering_panel_active()
+        view = self.view
+        if active and view is not None and view.reflow_mode:
+            self._numbering_prior_reflow = True
+            view.set_reflow_mode(False)
+            self.act_reflow.setChecked(False)
+            self._update_zoom_actions(False)
+            self._update_zoom_label(view)
+        elif (not active and self._numbering_prior_reflow
+              and view is not None):
+            self._numbering_prior_reflow = False
+            if not view.reflow_mode:
+                view.set_reflow_mode(True)
+                self.act_reflow.setChecked(True)
+                self._update_zoom_actions(True)
+                self._update_zoom_label(view)
+        self._apply_numbering_preview()
 
     def _build_statusbar(self) -> None:
         sb = QStatusBar()
@@ -691,42 +766,21 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 QMessageBox.critical(self, "Save As", f"Could not save document:\n{exc}")
 
-    def _build_page_numbers_dialog(self):
-        """Build the Page Numbers dialog (separate so it can be tested)."""
-        return PageNumbersDialog(
-            self.view.page_count, PageNumberSettings.load(), self)
-
     def _show_page_numbers(self) -> None:
-        """Configure page numbers with a live preview, then save a copy."""
-        from PyQt6.QtWidgets import QDialog
+        """Reveal the Page Numbers tab with its live in-page preview."""
+        if not self.view:
+            return
+        self.search_dock.show()
+        self.search_dock.raise_()
+        self.right_tabs.setCurrentWidget(self.page_numbers_panel)
 
+    def _save_numbered_copy(self) -> None:
+        """Stamp the panel's current settings into a new PDF copy."""
         view = self.view
         if not view:
             return
 
-        # Reflow has no page geometry, so leave it to show the in-page preview.
-        was_reflow = view.reflow_mode
-        if was_reflow:
-            view.set_reflow_mode(False)
-            self.act_reflow.setChecked(False)
-            self._update_zoom_actions(False)
-            self._update_zoom_label(view)
-
-        dlg = self._build_page_numbers_dialog()
-        view.set_numbering_preview(dlg.settings())
-        dlg.settings_changed.connect(view.set_numbering_preview)
-        accepted = dlg.exec() == QDialog.DialogCode.Accepted
-        view.clear_numbering_preview()
-
-        if was_reflow:
-            view.set_reflow_mode(True)
-            self.act_reflow.setChecked(True)
-            self._update_zoom_actions(True)
-            self._update_zoom_label(view)
-        if not accepted:
-            return
-
-        settings = dlg.settings()
+        settings = self.page_numbers_panel.settings()
         source_path = os.path.realpath(view.doc_path)
         default_path = numbered_copy_path(view.doc_path)
         while True:
@@ -958,6 +1012,7 @@ class MainWindow(QMainWindow):
                     tab.sidebar.apply_icon_palette(dark_mode)
             # Apply theme to entire application
             self._apply_dark_mode(dark_mode)
+            self._apply_right_tab_icons(dark_mode)
             self._update_zoom_actions(self.view.reflow_mode)
 
     def _toggle_reflow(self) -> None:
@@ -974,8 +1029,11 @@ class MainWindow(QMainWindow):
             self._update_zoom_label(self.view)
             if reflow:
                 self.status_left.setText("Preparing reflow…")
+                if hasattr(self, "page_numbers_panel"):
+                    self.view.clear_numbering_preview()
             else:
                 self.status_left.setText("Reflow off")
+                self._apply_numbering_preview()
         else:
             self.act_reflow.setChecked(False)
             self._update_zoom_actions(False)
@@ -1260,13 +1318,13 @@ class MainWindow(QMainWindow):
                     selection-background-color: #0078d7;
                     border: 1px solid #3d3d3d;
                 }
-                QSpinBox, QLineEdit {
+                QSpinBox, QDoubleSpinBox, QLineEdit {
                     background-color: #2d2d2d;
                     color: #e0e0e0;
                     border: 1px solid #3d3d3d;
                     padding: 4px 8px;
                 }
-                QSpinBox:hover, QLineEdit:hover {
+                QSpinBox:hover, QDoubleSpinBox:hover, QLineEdit:hover {
                     border-color: #0078d7;
                 }
                 QLabel {
@@ -1480,6 +1538,7 @@ class MainWindow(QMainWindow):
         tab.view.reflow_progress.connect(self._on_reflow_progress)
         tab.view.reflow_ready.connect(self._on_reflow_ready)
         tab.view.reflow_font_scale_changed.connect(self._on_reflow_font_scale_changed)
+        tab.view.numbering_changed.connect(self.page_numbers_panel.apply_settings)
         tab.sidebar.goto_page_requested.connect(self._goto)
         tab.sidebar.thumbnail_size_changed.connect(self._on_thumbnail_size_changed)
         # Connect annotation manager to sidebar
@@ -1495,10 +1554,12 @@ class MainWindow(QMainWindow):
             tab.view.reflow_progress.disconnect(self._on_reflow_progress)
             tab.view.reflow_ready.disconnect(self._on_reflow_ready)
             tab.view.reflow_font_scale_changed.disconnect(self._on_reflow_font_scale_changed)
+            tab.view.numbering_changed.disconnect(self.page_numbers_panel.apply_settings)
             tab.sidebar.goto_page_requested.disconnect(self._goto)
             tab.sidebar.thumbnail_size_changed.disconnect(self._on_thumbnail_size_changed)
         except TypeError:
             pass
+        tab.view.clear_numbering_preview()
         if self._connected_tab is tab:
             self._connected_tab = None
 
@@ -1529,7 +1590,14 @@ class MainWindow(QMainWindow):
         self.act_reflow.setChecked(view.reflow_mode)
         self.act_dark_mode.setChecked(view.dark_mode)
         tab.sidebar.apply_icon_palette(self.act_dark_mode.isChecked())
+        self._numbering_prior_reflow = False
+        if self._numbering_panel_active() and view.reflow_mode:
+            self._numbering_prior_reflow = True
+            view.set_reflow_mode(False)
+            self.act_reflow.setChecked(False)
         self._update_zoom_actions(view.reflow_mode)
+        self._update_zoom_label(view)
+        self._apply_numbering_preview()
         # search results belong to the previous document
         self.results.clear()
         self.hit_label.setText("")
@@ -1592,6 +1660,9 @@ class MainWindow(QMainWindow):
         self.status_left.setText("No document")
         self.status_right.setText("")
         self.setWindowTitle(f"{APP_NAME} — Advanced PDF Reader")
+        self._numbering_prior_reflow = False
+        if hasattr(self, "page_numbers_panel"):
+            self.page_numbers_panel.set_page_count(0)
         if hasattr(self, "side_dock") and self.side_dock is not None:
             self.side_dock.setVisible(False)
 
@@ -1766,6 +1837,7 @@ class MainWindow(QMainWindow):
     def _focus_search(self) -> None:
         self.search_dock.show()
         self.search_dock.raise_()
+        self.right_tabs.setCurrentWidget(self.search_panel)
         self.query_edit.setFocus()
         self.query_edit.selectAll()
 
@@ -1902,6 +1974,7 @@ class MainWindow(QMainWindow):
         # restore dark mode
         dark = self.settings.value("dark_mode", False, type=bool)
         self.act_dark_mode.setChecked(dark)
+        self._apply_right_tab_icons(dark)
         # NOTE: we deliberately do NOT restore the Qt windowState. saveState()
         # persists dock/toolbar/tabbar visibility, and a previous session saved
         # while the UI was collapsed (e.g. presentation mode) makes the window

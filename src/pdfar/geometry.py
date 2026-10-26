@@ -60,6 +60,18 @@ def unmap_point(u: float, v: float, w0: float, h0: float, rotation: int = 0) -> 
     return (u, v)
 
 
+def unmap_delta(du: float, dv: float, rotation: int = 0) -> Tuple[float, float]:
+    """Map a displacement from view space back to page space."""
+    r = normalize_rotation(rotation)
+    if r == 90:
+        return (dv, -du)
+    if r == 180:
+        return (-du, -dv)
+    if r == 270:
+        return (-dv, du)
+    return (du, dv)
+
+
 def map_rect(rect: Rect, w0: float, h0: float, rotation: int = 0) -> Rect:
     """Map a rectangle from page space to view space.
 

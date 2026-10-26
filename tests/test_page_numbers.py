@@ -8,14 +8,17 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 import pymupdf as fitz
-from PyQt6.QtCore import QRect
-from PyQt6.QtWidgets import QDialog, QFileDialog, QMessageBox
+from PyQt6.QtCore import QEvent, QPointF, QRect, Qt
+from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtWidgets import QFileDialog, QMessageBox
 
 from conftest import build_sample_pdf
+from pdfar.geometry import map_point
 from pdfar.main import MainWindow
 from pdfar.page_numbers import (
-    PageNumbersDialog, PageNumberSettings, layout_number, number_text,
-    page_range, stamp_copy,
+    PageNumbersPanel, PageNumberSettings, box_to_settings, layout_number,
+    number_box, number_text, page_range, points_to_unit, stamp_copy,
+    unit_to_points,
 )
 
 
@@ -189,36 +192,159 @@ def test_numbered_copy_of_encrypted_pdf_is_decrypted(tmp_path):
     assert "secret" in text and "1" in text
 
 
-def test_dialog_emits_settings_and_keeps_range_ordered(qapp):
-    dialog = PageNumbersDialog(5, _settings(start_page=2, end_page=4))
+def _white_drawings(page):
+    masks = []
+    for drawing in page.get_drawings():
+        fill = drawing.get("fill")
+        if fill and all(abs(channel - 1.0) < 0.01 for channel in fill):
+            masks.append(fitz.Rect(drawing["rect"]))
+    return masks
+
+
+def test_stamp_draws_mask_behind_the_number(tmp_path):
+    src_path = build_sample_pdf(tmp_path / "doc.pdf", pages=1,
+                                width=200, height=300)
+    with fitz.open(src_path) as src:
+        stamped = tmp_path / "masked.pdf"
+        stamp_copy(src, str(stamped), _settings(format="number"))
+
+    with fitz.open(stamped) as out:
+        page = out[0]
+        span = next(s for s in _spans(page) if s["text"] == "1")
+        bbox = fitz.Rect(span["bbox"])
+        masks = _white_drawings(page)
+    assert masks
+    assert any(mask.contains(bbox) for mask in masks)
+    assert masks[0].width > bbox.width
+    assert masks[0].height > bbox.height
+
+    with fitz.open(src_path) as src:
+        plain = tmp_path / "unmasked.pdf"
+        stamp_copy(src, str(plain), _settings(format="number", mask=False))
+    with fitz.open(plain) as out:
+        assert _white_drawings(out[0]) == []
+
+
+def test_box_to_settings_moves_and_reanchors():
+    settings = _settings(position="bottom-center", margin_x=20, margin_y=20)
+    box = number_box(settings, 200, 300, 1, 1)
+
+    moved = box_to_settings(settings, 200, 300, box, 12, 0)
+    assert moved.position == "bottom-right"
+    assert moved.margin_y == pytest.approx(settings.margin_y)
+    assert moved.margin_x > settings.margin_x
+
+    clamped = box_to_settings(settings, 200, 300, box, 10000, 10000)
+    moved_box = number_box(clamped, 200, 300, 1, 1)
+    assert moved_box.left >= -0.01
+    assert moved_box.right <= 200.01
+    assert moved_box.bottom <= 300.01
+
+
+def test_dragging_across_a_tall_page_keeps_large_offsets(qapp):
+    settings = _settings(position="bottom-left", margin_x=20, margin_y=20,
+                         mask=True)
+    box = number_box(settings, 612, 792, 1, 1)
+    moved = box_to_settings(settings, 612, 792, box, 0, -700)
+    assert moved.margin_y > 300
+
+    panel = PageNumbersPanel(1, moved)
+    assert panel.settings().margin_y == pytest.approx(moved.margin_y)
+    assert panel.settings().margin_x == pytest.approx(moved.margin_x)
+
+
+def test_panel_emits_settings_and_keeps_range_ordered(qapp):
+    panel = PageNumbersPanel(5, _settings(start_page=2, end_page=4))
     emitted = []
-    dialog.settings_changed.connect(emitted.append)
+    panel.settings_changed.connect(emitted.append)
 
-    dialog.position_combo.setCurrentIndex(
-        dialog.position_combo.findData("top-right"))
-    dialog.size_spin.setValue(18)
-    dialog.margin_x_spin.setValue(48)
-    dialog.first_page_spin.setValue(3)
+    panel.position_combo.setCurrentIndex(
+        panel.position_combo.findData("top-right"))
+    panel.size_spin.setValue(18)
+    panel.margin_x_spin.setValue(48)
+    panel.first_page_spin.setValue(3)
 
-    settings = dialog.settings()
+    settings = panel.settings()
     assert settings.position == "top-right"
     assert settings.font_size == 18
     assert settings.margin_x == 48
     assert settings.start_page == 3
     assert emitted and emitted[-1] == settings
-    assert "3–4" in dialog.range_label.text()
+    assert "3–4" in panel.range_label.text()
 
     # Moving the last page before the first keeps the range valid.
-    dialog.last_page_spin.setValue(2)
-    assert dialog.settings().start_page == 2
-    assert dialog.settings().end_page == 2
+    panel.last_page_spin.setValue(2)
+    assert panel.settings().start_page == 2
+    assert panel.settings().end_page == 2
+
+
+def test_panel_unit_switch_converts_offsets(qapp):
+    panel = PageNumbersPanel(
+        1, _settings(margin_x=72, margin_y=36, mask_padding=6))
+    assert panel.margin_x_spin.value() == pytest.approx(72)
+    assert panel.margin_x_spin.suffix().strip() == "pt"
+
+    panel.unit_combo.setCurrentIndex(panel.unit_combo.findData("cm"))
+
+    assert panel.margin_x_spin.suffix().strip() == "cm"
+    assert panel.margin_x_spin.value() == pytest.approx(2.54, abs=0.01)
+    settings = panel.settings()
+    assert settings.unit == "cm"
+    assert settings.margin_x == pytest.approx(72)
+    assert settings.margin_y == pytest.approx(36)
+    assert settings.mask_padding == pytest.approx(6)
+
+
+def test_panel_mask_toggle_and_page_count(qapp):
+    panel = PageNumbersPanel(0, _settings(mask=True))
+    assert not panel.save_btn.isEnabled()
+
+    panel.mask_check.setChecked(False)
+    assert not panel.mask_padding_spin.isEnabled()
+    assert panel.settings().mask is False
+
+    panel.set_page_count(7)
+    assert panel.save_btn.isEnabled()
+    assert panel.last_page_spin.maximum() == 7
+    panel.set_page_count(0)
+    assert not panel.save_btn.isEnabled()
+
+
+def test_panel_end_page_follows_the_document_until_edited(qapp):
+    panel = PageNumbersPanel(0, PageNumberSettings())
+    assert panel.settings().end_page == 0
+
+    panel.set_page_count(3)
+    assert panel.last_page_spin.value() == 3
+    assert panel.settings().end_page == 0
+    assert page_range(panel.settings(), 3) == (0, 2)
+
+    panel.last_page_spin.setValue(2)
+    assert panel.settings().end_page == 2
+    panel.set_page_count(5)
+    assert panel.last_page_spin.value() == 2
+    assert panel.settings().end_page == 2
+
+    panel.apply_settings(PageNumberSettings(start_page=2))
+    assert panel.last_page_spin.value() == 5
+    assert panel.settings().end_page == 0
+
+
+def test_unit_conversions():
+    assert unit_to_points(25.4, "mm") == pytest.approx(72)
+    assert unit_to_points(2.54, "cm") == pytest.approx(72)
+    assert points_to_unit(72, "in") == pytest.approx(1)
+    for unit in ("pt", "mm", "cm", "in"):
+        assert points_to_unit(unit_to_points(3.5, unit), unit) == \
+            pytest.approx(3.5)
 
 
 def test_settings_roundtrip(qapp):
     saved = PageNumberSettings(
         position="top-left", format="page-number/total",
         font_family="tiro", font_size=17, margin_x=12, margin_y=34,
-        start_page=2, end_page=7, start_number=3)
+        start_page=2, end_page=7, start_number=3, unit="cm",
+        mask=False, mask_padding=9)
     saved.save()
     assert PageNumberSettings.load() == saved
 
@@ -268,7 +394,52 @@ def test_red_preview_is_painted_and_cleared(win, qapp, tmp_path):
     assert view._numbering_preview is None
 
 
-def test_tools_action_saves_numbered_copy(win, qapp, tmp_path, monkeypatch):
+def test_right_dock_has_two_icon_only_tabs(win):
+    tabs = win.right_tabs
+    assert tabs.count() == 2
+    assert [tabs.tabText(i) for i in range(2)] == ["", ""]
+    assert tabs.tabToolTip(0) == "Search"
+    assert tabs.tabToolTip(1) == "Page Numbers"
+    assert not tabs.tabIcon(0).isNull()
+    assert not tabs.tabIcon(1).isNull()
+    assert tabs.widget(0) is win.search_panel
+    assert tabs.widget(1) is win.page_numbers_panel
+    assert win.search_dock.windowTitle() == "Tools"
+
+
+def test_page_numbers_tab_drives_the_live_preview(win, qapp, tmp_path):
+    win.open_document(build_sample_pdf(tmp_path / "doc.pdf", pages=3))
+    qapp.processEvents()
+    assert win.view._numbering_preview is None
+
+    win.act_page_numbers.trigger()
+    qapp.processEvents()
+    assert win.right_tabs.currentWidget() is win.page_numbers_panel
+    assert win.view._numbering_preview is not None
+    assert win.page_numbers_panel._page_count == 3
+
+    win._focus_search()
+    assert win.right_tabs.currentWidget() is win.search_panel
+    assert win.view._numbering_preview is None
+
+
+def test_page_numbers_tab_leaves_and_restores_reflow(win, qapp, tmp_path):
+    win.open_document(build_sample_pdf(tmp_path / "doc.pdf", pages=3))
+    qapp.processEvents()
+    win.view.set_reflow_mode(True)
+    win.act_reflow.setChecked(True)
+
+    win.right_tabs.setCurrentWidget(win.page_numbers_panel)
+    assert not win.view.reflow_mode
+    assert win.view._numbering_preview is not None
+
+    win.right_tabs.setCurrentWidget(win.search_panel)
+    assert win.view.reflow_mode
+    assert win.view._numbering_preview is None
+
+
+def test_page_numbers_tab_saves_numbered_copy(
+        win, qapp, tmp_path, monkeypatch):
     src = build_sample_pdf(tmp_path / "doc.pdf", pages=3)
     win.open_document(src)
     qapp.processEvents()
@@ -276,18 +447,18 @@ def test_tools_action_saves_numbered_copy(win, qapp, tmp_path, monkeypatch):
     out = tmp_path / "doc-numbered.pdf"
     opened = []
 
-    def fake_exec(dialog):
-        dialog.position_combo.setCurrentIndex(
-            dialog.position_combo.findData("bottom-center"))
-        dialog.format_combo.setCurrentIndex(
-            dialog.format_combo.findData("number/total"))
-        dialog.size_spin.setValue(14)
-        dialog.first_page_spin.setValue(1)
-        dialog.last_page_spin.setValue(3)
-        dialog.first_number_spin.setValue(1)
-        return QDialog.DialogCode.Accepted
+    win.act_page_numbers.trigger()
+    qapp.processEvents()
+    panel = win.page_numbers_panel
+    panel.position_combo.setCurrentIndex(
+        panel.position_combo.findData("bottom-center"))
+    panel.format_combo.setCurrentIndex(
+        panel.format_combo.findData("number/total"))
+    panel.size_spin.setValue(14)
+    panel.first_page_spin.setValue(1)
+    panel.last_page_spin.setValue(3)
+    panel.first_number_spin.setValue(1)
 
-    monkeypatch.setattr(PageNumbersDialog, "exec", fake_exec)
     monkeypatch.setattr(
         QFileDialog, "getSaveFileName",
         staticmethod(lambda *args, **kwargs: (str(out), "")))
@@ -298,7 +469,7 @@ def test_tools_action_saves_numbered_copy(win, qapp, tmp_path, monkeypatch):
         win, "open_document",
         lambda path, password="": opened.append(path) or True)
 
-    win.act_page_numbers.trigger()
+    panel.save_btn.click()
     qapp.processEvents()
 
     assert out.is_file()
@@ -307,11 +478,11 @@ def test_tools_action_saves_numbered_copy(win, qapp, tmp_path, monkeypatch):
         texts = [page.get_text() for page in doc]
     assert "1/3" in texts[0] and "2/3" in texts[1] and "3/3" in texts[2]
     assert opened == []
-    assert win.view._numbering_preview is None
+    assert win.view._numbering_preview is not None
     assert PageNumberSettings.load().font_size == 14
 
 
-def test_tools_action_refuses_to_overwrite_the_open_document(
+def test_page_numbers_tab_refuses_to_overwrite_the_open_document(
         win, qapp, tmp_path, monkeypatch):
     src = build_sample_pdf(tmp_path / "doc.pdf", pages=2)
     win.open_document(src)
@@ -321,9 +492,6 @@ def test_tools_action_refuses_to_overwrite_the_open_document(
     answers = iter([(src, ""), ("", "")])
 
     monkeypatch.setattr(
-        PageNumbersDialog, "exec",
-        lambda dialog: QDialog.DialogCode.Accepted)
-    monkeypatch.setattr(
         QFileDialog, "getSaveFileName",
         staticmethod(lambda *args, **kwargs: next(answers)))
     monkeypatch.setattr(
@@ -332,7 +500,62 @@ def test_tools_action_refuses_to_overwrite_the_open_document(
 
     win.act_page_numbers.trigger()
     qapp.processEvents()
+    win.page_numbers_panel.save_btn.click()
+    qapp.processEvents()
 
     assert warnings and "never overwrites" in warnings[0]
     assert open(src, "rb").read() == before
-    assert win.view._numbering_preview is None
+    assert win.view._numbering_preview is not None
+
+
+def _mouse(view, kind, pos, button, buttons):
+    event = QMouseEvent(kind, pos, pos, button, buttons,
+                        Qt.KeyboardModifier.NoModifier)
+    if kind == QEvent.Type.MouseButtonPress:
+        view.mousePressEvent(event)
+    elif kind == QEvent.Type.MouseMove:
+        view.mouseMoveEvent(event)
+    else:
+        view.mouseReleaseEvent(event)
+
+
+def test_dragging_the_preview_moves_the_number_and_updates_the_panel(
+        win, qapp, tmp_path):
+    win.open_document(build_sample_pdf(tmp_path / "doc.pdf", pages=3))
+    qapp.processEvents()
+    win.act_page_numbers.trigger()
+    qapp.processEvents()
+
+    view = win.view
+    settings = win.page_numbers_panel.settings()
+    w0, h0 = view.page_sizes[0]
+    box = number_box(settings, w0, h0, settings.start_number, 3,
+                     font=view._numbering_font)
+    px, py = view._page_origin(0)
+    centre_x = box.left + box.width / 2.0
+    centre_y = box.top + box.height / 2.0
+    u, v = map_point(centre_x, centre_y, w0, h0, view.rotation)
+    start = QPointF(
+        px + u * view.zoom - view.horizontalScrollBar().value(),
+        py + v * view.zoom - view.verticalScrollBar().value())
+
+    changes = []
+    view.numbering_changed.connect(changes.append)
+
+    _mouse(view, QEvent.Type.MouseButtonPress, start,
+           Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton)
+    assert view._numbering_drag is not None
+    moved = QPointF(start.x() + 8, start.y())
+    _mouse(view, QEvent.Type.MouseMove, moved,
+           Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton)
+    _mouse(view, QEvent.Type.MouseButtonRelease, moved,
+           Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton)
+
+    assert view._numbering_drag is None
+    assert changes
+    assert changes[-1].position == "bottom-right"
+    assert changes[-1].margin_x > settings.margin_x
+    panel_settings = win.page_numbers_panel.settings()
+    assert panel_settings.position == "bottom-right"
+    assert panel_settings.margin_x == pytest.approx(changes[-1].margin_x, abs=1)
+    assert view._numbering_preview == changes[-1]

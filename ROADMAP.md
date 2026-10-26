@@ -1206,6 +1206,52 @@ A single next task.
 
 ---
 
+### Page Numbering & Right Dock Milestone — [x] Implemented
+
+**Completed**: 2026-10-25
+
+**Scope**: Replace the modal Page Numbers dialog with an embedded, icon-only
+tab in the right-hand Tools dock; add a live mask preview that can be dragged
+on the page, explicit start/end ranges, and unit-aware offsets.
+
+**Status**: DONE
+
+**Files changed**:
+
+- `src/pdfar/page_numbers.py` — settings model, units, `NumberBox`,
+  `box_to_settings`, mask stamping, embedded `PageNumbersPanel`.
+- `src/pdfar/viewer.py` — mask/dashed/red preview, hit-testing, drag-to-move
+  with rotation-aware deltas, `numbering_changed`, Escape cancellation.
+- `src/pdfar/main.py` — two icon-only right-dock tabs (Search, Page Numbers),
+  preview lifecycle, reflow handoff, save-copy flow, dark-mode tinting.
+- `src/pdfar/geometry.py` — `unmap_delta`.
+- `assets/icons/search.svg`, `assets/icons/page_numbers.svg`.
+- `tests/test_page_numbers.py`, `tests/test_geometry.py`,
+  `tests/test_reflow.py`.
+- `README.md`, `docs/en/developers/ui/page-numbering.md`, `ROADMAP.md`.
+
+**Tests**: `PYTHONPATH=src python3 -m pytest tests/ -q` — **228 passed**.
+
+**Visual verification**: Captured light and dark screenshots of the two-tab
+dock, the mask covering an old printed number, the red preview and the Search
+tab. The mask, dashed outline and drag target use the same `NumberBox`
+geometry as the exported copy.
+
+**Architecture notes**:
+
+1. Canonical offsets stay in PDF points; unit switches only change the
+   displayed values, avoiding rounding drift between pt/mm/cm/in.
+2. “End page number” keeps the “last page” semantic until the user edits it,
+   because the panel is built before a document is open.
+3. Dragging recomputes from the press-time box on every mouse move, so
+   centre-to-edge re-anchoring never makes the glyphs jump.
+4. The white mask is a filled `draw_rect` stamped before the text, using the
+   same display→unrotated conversion as `insert_text(rotate=…)`.
+
+**Documentation**: `docs/en/developers/ui/page-numbering.md`
+
+---
+
 # 17. RELEASE CRITERIA
 
 A version must not be declared stable solely because it compiles.

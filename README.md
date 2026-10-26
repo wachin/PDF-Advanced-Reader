@@ -49,13 +49,13 @@ Fixes in 2.0 (there were ten other bugs behind it):
 - **Instant rendering** — priority render queue (visible pages first), worker threads with per-thread document handles, LRU bitmap cache (memory-budgeted).
 - **Continuous scrolling** with smooth mouse-wheel / keyboard paging.
 - **Real text selection** — drag to select across pages and columns, `Ctrl+C` to copy, `Ctrl+A` to select all (text comes from the PDF text layer, works with any rotation).
-- **Search** — AND / OR / exact phrase, match-case, whole-words, per-page snippets, highlighted matches, `F3` / `Shift+F3` to jump between hits.
+- **Search** — AND / OR / exact phrase, match-case, whole-words, per-page snippets, highlighted matches, `F3` / `Shift+F3` to jump between hits. Search lives in the right-hand dock, whose two tabs (Search and Page Numbers) are icon-only with labels on hover.
 - **Sidebar** — icon-only tabs (labels appear on hover) for page thumbnails (rendered in the background), the document outline/table of contents with click-to-jump, user bookmarks, annotations and attachments.
 - **Zoom** — fit-page, fit-width, and presets `50, 62.5, 75, 87.5, 100, 112.5, 125, 137.5, 150, 162.5, 175, 200, 250, 300, 350, 400 %`; `Ctrl` + mouse wheel zooms around the cursor. A compact **Step** selector (2.5 %–25 %, default 10 %) sets the additive increment used by Zoom In/Out and `Ctrl++`/`Ctrl+-`; `Ctrl` + wheel follows the same step by default and can be switched to fluid zoom in the View menu.
 - **Rotation** — 90° steps, with selection and highlights staying on the right words.
 - **Encrypted PDFs** — password prompt, credentials are passed to the render workers only.
 - **Reflow mode with figures and tables** — single-column reading on any window size; text is extracted and laid out in the background, raster images and detected tables are rendered inline in reading order, two-column papers are read left column first, text size is adjustable, and scanned pages are shown as fit-to-column images.
-- **Page numbering** — add numbers at any page corner or edge (top/bottom × left/centre/right), finely adjust horizontal and vertical offsets, pick a common format (`1`, `1/5`, `Page 1 of 5`, …), limit the range and set the first printed number. The numbers appear live in red on the pages, and saving writes a new `-numbered.pdf` copy without touching the original.
+- **Page numbering** — embedded as a tab in the right-hand dock. Add numbers at any page corner or edge (top/bottom × left/centre/right), finely adjust offsets in points, millimetres, centimetres or inches, pick a common format (`1`, `1/5`, `Page 1 of 5`, …), choose the start and end page and set the first printed number. A live mask preview covers the old content behind each number and can be dragged directly on the page to position it; saving writes a new `-numbered.pdf` copy without touching the original.
 - **Comfort** — drag & drop to open, open from the command line, recent-file memory, remembered window layout, page spinner, status bar.
 - **Crisp vector icons** — toolbar and sidebar icons are drawn by a `QIconEngine` at the exact requested size and device pixel ratio (see [`docs/en/developers/ui/vector-icons.md`](docs/en/developers/ui/vector-icons.md)).
 
@@ -123,21 +123,33 @@ transformation:
 
 ### Page numbering
 
-`Tools → Page Numbers…` places a number on every page of a chosen range and
-saves the result as a **new copy** (`name-numbered.pdf` by default); the file
-you have open is never overwritten. The dialog previews the placement live:
-red numbers are drawn exactly where the black numbers will be stamped,
-following rotation and zoom. Common formats are available (`1`, `1/5`,
-`Page 1`, `Page 1 of 5`, `- 1 -`), and the total in `1/5` counts only the
-pages selected for numbering — numbering pages 2–5 of a five-page document
-produces `1/4 … 4/4`. The first printed number is configurable, so a cover
-can be skipped while the next page still starts at 1. The copy includes
-unsaved highlights and annotations, and the original PDF's rotation
-(`/Rotate`) is respected. Page numbers are ordinary selectable PDF text in
-the base-14 Helvetica, Times or Courier fonts; no extra font is embedded.
+`Tools → Page Numbers…` (or the page icon in the right-hand dock) opens the
+numbering panel next to Search. It places a number on every page of a chosen
+range and saves the result as a **new copy** (`name-numbered.pdf` by
+default); the file you have open is never overwritten. The preview is live
+and drawn on the pages themselves, following rotation and zoom:
 
-Before opening the dialog, reflow is switched off because numbering refers
-to physical page geometry; reflow resumes when the dialog closes.
+- A semi-opaque **mask** covers whatever was behind the number, so old
+  printed page numbers can be hidden in the saved copy.
+- Drag the number on the page to position it; the offsets in the panel update
+  as you drag, and the mask snaps inside the page edges.
+- Offsets can be entered in **pt, mm, cm or in**; switching units keeps the
+  physical position unchanged.
+- **Start page number** and **End page number** limit which pages are
+  numbered, which is useful for skipping covers or appended documents.
+- Common formats are available (`1`, `1/5`, `Page 1`, `Page 1 of 5`,
+  `- 1 -`). The total in `1/5` counts only the pages selected for numbering —
+  numbering pages 2–5 of a five-page document produces `1/4 … 4/4`. The first
+  printed number is also configurable, so a cover can be skipped while the
+  next page still starts at 1.
+
+Selecting the Page Numbers tab switches reflow off temporarily because
+numbering refers to physical page geometry; leaving the tab restores reflow.
+The copy includes unsaved highlights and annotations, and the original PDF's
+rotation (`/Rotate`) is respected. Page numbers are ordinary selectable PDF
+text in the base-14 Helvetica, Times or Courier fonts; no extra font is
+embedded. Implementation notes are in
+[`docs/en/developers/ui/page-numbering.md`](docs/en/developers/ui/page-numbering.md).
 
 `demo-two-columns.pdf` in the repository root is a four-page journal-style
 paper that exercises this ordering: a page-wide title and abstract, a
@@ -270,7 +282,7 @@ On a 200-page A4 document (headless container, one page per page of text and cha
 - **Painting** is done directly in `PDFView.paintEvent`, so partial updates are cheap and overlays (highlights, selection) never corrupt the cached page.
 - **Geometry** (`geometry.py`) is pure Python: all rotation/coordinate mapping is unit-tested so text selection and highlights cannot drift out of sync.
 - **Icons** (`icons.py`) are vector-rendered on demand by a `QIconEngine` at the exact requested size and device pixel ratio; pre-rasterizing them into fixed sizes made Qt rescale 18 px icons and softened their strokes.
-- **Page numbering** (`page_numbers.py`) is non-destructive: the open document is serialized with `tobytes()` (including unsaved annotations), numbers are stamped on a temporary copy, and the result is moved into place atomically. Layout works in display space and is converted with page.derotation_matrix + insert_text(rotate=…), so pages with `/Rotate` get numbers at the visual corner.
+- **Page numbering** (`page_numbers.py`) is non-destructive: the open document is serialized with `tobytes()` (including unsaved annotations), numbers are stamped on a temporary copy, and the result is moved into place atomically. Layout works in display space and is converted with page.derotation_matrix + insert_text(rotate=…), so pages with `/Rotate` get numbers at the visual corner. The same `NumberBox` geometry drives the white mask, the dashed preview, hit-testing and drag updates, so what you drag is exactly what gets stamped.
 
 ---
 
@@ -288,7 +300,7 @@ Highlights:
 - `test_viewer.py::test_pages_actually_render_and_paint` — pixels of a known black square must be visible in the painted widget.
 - `test_viewer.py::test_rotation_render_matches_geometry` — rendered bitmaps and the geometry helpers agree on rotation direction.
 - `test_viewer.py::test_drag_selection_and_copy` — real mouse-drag selection.
-- `test_page_numbers.py` — formats, numbered-page totals, offsets, rotated-page stamping, the red preview, and the save-a-copy flow.
+- `test_page_numbers.py` — formats, numbered-page totals, unit conversion, rotated-page stamping, the mask and draggable preview, the icon-only right-hand tabs, and the save-a-copy flow.
 
 ---
 
@@ -317,7 +329,7 @@ PDF-Advanced-Reader/
 │   ├── main.py         # Main window and UI
 │   ├── search.py       # Search logic
 │   ├── viewer.py       # PDF rendering component
-│   ├── page_numbers.py # Page numbering: preview, dialog, numbered copy
+│   ├── page_numbers.py # Page numbering: panel, mask preview, numbered copy
 │   ├── cache.py        # Page caching
 │   └── i18n.py         # Internationalization support
 ├── translations/       # Qt Linguist translation files

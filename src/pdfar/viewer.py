@@ -24,7 +24,9 @@ try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
 except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
-from PyQt6.QtCore import QPoint, QPointF, QRect, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    QPoint, QPointF, QRect, QRectF, Qt, QThread, QTimer, pyqtSignal,
+)
 from PyQt6.QtGui import (
     QColor, QFont, QFontMetrics, QFontMetricsF, QImage, QKeyEvent, QMouseEvent,
     QPaintEvent, QPainter, QPen, QWheelEvent, QGuiApplication, QResizeEvent,
@@ -32,9 +34,12 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import QAbstractScrollArea, QFrame, QScroller
 
 from .cache import PageCache
-from .geometry import display_size, map_point, map_rect, normalize_rotation
+from .geometry import (
+    display_size, map_point, map_rect, normalize_rotation, unmap_delta,
+    unmap_point,
+)
 from .page_numbers import (
-    PageNumberSettings, layout_number, page_range, preview_font,
+    PageNumberSettings, box_to_settings, number_box, page_range, preview_font,
 )
 from .reflow import (
     PageLayout, REFLOW_FONT_STEP, REFLOW_PAGE_GAP, ReflowWorker,
@@ -113,6 +118,7 @@ class PDFView(QAbstractScrollArea):
     reflow_progress = pyqtSignal(int, int)  # (pages laid out, page count)
     reflow_ready = pyqtSignal(bool, int)    # (has_text, pages without content)
     reflow_font_scale_changed = pyqtSignal(float)  # text-size multiplier
+    numbering_changed = pyqtSignal(object)  # PageNumberSettings after dragging
 
     def __init__(self, doc_path: str, parent=None, password: str = ""):
         super().__init__(parent)
@@ -140,6 +146,7 @@ class PDFView(QAbstractScrollArea):
         self.dark_mode = False
         self._numbering_preview: Optional[PageNumberSettings] = None
         self._numbering_font = None
+        self._numbering_drag: Optional[dict] = None
 
         # Reflow (P1-5): page layouts are prepared by a background worker and
         # cached here; painting only walks the lines that intersect the view.
@@ -356,10 +363,12 @@ class PDFView(QAbstractScrollArea):
 
     # ------------------------------------------------------ numbering preview
     def set_numbering_preview(self, settings: Optional[PageNumberSettings]) -> None:
-        """Draw red page numbers where they would be stamped (live preview)."""
+        """Show the mask and red page numbers where they would be stamped."""
         self._numbering_preview = settings
+        self._numbering_drag = None
         if settings is None:
             self._numbering_font = None
+            self.viewport().unsetCursor()
         else:
             try:
                 self._numbering_font = fitz.Font(settings.font_family)
@@ -370,6 +379,35 @@ class PDFView(QAbstractScrollArea):
     def clear_numbering_preview(self) -> None:
         if self._numbering_preview is not None:
             self.set_numbering_preview(None)
+
+    def _numbering_hit_at(self, pos: QPoint):
+        """Return ``(page, NumberBox)`` when ``pos`` is on a preview number."""
+        settings = self._numbering_preview
+        if settings is None or self.reflow_mode or not self.page_count:
+            return None
+        cx = pos.x() + self.horizontalScrollBar().value()
+        cy = pos.y() + self.verticalScrollBar().value()
+        hit = self._content_to_page_view(cx, cy)
+        if hit is None:
+            return None
+        page, u, v = hit
+        w0, h0 = self.page_sizes[page]
+        dw, dh = display_size(w0, h0, self.rotation)
+        if not (0.0 <= u <= dw and 0.0 <= v <= dh):
+            return None
+        first, last = page_range(settings, self.page_count)
+        if not (first <= page <= last):
+            return None
+        box = number_box(
+            settings, w0, h0, settings.start_number + (page - first),
+            last - first + 1, font=self._numbering_font)
+        x, y = unmap_point(u, v, w0, h0, self.rotation)
+        x0, y0, x1, y1 = box.mask_rect
+        tolerance = 2.0
+        if (x0 - tolerance <= x <= x1 + tolerance
+                and y0 - tolerance <= y <= y1 + tolerance):
+            return page, box
+        return None
 
     def _apply_theme(self) -> None:
         """Apply theme colors to the widget."""
@@ -1172,34 +1210,50 @@ class PDFView(QAbstractScrollArea):
             return
         w0, h0 = self.page_sizes[page]
         total = last - first + 1
-        text, anchor_x, baseline, alignment = layout_number(
+        box = number_box(
             settings, w0, h0, settings.start_number + (page - first), total,
             font=self._numbering_font)
-        u, v = map_point(anchor_x, baseline, w0, h0, self.rotation)
         z = self.zoom
-        px = x + u * z
-        py = y + v * z
-
-        qfont = preview_font(
-            settings, max(1, int(round(settings.font_size * z))))
-        width = QFontMetricsF(qfont).horizontalAdvance(text)
-        offset = 0.0
-        if alignment == "center":
-            offset = -width / 2.0
-        elif alignment == "right":
-            offset = -width
-
         dw, dh = self._disp_sizes[page]
+
+        # White mask that will cover the old content, plus a dashed outline so
+        # the draggable area is visible even when masking is off.
+        pad = box.padding if settings.mask else 2.0
+        x0, y0, x1, y1 = map_rect(
+            (box.left - pad, box.top - pad,
+             box.right + pad, box.bottom + pad),
+            w0, h0, self.rotation)
+        mask = QRectF(x + x0 * z, y + y0 * z,
+                      (x1 - x0) * z, (y1 - y0) * z)
+
         painter.save()
         painter.setClipRect(QRect(int(round(x)), int(round(y)),
                                   int(round(dw)), int(round(dh))))
+        if settings.mask:
+            painter.fillRect(mask, QColor(255, 255, 255, 245))
+        pen = QPen(QColor(220, 30, 30, 170))
+        pen.setStyle(Qt.PenStyle.DashLine)
+        pen.setWidthF(1.0)
+        painter.setPen(pen)
+        painter.drawRect(mask)
+
+        u, v = map_point(box.anchor_x, box.baseline, w0, h0, self.rotation)
+        qfont = preview_font(
+            settings, max(1, int(round(settings.font_size * z))))
+        width = QFontMetricsF(qfont).horizontalAdvance(box.text)
+        offset = 0.0
+        if box.alignment == "center":
+            offset = -width / 2.0
+        elif box.alignment == "right":
+            offset = -width
+
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        painter.translate(px, py)
+        painter.translate(x + u * z, y + v * z)
         if self.rotation:
             painter.rotate(self.rotation)
         painter.setPen(QColor(220, 30, 30, 215))
         painter.setFont(qfont)
-        painter.drawText(QPointF(offset, 0.0), text)
+        painter.drawText(QPointF(offset, 0.0), box.text)
         painter.restore()
 
     def _paint_annotations(self, painter: QPainter, page: int, x: float, y: float) -> None:
@@ -1692,6 +1746,22 @@ class PDFView(QAbstractScrollArea):
         super().wheelEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self._numbering_preview is not None):
+            hit = self._numbering_hit_at(event.position().toPoint())
+            if hit is not None:
+                page, box = hit
+                self.setFocus(Qt.FocusReason.MouseFocusReason)
+                self.clear_selection()
+                self._numbering_drag = {
+                    "page": page,
+                    "start": event.position(),
+                    "settings": self._numbering_preview,
+                    "box": box,
+                }
+                self.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
+                event.accept()
+                return
         if self.reflow_mode:
             # Selection uses page-space geometry that reflow does not have.
             if event.button() == Qt.MouseButton.LeftButton:
@@ -1717,6 +1787,26 @@ class PDFView(QAbstractScrollArea):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._numbering_drag is not None:
+            drag = self._numbering_drag
+            pos = event.position()
+            du = (pos.x() - drag["start"].x()) / self.zoom
+            dv = (pos.y() - drag["start"].y()) / self.zoom
+            dx, dy = unmap_delta(du, dv, self.rotation)
+            w0, h0 = self.page_sizes[drag["page"]]
+            settings = box_to_settings(
+                drag["settings"], w0, h0, drag["box"], dx, dy)
+            self._numbering_preview = settings
+            self.viewport().update()
+            self.numbering_changed.emit(settings)
+            event.accept()
+            return
+        if (self._numbering_preview is not None
+                and not (event.buttons() & Qt.MouseButton.LeftButton)):
+            over = self._numbering_hit_at(event.position().toPoint()) is not None
+            self.viewport().setCursor(
+                Qt.CursorShape.SizeAllCursor if over
+                else Qt.CursorShape.ArrowCursor)
         if self._dragging:
             word = self._word_at(event.position().toPoint())
             if word is not None and word != self._sel_caret:
@@ -1734,6 +1824,15 @@ class PDFView(QAbstractScrollArea):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self._numbering_drag is not None):
+            self._numbering_drag = None
+            over = self._numbering_hit_at(event.position().toPoint()) is not None
+            self.viewport().setCursor(
+                Qt.CursorShape.SizeAllCursor if over
+                else Qt.CursorShape.ArrowCursor)
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and self._dragging:
             self._dragging = False
             released = event.position().toPoint()
@@ -1749,6 +1848,15 @@ class PDFView(QAbstractScrollArea):
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         key = event.key()
         mods = event.modifiers()
+
+        if key == Qt.Key.Key_Escape and self._numbering_drag is not None:
+            original = self._numbering_drag["settings"]
+            self._numbering_drag = None
+            self._numbering_preview = original
+            self.viewport().update()
+            self.numbering_changed.emit(original)
+            event.accept()
+            return
         ctrl = mods & Qt.KeyboardModifier.ControlModifier
         shift = mods & Qt.KeyboardModifier.ShiftModifier
 
