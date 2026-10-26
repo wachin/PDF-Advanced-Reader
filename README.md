@@ -55,7 +55,7 @@ Fixes in 2.0 (there were ten other bugs behind it):
 - **Rotation** — 90° steps, with selection and highlights staying on the right words.
 - **Encrypted PDFs** — password prompt, credentials are passed to the render workers only.
 - **Reflow mode with figures and tables** — single-column reading on any window size; text is extracted and laid out in the background, raster images and detected tables are rendered inline in reading order, two-column papers are read left column first, text size is adjustable, and scanned pages are shown as fit-to-column images.
-- **Page numbering** — embedded as a tab in the right-hand dock. Add numbers at any page corner or edge (top/bottom × left/centre/right), finely adjust offsets in points, millimetres, centimetres or inches, pick a common format (`1`, `1/5`, `Page 1 of 5`, …), choose the start and end page and set the first printed number. A live mask preview covers the old content behind each number and can be dragged directly on the page to position it; the mask expands independently on each side and takes any colour (presets, a colour dialog or an on-screen eyedropper) to match tinted or non-white paper. Saving writes a new `-numbered.pdf` copy without touching the original.
+- **Page numbering** — embedded as a tab in the right-hand dock. Add numbers at any page corner or edge (top/bottom × left/centre/right), finely adjust offsets in points, millimetres, centimetres or inches, pick a common format (`1`, `1/5`, `Page 1 of 5`, …), choose the start and end page and set the first printed number. Numbers can use the built-in Helvetica, Times or Courier faces or any installed system font in any of its styles (Bold, Italic, Light, SemiBold, …), with a **Choose…** dialog that browses recommended and installed families, shows a live sample and suggests the Debian/Ubuntu package for missing recommended fonts. A live mask preview covers the old content behind each number and can be dragged directly on the page to position it; the mask expands independently on each side and takes any colour (presets, a colour dialog or an on-screen eyedropper) to match tinted or non-white paper. Saving writes a new `-numbered.pdf` copy without touching the original.
 - **Comfort** — drag & drop to open, open from the command line, recent-file memory, remembered window layout, page spinner, status bar.
 - **Crisp vector icons** — toolbar and sidebar icons are drawn by a `QIconEngine` at the exact requested size and device pixel ratio (see [`docs/en/developers/ui/vector-icons.md`](docs/en/developers/ui/vector-icons.md)).
 
@@ -149,13 +149,21 @@ rotation and zoom:
   numbering pages 2–5 of a five-page document produces `1/4 … 4/4`. The first
   printed number is also configurable, so a cover can be skipped while the
   next page still starts at 1.
+- The **Font** row lists the built-in Helvetica, Times and Courier faces first,
+  followed by the recommended families installed on the machine. Pick a
+  **Style** (Regular, Bold, Italic, Light, SemiBold, Condensed, …) from those
+  the family provides. **Choose…** opens a larger dialog with a searchable
+  tree of recommended and installed fonts, their full style list, a size field
+  and a live sample; fonts from the recommended catalog that are not installed
+  appear greyed out with the `apt install` command that provides them.
+  System fonts are embedded in the saved copy, so it renders the same on any
+  viewer; the three built-ins need no embedding.
 
 Selecting the Page Numbers tab switches reflow off temporarily because
 numbering refers to physical page geometry; leaving the tab restores reflow.
 The copy includes unsaved highlights and annotations, and the original PDF's
 rotation (`/Rotate`) is respected. Page numbers are ordinary selectable PDF
-text in the base-14 Helvetica, Times or Courier fonts; no extra font is
-embedded. Implementation notes are in
+text. Implementation notes are in
 [`docs/en/developers/ui/page-numbering.md`](docs/en/developers/ui/page-numbering.md).
 
 `demo-two-columns.pdf` in the repository root is a four-page journal-style
@@ -191,6 +199,26 @@ pip3 install --user pymupdf             # PyMuPDF
 ```
 
 > **Note:** `pip install --user` installs packages to `~/.local/lib/python3.x/site-packages/`, available globally for your user — **no virtualenv activation needed**. 
+
+### Recommended fonts for page numbering (optional)
+
+Page numbering works out of the box with the built-in Helvetica, Times and
+Courier faces and with any font already installed on the system. To see the
+families listed under **Recommended** in the font dialog, install them once:
+
+```bash
+sudo apt update
+sudo apt install fonts-liberation fonts-dejavu fonts-noto-core \
+    fonts-roboto fonts-open-sans fonts-lato fonts-inter fonts-montserrat \
+    fonts-jetbrains-mono fonts-firacode fonts-ubuntu fonts-cantarell \
+    fonts-crosextra-carlito fonts-crosextra-caladea fonts-urw-base35
+```
+
+`fonts-ibm-plex` (IBM Plex Sans/Serif/Mono) is in Debian **contrib**: enable
+that section first, then `sudo apt install fonts-ibm-plex`. Red Hat Text,
+Display and Mono are OFL but not packaged by Debian/Ubuntu; install the
+upstream release if you want them. Families that are still missing stay
+visible in the dialog, greyed out with their install hint.
 
 #### Run without venv
 
@@ -290,6 +318,7 @@ On a 200-page A4 document (headless container, one page per page of text and cha
 - **Geometry** (`geometry.py`) is pure Python: all rotation/coordinate mapping is unit-tested so text selection and highlights cannot drift out of sync.
 - **Icons** (`icons.py`) are vector-rendered on demand by a `QIconEngine` at the exact requested size and device pixel ratio; pre-rasterizing them into fixed sizes made Qt rescale 18 px icons and softened their strokes.
 - **Page numbering** (`page_numbers.py`) is non-destructive: the open document is serialized with `tobytes()` (including unsaved annotations), numbers are stamped on a temporary copy, and the result is moved into place atomically. Layout works in display space and is converted with page.derotation_matrix + insert_text(rotate=…), so pages with `/Rotate` get numbers at the visual corner. The same `NumberBox` geometry (including its asymmetric per-side mask pads) drives the coloured mask, the dashed preview, hit-testing and drag updates, so what you drag is exactly what gets stamped.
+- **Fonts** (`fonts.py`) use Qt to discover installed families and styles, `fc-list` to map a family/style to its file, and `insert_font(fontfile=…)` to embed that file in the numbered copy. Availability must come from `QFontDatabase` rather than `fc-match`, because `fc-match` silently substitutes a different family for a missing one.
 
 ---
 
@@ -308,6 +337,7 @@ Highlights:
 - `test_viewer.py::test_rotation_render_matches_geometry` — rendered bitmaps and the geometry helpers agree on rotation direction.
 - `test_viewer.py::test_drag_selection_and_copy` — real mouse-drag selection.
 - `test_page_numbers.py` — formats, numbered-page totals, unit conversion, rotated-page stamping, per-side mask geometry and colour (including the screen eyedropper), the Position/Mask sub-tabs, the draggable preview, the icon-only right-hand tabs, and the save-a-copy flow.
+- `test_fonts.py` — recommended catalog and package hints, base-14 style aliases, family/foundry resolution, style matching (including condensed avoidance), embedded system-font stamping, preview styling, and the font dialog and panel controls.
 
 ---
 
@@ -337,6 +367,7 @@ PDF-Advanced-Reader/
 │   ├── search.py       # Search logic
 │   ├── viewer.py       # PDF rendering component
 │   ├── page_numbers.py # Page numbering: panel, mask preview, numbered copy
+│   ├── fonts.py        # Installed-font catalog, style matching and embedding
 │   ├── cache.py        # Page caching
 │   └── i18n.py         # Internationalization support
 ├── translations/       # Qt Linguist translation files

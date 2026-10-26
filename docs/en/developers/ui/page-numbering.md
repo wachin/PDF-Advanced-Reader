@@ -29,6 +29,13 @@ Both dock tabs are icon-only; their labels appear on hover.
 - The preview is drawn on every selected page: a mask in the chosen colour, a
   dashed red outline and the red number. Dragging the number updates the
   offsets live.
+- Fonts: the built-in Helvetica, Times and Courier faces come first, followed
+  by installed families from the recommended catalog, then the current one.
+  The **Style** combo lists every style Qt reports for the family. **Choose…**
+  opens `FontDialog`, a searchable tree split into **Recommended** (built-ins,
+  installed recommended families, and greyed-out missing ones with their apt
+  hint) and **All installed fonts**, with a style list, size field and live
+  sample. Saved copies embed the selected system font file.
 - `Save Copy…` writes a new `name-numbered.pdf`; the open file is never
   overwritten.
 
@@ -48,7 +55,22 @@ Both dock tabs are icon-only; their labels appear on hover.
 | `sample_screen_color` | Maps an overlay point back to the captured screen pixel, rejecting out-of-bounds positions. |
 | `ScreenColorPicker` | Full-screen eyedropper; captures first, emits `color_picked(hex)`, closes on click or `Esc`. |
 | `PageNumbersPanel` | Embedded controls, `settings_changed` and `save_requested` signals. |
-| `preview_font` | Maps base-14 families to Qt families for the preview. |
+| `FontDialog` | Searchable recommended/installed font tree, style list, size and live sample. |
+| `preview_font` | Qt preview font for the chosen family and style. |
+| `pdf_number_font`, `number_font_source` | PyMuPDF font or embedded-file source for stamping. |
+
+### `fonts.py`
+
+| Piece | Responsibility |
+|---|---|
+| `BASE14_FONTS`, `_BASE14_ALIASES` | Built-in families, preview families and PyMuPDF styled names (`hebo`, `tibi`, …). |
+| `RECOMMENDED_FONTS` | Ordered catalog of Debian/Ubuntu font packages (`main`, `contrib`) plus Red Hat's unpackaged OFL families. |
+| `installed_families`, `family_installed` | Availability from `QFontDatabase` — never `fc-match`, which substitutes missing families. |
+| `display_family`, `qt_family`, `all_families` | Strip Qt foundry suffixes (`Nimbus Sans [urw]`) for display and resolve back for Qt. |
+| `styles_for`, `default_style`, `apply_style` | Style list, regular-face fallback, and weight/italic mapping (most specific weight word wins). |
+| `font_file` | `fc-list` lookup for family/style → TTF/OTF; prefers exact, uncondensed faces. |
+| `install_hint`, `missing_recommended` | `apt install` command for missing recommended packages. |
+| `qt_preview_font` | Qt font used by the panel preview and dialog sample. |
 
 The panel stores `_offsets_points` separately from the displayed
 `QDoubleSpinBox` values. This preserves exact point positions when the user
@@ -118,3 +140,14 @@ with `os.replace`.
 
 `tests/test_geometry.py` covers `unmap_delta` alongside the existing rotation
 helpers.
+
+`tests/test_fonts.py` covers:
+
+- the recommended catalog, tier rules and deduplicated apt hints;
+- base-14 aliases for all four faces of each built-in family;
+- foundry stripping, family resolution and duplicate-free installed lists;
+- style ordering, default style selection and weight/italic mapping;
+- regular/bold file resolution with condensed faces avoided;
+- embedded system-font stamping (`pdfar-number` as an embedded TTF);
+- preview styling, the font dialog (tree, search, disabled missing entries,
+  style/size/sample) and the panel font/style/Choose controls.

@@ -484,7 +484,8 @@ def test_unit_conversions():
 def test_settings_roundtrip(qapp):
     saved = PageNumberSettings(
         position="top-left", format="page-number/total",
-        font_family="tiro", font_size=17, margin_x=12, margin_y=34,
+        font_family="tiro", font_style="Bold Italic", font_size=17,
+        margin_x=12, margin_y=34,
         start_page=2, end_page=7, start_number=3, unit="cm",
         mask=False, mask_left=9, mask_right=1, mask_top=2,
         mask_bottom=5, mask_color="#c0ffee")

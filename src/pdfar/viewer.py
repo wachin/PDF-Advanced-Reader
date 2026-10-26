@@ -39,7 +39,8 @@ from .geometry import (
     unmap_point,
 )
 from .page_numbers import (
-    PageNumberSettings, box_to_settings, number_box, page_range, preview_font,
+    PageNumberSettings, box_to_settings, number_box, page_range,
+    pdf_number_font, preview_font,
 )
 from .reflow import (
     PageLayout, REFLOW_FONT_STEP, REFLOW_PAGE_GAP, ReflowWorker,
@@ -370,10 +371,7 @@ class PDFView(QAbstractScrollArea):
             self._numbering_font = None
             self.viewport().unsetCursor()
         else:
-            try:
-                self._numbering_font = fitz.Font(settings.font_family)
-            except Exception:
-                self._numbering_font = fitz.Font("helv")
+            self._numbering_font = pdf_number_font(settings)
         self.viewport().update()
 
     def clear_numbering_preview(self) -> None:

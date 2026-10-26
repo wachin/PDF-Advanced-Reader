@@ -1318,6 +1318,49 @@ both tabs.
 
 ---
 
+### Page Number Fonts — [x] Implemented
+
+**Completed**: 2026-10-25
+
+**Scope**: Let page numbers use any installed system font and any of its
+styles, not only the PDF base-14 families. Add a recommended Debian/Ubuntu
+font catalog (Liberation, DejaVu, Noto, Google Fonts, URW, plus optional IBM
+Plex and Red Hat) shown first in the UI, and a **Choose…** dialog with a
+searchable tree, style list, size field, live sample and install hints.
+
+**Status**: DONE
+
+**Files changed**:
+
+- `src/pdfar/fonts.py` (new) — catalog, Qt/fontconfig resolution, style
+  matching, preview fonts and install hints.
+- `src/pdfar/page_numbers.py` — persisted `font_style`, font/style combos,
+  `FontDialog`, `pdf_number_font` and `number_font_source`; stamping embeds
+  the resolved font file.
+- `src/pdfar/viewer.py` — preview uses `pdf_number_font`.
+- `tests/test_fonts.py` (new), `tests/test_page_numbers.py` — catalog,
+  aliases, resolution, embedding, dialog and panel coverage.
+- `README.md`, `docs/en/developers/ui/page-numbering.md`, `ROADMAP.md`.
+
+**Tests**: `PYTHONPATH=src python3 -m pytest tests/ -q` — **281 passed**.
+
+**Architecture notes**:
+
+1. Font availability comes from `QFontDatabase`, not `fc-match`: fontconfig
+   substitutes a different family for missing fonts, so `fc-match` would
+   report every recommended family as available.
+2. `fc-list` is used only to map a family/style pair to a font file; the
+   numbered copy calls `insert_font(fontfile=…)` once per page and embeds a
+   TTF/OTF, so it renders identically elsewhere.
+3. Base-14 families still use PyMuPDF's styled aliases (`hebo`, `tibi`, …) and
+   need no embedding.
+4. `apply_style` stops at the first weight keyword so `SemiBold` cannot be
+   downgraded by the generic `bold` match.
+5. `RECOMMENDED_FONTS` is the single source for the dialog and the install
+   hint; missing entries stay visible but disabled.
+
+---
+
 # 17. RELEASE CRITERIA
 
 A version must not be declared stable solely because it compiles.

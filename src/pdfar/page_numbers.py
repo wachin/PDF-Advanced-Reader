@@ -27,12 +27,20 @@ except ImportError:  # pragma: no cover - older PyMuPDF
 from PyQt6.QtCore import QPoint, QRect, QSettings, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QCursor, QFont, QGuiApplication, QImage, QPainter
 from PyQt6.QtWidgets import (
-    QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFormLayout,
-    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSpinBox,
-    QTabWidget, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDialog,
+    QDialogButtonBox, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QPushButton, QSpinBox, QSplitter, QTabWidget, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from . import APP_NAME
+from .fonts import (
+    BASE14_FONTS, BASE14_KEYS,
+    all_families, base14_alias, default_style, display_family, font_file,
+    install_hint, missing_recommended, qt_family, qt_preview_font,
+    recommended_installable, resolve_family_label, styles_for,
+)
 
 POSITIONS = (
     ("top-left", "Top left"),
@@ -51,13 +59,6 @@ FORMATS = (
     ("dash-number", "- 1 -", "- {number} -"),
 )
 
-# PyMuPDF base-14 font name, UI label, and the family used for the Qt preview.
-FONTS = (
-    ("helv", "Helvetica (sans-serif)", "Sans Serif"),
-    ("tiro", "Times (serif)", "Serif"),
-    ("cour", "Courier (monospace)", "Monospace"),
-)
-
 # Unit key, label, points per unit, and decimals to display.
 UNITS = (
     ("pt", "Points (pt)", 1.0, 1),
@@ -68,8 +69,6 @@ UNITS = (
 
 _POSITION_KEYS = {key for key, _label in POSITIONS}
 _FORMAT_KEYS = {key for key, _label, _template in FORMATS}
-_FONT_KEYS = {key for key, _label, _family in FONTS}
-_PREVIEW_FAMILIES = {key: family for key, _label, family in FONTS}
 _TEMPLATES = {key: template for key, _label, template in FORMATS}
 _UNIT_KEYS = {key for key, _label, _factor, _decimals in UNITS}
 _UNIT_FACTORS = {key: factor for key, _label, factor, _decimals in UNITS}
@@ -111,7 +110,8 @@ class PageNumberSettings:
 
     position: str = "bottom-center"
     format: str = "number/total"
-    font_family: str = "helv"
+    font_family: str = "helv"    # base-14 key or an installed Qt family
+    font_style: str = "Regular"  # Regular, Bold, Italic, Light, …
     font_size: int = 12
     margin_x: float = 36.0
     margin_y: float = 36.0
@@ -148,6 +148,10 @@ class PageNumberSettings:
                 value = default
             return max(low, min(high, value))
 
+        def _font(key: str, default: str, limit: int) -> str:
+            value = str(settings.value(key, default) or "").strip()
+            return value[:limit] or default
+
         # Per-side mask margins replaced the single maskPadding value; keep
         # old settings working by using it as the default for every side.
         legacy_padding = _float("pageNumbers/maskPadding",
@@ -156,8 +160,8 @@ class PageNumberSettings:
             position=_text("pageNumbers/position", cls.position,
                            _POSITION_KEYS),
             format=_text("pageNumbers/format", cls.format, _FORMAT_KEYS),
-            font_family=_text("pageNumbers/font", cls.font_family,
-                              _FONT_KEYS),
+            font_family=_font("pageNumbers/font", cls.font_family, 120),
+            font_style=_font("pageNumbers/fontStyle", cls.font_style, 64),
             font_size=_int("pageNumbers/fontSize", cls.font_size, 5, 96),
             margin_x=_float("pageNumbers/marginX", cls.margin_x, 0,
                             _MAX_OFFSET_POINTS),
@@ -188,6 +192,7 @@ class PageNumberSettings:
         settings.setValue("pageNumbers/position", self.position)
         settings.setValue("pageNumbers/format", self.format)
         settings.setValue("pageNumbers/font", self.font_family)
+        settings.setValue("pageNumbers/fontStyle", self.font_style)
         settings.setValue("pageNumbers/fontSize", self.font_size)
         settings.setValue("pageNumbers/marginX", self.margin_x)
         settings.setValue("pageNumbers/marginY", self.margin_y)
@@ -225,6 +230,35 @@ def text_alignment(position: str) -> str:
     return position.rsplit("-", 1)[-1]
 
 
+def pdf_number_font(settings: PageNumberSettings) -> "fitz.Font":
+    """Font used for metrics: base-14, an installed file, or Helvetica."""
+    alias = base14_alias(settings.font_family, settings.font_style)
+    if alias:
+        try:
+            return fitz.Font(alias)
+        except Exception:
+            pass
+    path = font_file(settings.font_family, settings.font_style)
+    if path:
+        try:
+            return fitz.Font(fontfile=path)
+        except Exception:
+            pass
+    return fitz.Font("helv")
+
+
+def number_font_source(
+        settings: PageNumberSettings) -> Tuple[Optional[str], str]:
+    """Return ``(font_file, fontname)`` for stamping into the copy."""
+    alias = base14_alias(settings.font_family, settings.font_style)
+    if alias:
+        return None, alias
+    path = font_file(settings.font_family, settings.font_style)
+    if path:
+        return path, "pdfar-number"
+    return None, "helv"
+
+
 def layout_number(settings: PageNumberSettings, page_w: float, page_h: float,
                   number: int, total: int,
                   font=None) -> Tuple[str, float, float, str]:
@@ -234,7 +268,7 @@ def layout_number(settings: PageNumberSettings, page_w: float, page_h: float,
     the alignment; ``baseline_y`` is the text baseline.  Top/bottom margins
     refer to the visual top/bottom of the glyphs, not the baseline.
     """
-    font = font or fitz.Font(settings.font_family)
+    font = font or pdf_number_font(settings)
     text = number_text(settings, number, total)
     size = float(settings.font_size)
     alignment = text_alignment(settings.position)
@@ -290,7 +324,7 @@ class NumberBox:
 def number_box(settings: PageNumberSettings, page_w: float, page_h: float,
                number: int, total: int, font=None) -> NumberBox:
     """Glyph and mask geometry for one page number."""
-    font = font or fitz.Font(settings.font_family)
+    font = font or pdf_number_font(settings)
     text, anchor_x, baseline, alignment = layout_number(
         settings, page_w, page_h, number, total, font=font)
     size = float(settings.font_size)
@@ -397,12 +431,15 @@ def stamp_copy(source, dest_path: str,
         first, last = page_range(settings, out.page_count)
         if last < first:
             raise ValueError("document has no pages to number")
-        font = fitz.Font(settings.font_family)
+        font = pdf_number_font(settings)
+        font_file_path, font_name = number_font_source(settings)
         total = last - first + 1
         mask_fill = mask_rgb(settings.mask_color)
         numbered = 0
         for index in range(first, last + 1):
             page = out.load_page(index)
+            if font_file_path:
+                page.insert_font(fontname=font_name, fontfile=font_file_path)
             number = settings.start_number + (index - first)
             box = number_box(settings, page.rect.width, page.rect.height,
                              number, total, font=font)
@@ -412,7 +449,7 @@ def stamp_copy(source, dest_path: str,
                     color=None, fill=mask_fill, overlay=True)
             point = fitz.Point(box.left, box.baseline) * page.derotation_matrix
             page.insert_text(
-                point, box.text, fontname=settings.font_family,
+                point, box.text, fontname=font_name,
                 fontsize=settings.font_size, color=(0.0, 0.0, 0.0),
                 rotate=page.rotation, overlay=True)
             numbered += 1
@@ -513,6 +550,247 @@ class ScreenColorPicker(QWidget):
         super().keyPressEvent(event)
 
 
+class FontDialog(QDialog):
+    """Browse installed fonts, recommended families, styles and a sample."""
+
+    def __init__(self, family: str, style: str, size: int,
+                 parent: Optional[QWidget] = None, sample: str = "1/5"):
+        super().__init__(parent)
+        self.setWindowTitle("Choose font")
+        self.setMinimumSize(680, 480)
+        self.resize(800, 560)
+        self._family = family
+        self._style = style
+        self._sample = sample or "1/5"
+
+        layout = QVBoxLayout(self)
+        self.search_edit = QLineEdit(self)
+        self.search_edit.setPlaceholderText("Search fonts…")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.textChanged.connect(self._filter)
+        layout.addWidget(self.search_edit)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.tree = QTreeWidget(splitter)
+        self.tree.setHeaderHidden(True)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection)
+        self._populate_tree()
+        splitter.addWidget(self.tree)
+
+        side = QWidget(splitter)
+        side_layout = QVBoxLayout(side)
+        side_layout.setContentsMargins(0, 0, 0, 0)
+        self.family_label = QLabel(side)
+        bold = self.family_label.font()
+        bold.setBold(True)
+        self.family_label.setFont(bold)
+        side_layout.addWidget(self.family_label)
+        side_layout.addWidget(QLabel("Styles:", side))
+        self.style_list = QListWidget(side)
+        self.style_list.setMaximumWidth(260)
+        side_layout.addWidget(self.style_list, 1)
+
+        size_row = QHBoxLayout()
+        size_row.addWidget(QLabel("Size:", side))
+        self.size_spin = QSpinBox(side)
+        self.size_spin.setRange(5, 96)
+        self.size_spin.setSuffix(" pt")
+        self.size_spin.setValue(max(5, min(96, int(size))))
+        size_row.addWidget(self.size_spin)
+        size_row.addStretch(1)
+        side_layout.addLayout(size_row)
+
+        self.sample_label = QLabel(side)
+        self.sample_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.sample_label.setWordWrap(True)
+        self.sample_label.setMinimumHeight(150)
+        self.sample_label.setFrameShape(QFrame.Shape.StyledPanel)
+        self.sample_label.setMargin(16)
+        side_layout.addWidget(self.sample_label, 1)
+        splitter.addWidget(side)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        layout.addWidget(splitter, 1)
+
+        self.note = QLabel(self)
+        self.note.setWordWrap(True)
+        self.note.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._update_note()
+        layout.addWidget(self.note)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel, self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.tree.currentItemChanged.connect(self._on_family_changed)
+        self.style_list.currentItemChanged.connect(self._on_style_changed)
+        self.size_spin.valueChanged.connect(self._update_preview)
+        self._select_family(family)
+
+    @property
+    def selected_family(self) -> str:
+        return self._family
+
+    @property
+    def selected_style(self) -> str:
+        return self._style
+
+    @property
+    def selected_size(self) -> int:
+        return self.size_spin.value()
+
+    def _populate_tree(self) -> None:
+        recommended = QTreeWidgetItem(["Recommended"])
+        everything = QTreeWidgetItem(["All installed fonts"])
+        self.tree.addTopLevelItem(recommended)
+        self.tree.addTopLevelItem(everything)
+        recommended.setExpanded(True)
+
+        for key, label, _preview in BASE14_FONTS:
+            item = QTreeWidgetItem([label])
+            item.setData(0, Qt.ItemDataRole.UserRole, key)
+            item.setToolTip(0, "Built into every PDF viewer; nothing to install.")
+            recommended.addChild(item)
+
+        recommended_names = set()
+        for rec, installed in recommended_installable():
+            if installed:
+                qt_name = qt_family(rec.family)
+                label = display_family(qt_name)
+                item = QTreeWidgetItem([label])
+                item.setData(0, Qt.ItemDataRole.UserRole, qt_name)
+                package = (f"Package: {rec.package}" if rec.package
+                           else "Upstream OFL font")
+                item.setToolTip(0, f"Recommended · {package}")
+                recommended_names.add(label.casefold())
+            else:
+                item = QTreeWidgetItem([f"{rec.family} — not installed"])
+                item.setToolTip(0, self._missing_hint(rec))
+                item.setFlags(item.flags()
+                              & ~Qt.ItemFlag.ItemIsEnabled)
+            recommended.addChild(item)
+
+        for name in all_families():
+            label = display_family(name)
+            if label.casefold() in recommended_names:
+                continue
+            item = QTreeWidgetItem([label])
+            item.setData(0, Qt.ItemDataRole.UserRole, name)
+            everything.addChild(item)
+
+    @staticmethod
+    def _missing_hint(rec) -> str:
+        if rec.tier == "upstream":
+            return ("Not packaged by Debian/Ubuntu; install Red Hat's "
+                    "upstream OFL release.")
+        if rec.tier == "contrib":
+            return (f"sudo apt install {rec.package} "
+                    "(the contrib section must be enabled)")
+        return f"sudo apt install {rec.package}"
+
+    def _select_family(self, family: str) -> None:
+        for index in range(self.tree.topLevelItemCount()):
+            root = self.tree.topLevelItem(index)
+            for child in range(root.childCount()):
+                item = root.child(child)
+                if item.data(0, Qt.ItemDataRole.UserRole) == family:
+                    self.tree.setCurrentItem(item)
+                    self.tree.scrollToItem(
+                        item, QAbstractItemView.ScrollHint.PositionAtCenter)
+                    return
+        self._fill_styles(family)
+        self._update_preview()
+
+    def _filter(self, text: str) -> None:
+        needle = text.strip().casefold()
+        for index in range(self.tree.topLevelItemCount()):
+            root = self.tree.topLevelItem(index)
+            visible = 0
+            for child in range(root.childCount()):
+                item = root.child(child)
+                match = not needle or needle in item.text(0).casefold()
+                item.setHidden(not match)
+                visible += match
+            root.setHidden(visible == 0)
+            if needle and visible:
+                root.setExpanded(True)
+
+    def _on_family_changed(self, current, _previous) -> None:
+        if current is None:
+            return
+        family = current.data(0, Qt.ItemDataRole.UserRole)
+        if not family:
+            return
+        self._family = family
+        self._fill_styles(family)
+        self._update_preview()
+
+    def _fill_styles(self, family: str) -> None:
+        styles = styles_for(family)
+        chosen = default_style(family, self._style)
+        self.style_list.blockSignals(True)
+        try:
+            self.style_list.clear()
+            selected = 0
+            for index, style in enumerate(styles):
+                item = QListWidgetItem(style)
+                item.setData(Qt.ItemDataRole.UserRole, style)
+                self.style_list.addItem(item)
+                if style == chosen:
+                    selected = index
+            self.style_list.setCurrentRow(selected)
+        finally:
+            self.style_list.blockSignals(False)
+        self._style = chosen
+
+    def _on_style_changed(self, current, _previous) -> None:
+        if current is None:
+            return
+        style = current.data(Qt.ItemDataRole.UserRole)
+        self._style = style or current.text()
+        self._update_preview()
+
+    def _update_preview(self) -> None:
+        family = self._family
+        style = self._style or "Regular"
+        pixels = max(16, min(72, int(self.size_spin.value() * 2.2)))
+        self.family_label.setText(
+            f"{resolve_family_label(family)} · {style}")
+        self.sample_label.setFont(
+            qt_preview_font(family, style, pixels))
+        self.sample_label.setText(
+            f"{self._sample}\nABC abc 0123456789\nHamburgefontsiv")
+
+    def _update_note(self) -> None:
+        missing = missing_recommended()
+        if not missing:
+            self.note.hide()
+            return
+        lines = []
+        command = install_hint(missing)
+        if command:
+            lines.append("Missing recommended packages — " + command)
+        contrib = sorted({font.family for font in missing
+                          if font.tier == "contrib"}, key=str.casefold)
+        if contrib:
+            lines.append(
+                "In Debian/Ubuntu contrib: " + ", ".join(contrib)
+                + " (enable the contrib section first).")
+        upstream = sorted({font.family for font in missing
+                           if font.tier == "upstream"}, key=str.casefold)
+        if upstream:
+            lines.append(
+                "Not packaged by Debian/Ubuntu: " + ", ".join(upstream)
+                + " (install the upstream OFL release).")
+        self.note.setText("\n".join(lines))
+
+
 class PageNumbersPanel(QWidget):
     """Page-number controls embedded in the right dock.
 
@@ -568,8 +846,9 @@ class PageNumbersPanel(QWidget):
         layout.addStretch(1)
 
         for widget in (self.position_combo, self.format_combo,
-                       self.font_combo):
+                       self.font_style_combo):
             widget.currentIndexChanged.connect(self._on_changed)
+        self.font_combo.currentIndexChanged.connect(self._on_font_changed)
         self.unit_combo.currentIndexChanged.connect(self._on_unit_changed)
         for widget in (self.size_spin, self.first_page_spin,
                        self.last_page_spin, self.first_number_spin):
@@ -616,12 +895,22 @@ class PageNumbersPanel(QWidget):
             points_to_unit(initial.margin_y, self._unit))
         form.addRow("Vertical offset:", self.margin_y_spin)
 
-        self.font_combo = QComboBox(page)
-        for key, label, _family in FONTS:
-            self.font_combo.addItem(label, key)
-        self.font_combo.setCurrentIndex(
-            max(0, self.font_combo.findData(initial.font_family)))
-        form.addRow("Font:", self.font_combo)
+        font_row = QWidget(page)
+        font_layout = QHBoxLayout(font_row)
+        font_layout.setContentsMargins(0, 0, 0, 0)
+        self.font_combo = QComboBox(font_row)
+        self._populate_font_combo(initial.font_family)
+        self.font_button = QPushButton("Choose…", font_row)
+        self.font_button.setToolTip(
+            "Browse every installed font, its styles and a live sample")
+        self.font_button.clicked.connect(self._choose_font)
+        font_layout.addWidget(self.font_combo, 1)
+        font_layout.addWidget(self.font_button)
+        form.addRow("Font:", font_row)
+
+        self.font_style_combo = QComboBox(page)
+        self._populate_style_combo(initial.font_family, initial.font_style)
+        form.addRow("Style:", self.font_style_combo)
 
         self.size_spin = QSpinBox(page)
         self.size_spin.setRange(5, 96)
@@ -726,6 +1015,82 @@ class PageNumbersPanel(QWidget):
         form.addRow("First printed number:", self.first_number_spin)
         return group
 
+    def _populate_font_combo(self, family: str) -> None:
+        """Built-ins first, then installed recommended families, then current."""
+        self.font_combo.blockSignals(True)
+        try:
+            self.font_combo.clear()
+            for key, label, _preview in BASE14_FONTS:
+                self.font_combo.addItem(label, key)
+            added = set(BASE14_KEYS)
+            for rec, installed in recommended_installable():
+                if not installed:
+                    continue
+                qt_name = qt_family(rec.family)
+                if qt_name in added:
+                    continue
+                self.font_combo.addItem(display_family(qt_name), qt_name)
+                added.add(qt_name)
+            if family and family not in added:
+                self.font_combo.addItem(display_family(family), family)
+            index = self.font_combo.findData(family)
+            if index < 0:
+                index = self.font_combo.findData(qt_family(family))
+            self.font_combo.setCurrentIndex(max(0, index))
+        finally:
+            self.font_combo.blockSignals(False)
+
+    def _populate_style_combo(self, family: str,
+                              preferred: str = "") -> None:
+        self.font_style_combo.blockSignals(True)
+        try:
+            self.font_style_combo.clear()
+            for style in styles_for(family):
+                self.font_style_combo.addItem(style, style)
+            chosen = default_style(family, preferred)
+            index = self.font_style_combo.findData(chosen)
+            self.font_style_combo.setCurrentIndex(max(0, index))
+        finally:
+            self.font_style_combo.blockSignals(False)
+
+    def _on_font_changed(self) -> None:
+        family = self.font_combo.currentData()
+        if not family:
+            return
+        self._populate_style_combo(
+            family, self.font_style_combo.currentData() or "")
+        if not self._updating:
+            self.settings_changed.emit(self.settings())
+
+    def _font_sample(self) -> str:
+        settings = self.settings()
+        return number_text(settings, settings.start_number, 5)
+
+    def _choose_font(self) -> None:
+        dialog = FontDialog(
+            self.font_combo.currentData() or "helv",
+            self.font_style_combo.currentData() or "Regular",
+            self.size_spin.value(), self, sample=self._font_sample())
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._apply_font_choice(dialog.selected_family,
+                                    dialog.selected_style,
+                                    dialog.selected_size)
+
+    def _apply_font_choice(self, family: str, style: str,
+                           size: int) -> None:
+        self._updating = True
+        try:
+            if self.font_combo.findData(family) < 0:
+                self.font_combo.addItem(display_family(family), family)
+            self.font_combo.setCurrentIndex(
+                max(0, self.font_combo.findData(family)))
+            self._populate_style_combo(family, style)
+            self.size_spin.setValue(int(size))
+        finally:
+            self._updating = False
+        self._update_range_label()
+        self.settings_changed.emit(self.settings())
+
     def _configure_offset_spin(self, spin: QDoubleSpinBox) -> None:
         unit = self.unit_combo.currentData() if hasattr(
             self, "unit_combo") else self._unit
@@ -742,7 +1107,8 @@ class PageNumbersPanel(QWidget):
         return PageNumberSettings(
             position=self.position_combo.currentData(),
             format=self.format_combo.currentData(),
-            font_family=self.font_combo.currentData(),
+            font_family=self.font_combo.currentData() or "helv",
+            font_style=self.font_style_combo.currentData() or "Regular",
             font_size=self.size_spin.value(),
             margin_x=margin_x,
             margin_y=margin_y,
@@ -816,8 +1182,15 @@ class PageNumbersPanel(QWidget):
                 max(0, self.position_combo.findData(settings.position)))
             self.format_combo.setCurrentIndex(
                 max(0, self.format_combo.findData(settings.format)))
-            self.font_combo.setCurrentIndex(
-                max(0, self.font_combo.findData(settings.font_family)))
+            index = self.font_combo.findData(settings.font_family)
+            if index < 0:
+                self.font_combo.addItem(
+                    display_family(settings.font_family),
+                    settings.font_family)
+                index = self.font_combo.count() - 1
+            self.font_combo.setCurrentIndex(index)
+            self._populate_style_combo(
+                settings.font_family, settings.font_style)
             self.size_spin.setValue(settings.font_size)
             self._start_page_value = max(1, int(settings.start_page))
             self._end_is_last = settings.end_page == 0
@@ -964,6 +1337,5 @@ class PageNumbersPanel(QWidget):
 
 def preview_font(settings: PageNumberSettings, pixel_size: int) -> QFont:
     """Qt font used to draw the in-page preview."""
-    font = QFont(_PREVIEW_FAMILIES.get(settings.font_family, "Sans Serif"))
-    font.setPixelSize(max(1, pixel_size))
-    return font
+    return qt_preview_font(
+        settings.font_family, settings.font_style, pixel_size)
