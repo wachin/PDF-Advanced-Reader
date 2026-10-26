@@ -774,6 +774,34 @@ def test_right_dock_has_two_icon_only_tabs(win):
     assert win.search_dock.windowTitle() == "Tools"
 
 
+def test_tools_dock_can_shrink_for_more_document_space(win, qapp):
+    win.resize(1200, 800)
+    qapp.processEvents()
+    dock = win.search_dock
+    assert dock.minimumWidth() == 280
+
+    win.resizeDocks([dock], [280], Qt.Orientation.Horizontal)
+    for _ in range(4):
+        qapp.processEvents()
+    assert dock.width() == 280
+    assert win.tabs.width() > 0
+
+    # The page-number forms wrap instead of forcing a wider panel.
+    panel = win.page_numbers_panel
+    assert panel.minimumSizeHint().width() <= 280
+    for page in (panel.position_page, panel.mask_page, panel.erase_page):
+        assert page.minimumSizeHint().width() <= 260
+
+    # The requested minimum is a floor, not a fixed width.
+    win.resizeDocks([dock], [200], Qt.Orientation.Horizontal)
+    qapp.processEvents()
+    assert dock.width() == 280
+
+    win.resizeDocks([dock], [420], Qt.Orientation.Horizontal)
+    qapp.processEvents()
+    assert dock.width() == 420
+
+
 def _icon_ink(icon) -> QColor:
     image = icon.pixmap(QSize(18, 18)).toImage()
     answer = QColor(0, 0, 0, 0)

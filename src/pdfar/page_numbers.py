@@ -94,6 +94,15 @@ def normalize_color(value, default: str = "#ffffff") -> str:
     return color.name() if color.isValid() else default
 
 
+def _page_form(parent: QWidget) -> QFormLayout:
+    """A compact form that still fits when the tools dock is narrowed."""
+    form = QFormLayout(parent)
+    form.setContentsMargins(8, 8, 8, 8)
+    form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+    form.setFieldGrowthPolicy(
+        QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+    return form
+
 
 def unit_to_points(value: float, unit: str) -> float:
     """Convert a length in ``unit`` to PDF points."""
@@ -998,8 +1007,7 @@ class PageNumbersPanel(QWidget):
     # ------------------------------------------------------------- widgets
     def _build_position_page(self, initial: PageNumberSettings):
         page = QWidget(self)
-        form = QFormLayout(page)
-        form.setContentsMargins(8, 8, 8, 8)
+        form = _page_form(page)
 
         self.position_combo = QComboBox(page)
         for key, label in POSITIONS:
@@ -1046,11 +1054,12 @@ class PageNumbersPanel(QWidget):
 
     def _build_mask_page(self, initial: PageNumberSettings):
         page = QWidget(self)
-        form = QFormLayout(page)
-        form.setContentsMargins(8, 8, 8, 8)
+        form = _page_form(page)
 
-        self.mask_check = QCheckBox(
-            "Cover existing numbers behind the new number", page)
+        self.mask_check = QCheckBox("Cover the old page number", page)
+        self.mask_check.setToolTip(
+            "Cover existing numbers behind the new number. The old text "
+            "stays in the file.")
         self.mask_check.setChecked(initial.mask)
         form.addRow(self.mask_check)
 
@@ -1111,8 +1120,7 @@ class PageNumbersPanel(QWidget):
 
     def _build_erase_page(self, initial: EraseSettings):
         page = QWidget(self)
-        form = QFormLayout(page)
-        form.setContentsMargins(8, 8, 8, 8)
+        form = _page_form(page)
 
         hint = QLabel(
             "Cover old page numbers with a blank rectangle. It hides them "
@@ -1187,6 +1195,9 @@ class PageNumbersPanel(QWidget):
     def _build_numbering_group(self, initial: PageNumberSettings):
         group = QGroupBox("Numbering", self)
         form = QFormLayout(group)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.numbering_group = group
         self._numbering_form = form
 
