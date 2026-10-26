@@ -8,8 +8,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from pdfar.search import (
-    SearchHit, SearchParams, SearchWorker, compile_regex, make_snippet,
-    normalize_space, page_matches,
+    SearchHit, SearchParams, SearchWorker, compile_regex, highlight_spans,
+    make_snippet, normalize_space, page_matches,
 )
 from PyQt6.QtWidgets import QApplication
 
@@ -49,6 +49,34 @@ def test_make_snippet_centers_on_match():
     snippet = make_snippet(text, ["NEEDLE"], False)
     assert "NEEDLE" in snippet
     assert len(snippet) < 250
+
+
+def test_highlight_spans_marks_every_term():
+    text = "Alpha beta, ALPHA and omega"
+    spans = highlight_spans(text, SearchParams("alpha beta", mode="AND"))
+    assert [text[start:end] for start, end in spans] == [
+        "Alpha", "beta", "ALPHA"]
+
+
+def test_highlight_spans_respects_case_and_whole_words():
+    text = "PDFAR pdfar PDFARs"
+    assert highlight_spans(
+        text, SearchParams("pdfar", case_sensitive=True)) == [(6, 11)]
+    assert highlight_spans(
+        text, SearchParams("pdfar", whole_words=True)) == [(0, 5), (6, 11)]
+
+
+def test_highlight_spans_handles_phrase_regex_and_overlaps():
+    text = "banana split"
+    assert highlight_spans(
+        text, SearchParams("na sp", mode="PHRASE")) == [(4, 9)]
+    assert highlight_spans(
+        text, SearchParams("a", mode="REGEX")) == [(1, 2), (3, 4), (5, 6)]
+    # "ana" and "an" overlap; a single merged span avoids double painting.
+    assert highlight_spans(
+        text, SearchParams("ana an", mode="OR")) == [(1, 5)]
+    assert highlight_spans(
+        text, SearchParams("[invalid", mode="REGEX")) == []
 
 
 def _run_worker(sample_pdf, params):

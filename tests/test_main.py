@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from pdfar import APP_NAME, __version__
-from pdfar.main import MainWindow
+from pdfar.main import HIGHLIGHT_ROLE, MainWindow
 from pdfar.search import SearchHit
 
 
@@ -34,6 +34,17 @@ def wait_until(app, predicate, timeout=20.0):
             return True
         time.sleep(0.005)
     return False
+
+
+def _yellow_pixels(image) -> int:
+    count = 0
+    for y in range(image.height()):
+        for x in range(image.width()):
+            color = image.pixelColor(x, y)
+            if (color.red() > 220 and color.green() > 200
+                    and color.blue() < 120):
+                count += 1
+    return count
 
 
 def test_open_document_wires_everything(qapp, sample_pdf):
@@ -126,6 +137,14 @@ def test_search_through_the_dock(qapp, sample_pdf):
         assert win.results.count() == 2          # pages 2 and 3 of the sample
         assert win.view._hit_flat, "search highlights should be set on the view"
         assert win.hit_label.text().startswith("Hit")
+
+        first = win.results.item(0)
+        text = first.text()
+        spans = first.data(HIGHLIGHT_ROLE)
+        assert [text[start:end] for start, end in spans] == [
+            "alpha", "beta"]
+        assert _yellow_pixels(
+            win.results.viewport().grab().toImage()) > 20
     finally:
         win._close_document()
         win.close()

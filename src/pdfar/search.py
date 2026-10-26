@@ -15,6 +15,7 @@ except ImportError:  # pragma: no cover - older PyMuPDF
 from PyQt6.QtCore import QObject, pyqtSignal
 
 Rect = Tuple[float, float, float, float]
+Span = Tuple[int, int]
 
 MAX_HITS = 5000
 MAX_REGEX_HITS = 10000
@@ -110,6 +111,43 @@ def make_snippet(text: str, terms: List[str], case_sensitive: bool, width: int =
     start = max(0, m - width // 3)
     end = min(len(text), start + width)
     return " ".join(text[start:end].split())
+
+
+def highlight_spans(text: str, params: SearchParams) -> List[Span]:
+    """Character spans in *text* that the current search would match."""
+    if not text:
+        return []
+    flags = 0 if params.case_sensitive else re.IGNORECASE
+    spans: List[Span] = []
+
+    if params.mode == "REGEX":
+        try:
+            pattern = compile_regex(params)
+        except ValueError:
+            return []
+        spans = [match.span() for match in pattern.finditer(text)
+                 if match.end() > match.start()]
+    else:
+        for term in _terms_for(params):
+            if not term:
+                continue
+            if params.whole_words:
+                pattern = re.compile(
+                    r"(?<!\w)" + re.escape(term) + r"(?!\w)", flags)
+            else:
+                pattern = re.compile(re.escape(term), flags)
+            spans.extend(match.span() for match in pattern.finditer(text))
+
+    if not spans:
+        return []
+    spans.sort()
+    merged = [list(spans[0])]
+    for start, end in spans[1:]:
+        if start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(start, end) for start, end in merged]
 
 
 class SearchWorker(QObject):

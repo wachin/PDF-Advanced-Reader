@@ -11,19 +11,21 @@ try:
 except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 import hashlib
+import html
 import time
 
 from PyQt6.QtCore import QEvent, QObject, QPoint, QSettings, QSize, QThread, QTimer, Qt
 from PyQt6.QtGui import (
     QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QIcon,
-    QKeySequence, QPainter, QPixmap, QShortcut,
+    QKeySequence, QPainter, QPalette, QPixmap, QShortcut, QTextDocument,
 )
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSpinBox,
-    QStatusBar, QTabWidget, QToolBar, QToolButton, QToolTip, QVBoxLayout, QWidget,
+    QStatusBar, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
+    QTabWidget, QToolBar, QToolButton, QToolTip, QVBoxLayout, QWidget,
 )
 
 from . import APP_NAME, __version__
@@ -34,7 +36,7 @@ from .page_numbers import (
     erased_copy_path, numbered_copy_path, stamp_copy,
 )
 from .search import (
-    SearchParams, SearchWorker, compile_regex, normalize_space,
+    SearchParams, SearchWorker, compile_regex, highlight_spans, normalize_space,
 )
 from .sidebar import (
     Sidebar, ThumbnailSettings, THUMB_MAX_WIDTH, THUMB_MIN_WIDTH,
@@ -46,6 +48,8 @@ from .viewer import PDFView, MEMORY_LEVELS
 ZOOM_STEP_PRESETS = (0.025, 0.05, 0.075, 0.10, 0.125,
                      0.15, 0.175, 0.20, 0.225, 0.25)
 DEFAULT_ZOOM_STEP = 0.10
+
+HIGHLIGHT_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
 SEARCH_MODE_DESCRIPTIONS = (
     "AND — every word must appear on the same page.\n\n"
@@ -163,6 +167,59 @@ class DelayedItemTooltip(QObject):
 
 
 
+def _highlighted_html(text: str, spans, color: str) -> str:
+    """HTML for *text*, with every match painted on a yellow background."""
+    parts = []
+    cursor = 0
+    for start, end in spans:
+        if start > cursor:
+            parts.append(
+                f'<span style="color:{color};">'
+                f'{html.escape(text[cursor:start])}</span>')
+        parts.append(
+            '<span style="background-color:#ffeb3b; color:#202020;">'
+            f'{html.escape(text[start:end])}</span>')
+        cursor = end
+    if cursor < len(text):
+        parts.append(
+            f'<span style="color:{color};">'
+            f'{html.escape(text[cursor:])}</span>')
+    return "".join(parts)
+
+
+class _ResultHighlightDelegate(QStyledItemDelegate):
+    """Draw a result row with its searched words marked in yellow."""
+
+    def paint(self, painter, option, index):  # noqa: N802
+        spans = index.data(HIGHLIGHT_ROLE)
+        if not spans:
+            super().paint(painter, option, index)
+            return
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        widget = opt.widget
+        style = widget.style() if widget is not None else QApplication.style()
+        text = opt.text
+        opt.text = ""
+        style.drawControl(
+            QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
+
+        selected = bool(opt.state & QStyle.StateFlag.State_Selected)
+        role = (QPalette.ColorRole.HighlightedText if selected
+                else QPalette.ColorRole.Text)
+        doc = QTextDocument()
+        doc.setDocumentMargin(0)
+        doc.setDefaultFont(opt.font)
+        doc.setHtml(_highlighted_html(
+            text, spans, opt.palette.color(role).name()))
+        rect = style.subElementRect(
+            QStyle.SubElement.SE_ItemViewItemText, opt, widget)
+        painter.save()
+        painter.translate(rect.topLeft())
+        doc.drawContents(painter)
+        painter.restore()
+
+
 def _format_zoom(zoom: float) -> str:
     """Format a zoom factor as a percentage (half-points when needed)."""
     pct = zoom * 100.0
@@ -187,6 +244,7 @@ class MainWindow(QMainWindow):
         self.search_thread: Optional[QThread] = None
         self.search_worker: Optional[SearchWorker] = None
         self._search_generation = 0
+        self._search_params: Optional[SearchParams] = None
         self.settings = QSettings(APP_NAME, APP_NAME)
         self._ui_dark = False
         self._start_maximized = True
@@ -681,6 +739,8 @@ class MainWindow(QMainWindow):
         v.addWidget(self.search_progress)
 
         self.results = QListWidget()
+        self._result_delegate = _ResultHighlightDelegate(self.results)
+        self.results.setItemDelegate(self._result_delegate)
         self.results.itemClicked.connect(self._on_result_clicked)
         v.addWidget(self.results, 1)
 
@@ -2106,6 +2166,7 @@ class MainWindow(QMainWindow):
                 self._show_search_error(str(exc))
                 return
 
+        self._search_params = params
         self._cancel_search()
         generation = self._search_generation
 
@@ -2147,9 +2208,18 @@ class MainWindow(QMainWindow):
         self.search_progress.setVisible(False)
 
         self.results.clear()
+        params = self._search_params
         for hit in hits:
-            item = QListWidgetItem(f"Page {hit.page + 1}: {hit.snippet}")
+            prefix = f"Page {hit.page + 1}: "
+            item = QListWidgetItem(prefix + hit.snippet)
             item.setData(Qt.ItemDataRole.UserRole, hit.page)
+            if params is not None:
+                offset = len(prefix)
+                spans = [(start + offset, end + offset)
+                         for start, end in highlight_spans(
+                             hit.snippet, params)]
+                if spans:
+                    item.setData(HIGHLIGHT_ROLE, spans)
             self.results.addItem(item)
 
         if self._search_tab is not None and self.tabs.indexOf(self._search_tab) != -1:
