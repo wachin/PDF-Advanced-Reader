@@ -93,6 +93,128 @@ def test_install_hint_dedupes_and_sorts_packages():
     assert install_hint([RecommendedFont("Red Hat Text", "", "upstream")]) == ""
 
 
+def test_platform_builtin_catalogs_are_well_formed():
+    for catalog in (fonts.WINDOWS_FONTS, fonts.MACOS_FONTS):
+        families = [font.family for font in catalog]
+        assert families
+        assert len(families) == len(set(families))
+        for font in catalog:
+            assert font.family.strip()
+            assert font.tier == "builtin"
+            assert not font.package
+
+
+def test_recommended_catalog_follows_the_platform(monkeypatch):
+    monkeypatch.setattr(fonts, "platform_key", lambda: "linux")
+    assert fonts.recommended_fonts() == fonts.RECOMMENDED_FONTS
+
+    monkeypatch.setattr(fonts, "platform_key", lambda: "windows")
+    families = [font.family for font in fonts.recommended_fonts()]
+    assert families[:3] == ["Arial", "Calibri", "Cambria"]
+    assert "Segoe UI" in families
+    assert len(families) == len(set(families))
+    assert len(fonts.recommended_installable()) == \
+        len(fonts.WINDOWS_FONTS) + len(fonts.RECOMMENDED_FONTS)
+
+    monkeypatch.setattr(fonts, "platform_key", lambda: "macos")
+    families = [font.family for font in fonts.recommended_fonts()]
+    assert families[:3] == ["Avenir", "Avenir Next", "Courier New"]
+    assert "Helvetica Neue" in families
+    assert "Menlo" in families
+    assert len(families) == len(set(families))
+
+
+def test_missing_guidance_is_platform_specific(monkeypatch):
+    missing = [
+        RecommendedFont("Roboto", "fonts-roboto"),
+        RecommendedFont("Red Hat Text", "", "upstream"),
+    ]
+
+    monkeypatch.setattr(fonts, "platform_key", lambda: "linux")
+    assert fonts.install_hint(missing) == "sudo apt install fonts-roboto"
+    note = fonts.missing_note(missing)
+    assert "sudo apt install fonts-roboto" in note
+    assert "Not packaged by Debian/Ubuntu: Red Hat Text" in note
+
+    monkeypatch.setattr(fonts, "platform_key", lambda: "windows")
+    assert fonts.install_hint(missing) == ""
+    note = fonts.missing_note(missing)
+    assert "Personalization" in note and "Roboto" in note
+    assert "apt" not in note
+
+    monkeypatch.setattr(fonts, "platform_key", lambda: "macos")
+    note = fonts.missing_note(missing)
+    assert "Homebrew" in note and "Roboto" in note
+
+
+def test_builtin_guidance_names_the_platform(monkeypatch):
+    monkeypatch.setattr(fonts, "platform_key", lambda: "windows")
+    arial = RecommendedFont("Arial", "", "builtin")
+    assert "Windows" in fonts.recommended_hint(arial)
+    assert fonts.recommended_tooltip(arial) == "Included with Windows."
+    assert fonts.missing_note([arial]) == ""
+
+    monkeypatch.setattr(fonts, "platform_key", lambda: "macos")
+    menlo = RecommendedFont("Menlo", "", "builtin")
+    assert "macOS" in fonts.recommended_hint(menlo)
+    assert fonts.recommended_tooltip(menlo) == "Included with macOS."
+
+
+def test_split_face_names_extract_trailing_styles():
+    cases = {
+        "Arial": ("Arial", "Regular"),
+        "Arial Bold": ("Arial", "Bold"),
+        "Times New Roman Bold Italic": ("Times New Roman", "Bold Italic"),
+        "HelveticaNeue-Bold": ("HelveticaNeue", "Bold"),
+        "Open_Sans_SemiBold": ("Open Sans", "SemiBold"),
+        "Arial Black": ("Arial", "Black"),
+        "Courier New": ("Courier New", "Regular"),
+    }
+    for name, expected in cases.items():
+        assert fonts._split_face_name(name) == expected, name
+
+
+def test_windows_registry_entries_resolve_families_and_styles(
+        tmp_path, monkeypatch):
+    for filename in ("arial.ttf", "arialbd.ttf", "ariblk.ttf", "hnbi.otf"):
+        (tmp_path / filename).write_bytes(b"")
+    pairs = (
+        ("Arial (TrueType)", "arial.ttf"),
+        ("Arial Bold (TrueType)", "arialbd.ttf"),
+        ("Arial Black (TrueType)", "ariblk.ttf"),
+        ("Helvetica Neue Bold Italic (OpenType)",
+         str(tmp_path / "hnbi.otf")),
+    )
+    entries = fonts._windows_entries(pairs, [str(tmp_path)])
+    monkeypatch.setattr(fonts, "platform_key", lambda: "windows")
+    monkeypatch.setattr(fonts, "_font_index_for", lambda _platform: tuple(entries))
+
+    assert font_file("Arial", "Regular") == str(tmp_path / "arial.ttf")
+    assert font_file("Arial", "Bold") == str(tmp_path / "arialbd.ttf")
+    assert font_file("Arial Black", "Regular") == str(tmp_path / "ariblk.ttf")
+    assert font_file("Helvetica Neue", "Bold Italic") == \
+        str(tmp_path / "hnbi.otf")
+    assert font_file("Courier New", "Regular") is None
+
+
+def test_macos_font_folders_resolve_families(tmp_path, monkeypatch):
+    for filename in ("HelveticaNeue.ttf", "HelveticaNeue-Bold.ttf",
+                     "Open Sans Bold Italic.otf", "Menlo-Regular.ttf"):
+        (tmp_path / filename).write_bytes(b"")
+    entries = fonts._macos_font_index([str(tmp_path)])
+    monkeypatch.setattr(fonts, "platform_key", lambda: "macos")
+    monkeypatch.setattr(fonts, "_font_index_for", lambda _platform: tuple(entries))
+
+    assert font_file("Helvetica Neue", "Regular") == \
+        str(tmp_path / "HelveticaNeue.ttf")
+    assert font_file("Helvetica Neue", "Bold") == \
+        str(tmp_path / "HelveticaNeue-Bold.ttf")
+    assert font_file("Open Sans", "Bold Italic") == \
+        str(tmp_path / "Open Sans Bold Italic.otf")
+    assert font_file("Menlo", "Regular") == \
+        str(tmp_path / "Menlo-Regular.ttf")
+
+
 def test_recommended_installable_matches_missing_list():
     pairs = fonts.recommended_installable()
     assert len(pairs) == len(RECOMMENDED_FONTS)
@@ -111,6 +233,12 @@ def test_qt_family_resolves_to_an_installed_name():
     family = _system_family()
     resolved = qt_family(family)
     assert resolved in QFontDatabase.families()
+    assert display_family(resolved) == family
+
+
+def test_qt_family_matches_names_without_spaces():
+    family = _system_family()
+    resolved = qt_family(fonts._normalized_family(family))
     assert display_family(resolved) == family
 
 

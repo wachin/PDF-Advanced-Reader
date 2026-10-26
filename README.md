@@ -230,10 +230,15 @@ pip install PyQt6 pymupdf
 python3 run.py
 ```
 
-System-font embedding uses `fc-list` from fontconfig, which Linux desktops
-provide. On Windows and macOS the font dialog still lists and previews every
-installed family through Qt, but when no font file can be resolved, numbered
-copies fall back to a built-in face.
+Font discovery adapts to the platform. The **Recommended** group in the font
+dialog lists Debian/Ubuntu's open font packages (with `apt` hints) on Linux,
+Windows' built-in families (Arial, Calibri, Segoe UI, …) plus the open fonts
+on Windows, and macOS' built-in families (Helvetica Neue, Menlo, …) plus the
+open fonts on macOS, each with fitting install guidance. System-font embedding
+uses fontconfig (`fc-list`) on Linux, the font registry on Windows and the
+system Fonts folders on macOS; numbered copies still fall back to a built-in
+face when no font file can be found (for example, a face inside a macOS
+`.ttc` collection).
 
 ### Recommended fonts for page numbering (optional)
 

@@ -38,8 +38,9 @@ from . import APP_NAME
 from .fonts import (
     BASE14_FONTS, BASE14_KEYS,
     all_families, base14_alias, default_style, display_family, font_file,
-    install_hint, missing_recommended, qt_family, qt_preview_font,
-    recommended_installable, resolve_family_label, styles_for,
+    missing_note, missing_recommended, qt_family, qt_preview_font,
+    recommended_hint, recommended_installable, recommended_tooltip,
+    resolve_family_label, styles_for,
 )
 
 POSITIONS = (
@@ -799,13 +800,11 @@ class FontDialog(QDialog):
                 label = display_family(qt_name)
                 item = QTreeWidgetItem([label])
                 item.setData(0, Qt.ItemDataRole.UserRole, qt_name)
-                package = (f"Package: {rec.package}" if rec.package
-                           else "Upstream OFL font")
-                item.setToolTip(0, f"Recommended · {package}")
+                item.setToolTip(0, f"Recommended · {recommended_tooltip(rec)}")
                 recommended_names.add(label.casefold())
             else:
                 item = QTreeWidgetItem([f"{rec.family} — not installed"])
-                item.setToolTip(0, self._missing_hint(rec))
+                item.setToolTip(0, recommended_hint(rec))
                 item.setFlags(item.flags()
                               & ~Qt.ItemFlag.ItemIsEnabled)
             recommended.addChild(item)
@@ -817,16 +816,6 @@ class FontDialog(QDialog):
             item = QTreeWidgetItem([label])
             item.setData(0, Qt.ItemDataRole.UserRole, name)
             everything.addChild(item)
-
-    @staticmethod
-    def _missing_hint(rec) -> str:
-        if rec.tier == "upstream":
-            return ("Not packaged by Debian/Ubuntu; install Red Hat's "
-                    "upstream OFL release.")
-        if rec.tier == "contrib":
-            return (f"sudo apt install {rec.package} "
-                    "(the contrib section must be enabled)")
-        return f"sudo apt install {rec.package}"
 
     def _select_family(self, family: str) -> None:
         for index in range(self.tree.topLevelItemCount()):
@@ -902,27 +891,11 @@ class FontDialog(QDialog):
             f"{self._sample}\nABC abc 0123456789\nHamburgefontsiv")
 
     def _update_note(self) -> None:
-        missing = missing_recommended()
-        if not missing:
+        text = missing_note(missing_recommended())
+        if not text:
             self.note.hide()
             return
-        lines = []
-        command = install_hint(missing)
-        if command:
-            lines.append("Missing recommended packages — " + command)
-        contrib = sorted({font.family for font in missing
-                          if font.tier == "contrib"}, key=str.casefold)
-        if contrib:
-            lines.append(
-                "In Debian/Ubuntu contrib: " + ", ".join(contrib)
-                + " (enable the contrib section first).")
-        upstream = sorted({font.family for font in missing
-                           if font.tier == "upstream"}, key=str.casefold)
-        if upstream:
-            lines.append(
-                "Not packaged by Debian/Ubuntu: " + ", ".join(upstream)
-                + " (install the upstream OFL release).")
-        self.note.setText("\n".join(lines))
+        self.note.setText(text)
 
 
 class PageNumbersPanel(QWidget):
