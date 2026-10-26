@@ -1288,6 +1288,36 @@ dialog, and an on-screen eyedropper for tinted paper.
 
 ---
 
+### Page Numbers Sub-tabs — [x] Implemented
+
+**Completed**: 2026-10-25
+
+**Scope**: Split the embedded numbering panel into **Position** (default) and
+**Mask** sub-tabs so only one group occupies vertical space in the narrow
+right dock. The numbering range, range summary and `Save Copy…` stay below
+both tabs.
+
+**Status**: DONE
+
+**Files changed**:
+
+- `src/pdfar/page_numbers.py` — `QTabWidget` (document mode) hosting the
+  position and mask pages; the group-box wrappers became plain pages.
+- `tests/test_page_numbers.py` — sub-tab labels/order, default index and
+  widget ownership.
+- `README.md`, `docs/en/developers/ui/page-numbering.md`, `ROADMAP.md`.
+
+**Tests**: `PYTHONPATH=src python3 -m pytest tests/ -q` — **241 passed**.
+
+**Architecture notes**:
+
+1. Hidden pages keep their widgets alive, so signals, preview updates and
+   `apply_settings` work exactly as before.
+2. The tab widget is sized by its tallest page (Position), so switching to
+   Mask does not resize the dock.
+
+---
+
 # 17. RELEASE CRITERIA
 
 A version must not be declared stable solely because it compiles.

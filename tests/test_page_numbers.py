@@ -398,6 +398,21 @@ def test_panel_palette_and_custom_mask_colour(qapp, monkeypatch):
     assert emitted[-1].mask_color == "#123456"
 
 
+def test_panel_has_position_and_mask_sub_tabs(qapp):
+    panel = PageNumbersPanel(3, _settings())
+    tabs = panel.sub_tabs
+
+    assert tabs.count() == 2
+    assert [tabs.tabText(i) for i in range(2)] == ["Position", "Mask"]
+    assert tabs.currentIndex() == 0
+    assert tabs.widget(0) is panel.position_page
+    assert tabs.widget(1) is panel.mask_page
+    assert panel.position_page.isAncestorOf(panel.position_combo)
+    assert panel.mask_page.isAncestorOf(panel.mask_left_spin)
+    assert panel.mask_page.isAncestorOf(panel.mask_color_btn)
+    assert not panel.position_page.isAncestorOf(panel.mask_left_spin)
+
+
 def test_sample_screen_color_maps_scaled_points(qapp):
     image = QImage(4, 4, QImage.Format.Format_RGB32)
     image.fill(QColor("#ffffff"))

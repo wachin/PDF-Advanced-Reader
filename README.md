@@ -124,10 +124,13 @@ transformation:
 ### Page numbering
 
 `Tools → Page Numbers…` (or the page icon in the right-hand dock) opens the
-numbering panel next to Search. It places a number on every page of a chosen
-range and saves the result as a **new copy** (`name-numbered.pdf` by
-default); the file you have open is never overwritten. The preview is live
-and drawn on the pages themselves, following rotation and zoom:
+numbering panel next to Search. The panel has two sub-tabs — **Position**
+(default) and **Mask** — so only the controls you are using take vertical
+space; the numbering range and **Save Copy…** stay below both. It places a
+number on every page of a chosen range and saves the result as a **new copy**
+(`name-numbered.pdf` by default); the file you have open is never
+overwritten. The preview is live and drawn on the pages themselves, following
+rotation and zoom:
 
 - A **mask** covers whatever was behind the number, so old printed page
   numbers can be hidden in the saved copy. Its four margins (left, right, top,
@@ -304,7 +307,7 @@ Highlights:
 - `test_viewer.py::test_pages_actually_render_and_paint` — pixels of a known black square must be visible in the painted widget.
 - `test_viewer.py::test_rotation_render_matches_geometry` — rendered bitmaps and the geometry helpers agree on rotation direction.
 - `test_viewer.py::test_drag_selection_and_copy` — real mouse-drag selection.
-- `test_page_numbers.py` — formats, numbered-page totals, unit conversion, rotated-page stamping, per-side mask geometry and colour (including the screen eyedropper), the draggable preview, the icon-only right-hand tabs, and the save-a-copy flow.
+- `test_page_numbers.py` — formats, numbered-page totals, unit conversion, rotated-page stamping, per-side mask geometry and colour (including the screen eyedropper), the Position/Mask sub-tabs, the draggable preview, the icon-only right-hand tabs, and the save-a-copy flow.
 
 ---
 

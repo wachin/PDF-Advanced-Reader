@@ -5,6 +5,9 @@ Both dock tabs are icon-only; their labels appear on hover.
 
 ## Behaviour
 
+- Two sub-tabs: **Position** (default) and **Mask**. Only one is visible at a
+  time, which keeps the narrow right dock short; the numbering range, range
+  summary and `Save Copy…` stay below both.
 - Positions: top/bottom × left/centre/right.
 - Offsets can be entered in **pt, mm, cm or in**. The panel keeps the
   canonical offset in PDF points, so changing the display unit never moves
@@ -106,6 +109,7 @@ with `os.replace`.
 - per-side mask growth, legacy `maskPadding` migration, mask colour export and
   the live preview colour;
 - palette/custom colour selection, screen-pixel mapping and the eyedropper;
+- the Position/Mask sub-tabs and their page contents;
 - mask export and mask-less export;
 - drag math, clamping and centre re-anchoring;
 - stamping with `/Rotate` 0/90/180/270, CropBox offsets and encrypted PDFs;

@@ -29,7 +29,7 @@ from PyQt6.QtGui import QColor, QCursor, QFont, QGuiApplication, QImage, QPainte
 from PyQt6.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFormLayout,
     QGridLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSpinBox,
-    QVBoxLayout, QWidget,
+    QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import APP_NAME
@@ -535,8 +535,15 @@ class PageNumbersPanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.addWidget(self._build_position_group(initial))
-        layout.addWidget(self._build_mask_group(initial))
+
+        self.position_page = self._build_position_page(initial)
+        self.mask_page = self._build_mask_page(initial)
+        self.sub_tabs = QTabWidget(self)
+        self.sub_tabs.setDocumentMode(True)
+        self.sub_tabs.addTab(self.position_page, "Position")
+        self.sub_tabs.addTab(self.mask_page, "Mask")
+        self.sub_tabs.setCurrentIndex(0)
+        layout.addWidget(self.sub_tabs)
         layout.addWidget(self._build_numbering_group(initial))
         # Canonical lengths in points, kept exact across unit switches where
         # the displayed (rounded) value would otherwise drift.
@@ -577,18 +584,19 @@ class PageNumbersPanel(QWidget):
         self._update_range_label()
 
     # ------------------------------------------------------------- widgets
-    def _build_position_group(self, initial: PageNumberSettings):
-        group = QGroupBox("Position", self)
-        form = QFormLayout(group)
+    def _build_position_page(self, initial: PageNumberSettings):
+        page = QWidget(self)
+        form = QFormLayout(page)
+        form.setContentsMargins(8, 8, 8, 8)
 
-        self.position_combo = QComboBox(group)
+        self.position_combo = QComboBox(page)
         for key, label in POSITIONS:
             self.position_combo.addItem(label, key)
         self.position_combo.setCurrentIndex(
             max(0, self.position_combo.findData(initial.position)))
         form.addRow("Placement:", self.position_combo)
 
-        self.unit_combo = QComboBox(group)
+        self.unit_combo = QComboBox(page)
         for key, label, _factor, _decimals in UNITS:
             self.unit_combo.addItem(label, key)
         self.unit_combo.setCurrentIndex(
@@ -596,42 +604,43 @@ class PageNumbersPanel(QWidget):
         self._unit = self.unit_combo.currentData()
         form.addRow("Units:", self.unit_combo)
 
-        self.margin_x_spin = QDoubleSpinBox(group)
+        self.margin_x_spin = QDoubleSpinBox(page)
         self._configure_offset_spin(self.margin_x_spin)
         self.margin_x_spin.setValue(
             points_to_unit(initial.margin_x, self._unit))
         form.addRow("Horizontal offset:", self.margin_x_spin)
 
-        self.margin_y_spin = QDoubleSpinBox(group)
+        self.margin_y_spin = QDoubleSpinBox(page)
         self._configure_offset_spin(self.margin_y_spin)
         self.margin_y_spin.setValue(
             points_to_unit(initial.margin_y, self._unit))
         form.addRow("Vertical offset:", self.margin_y_spin)
 
-        self.font_combo = QComboBox(group)
+        self.font_combo = QComboBox(page)
         for key, label, _family in FONTS:
             self.font_combo.addItem(label, key)
         self.font_combo.setCurrentIndex(
             max(0, self.font_combo.findData(initial.font_family)))
         form.addRow("Font:", self.font_combo)
 
-        self.size_spin = QSpinBox(group)
+        self.size_spin = QSpinBox(page)
         self.size_spin.setRange(5, 96)
         self.size_spin.setSuffix(" pt")
         self.size_spin.setValue(initial.font_size)
         form.addRow("Font size:", self.size_spin)
-        return group
+        return page
 
-    def _build_mask_group(self, initial: PageNumberSettings):
-        group = QGroupBox("Mask", self)
-        form = QFormLayout(group)
+    def _build_mask_page(self, initial: PageNumberSettings):
+        page = QWidget(self)
+        form = QFormLayout(page)
+        form.setContentsMargins(8, 8, 8, 8)
 
         self.mask_check = QCheckBox(
-            "Cover existing numbers behind the new number", group)
+            "Cover existing numbers behind the new number", page)
         self.mask_check.setChecked(initial.mask)
         form.addRow(self.mask_check)
 
-        color_row = QWidget(group)
+        color_row = QWidget(page)
         color_layout = QHBoxLayout(color_row)
         color_layout.setContentsMargins(0, 0, 0, 0)
         self.mask_color_btn = QPushButton(color_row)
@@ -645,7 +654,7 @@ class PageNumbersPanel(QWidget):
         color_layout.addWidget(self.pick_color_btn)
         form.addRow("Colour:", color_row)
 
-        swatches = QWidget(group)
+        swatches = QWidget(page)
         swatch_layout = QHBoxLayout(swatches)
         swatch_layout.setContentsMargins(0, 0, 0, 0)
         swatch_layout.setSpacing(4)
@@ -663,7 +672,7 @@ class PageNumbersPanel(QWidget):
         form.addRow("Swatches:", swatches)
         self._update_mask_color_ui()
 
-        margins = QWidget(group)
+        margins = QWidget(page)
         grid = QGridLayout(margins)
         grid.setContentsMargins(0, 0, 0, 0)
         self.mask_left_spin = QDoubleSpinBox(margins)
@@ -684,7 +693,7 @@ class PageNumbersPanel(QWidget):
         form.addRow("Margins:", margins)
 
         self._set_mask_controls_enabled(initial.mask)
-        return group
+        return page
 
     def _build_numbering_group(self, initial: PageNumberSettings):
         group = QGroupBox("Numbering", self)
