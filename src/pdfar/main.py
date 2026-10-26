@@ -189,6 +189,12 @@ class MainWindow(QMainWindow):
         self._search_generation = 0
         self.settings = QSettings(APP_NAME, APP_NAME)
         self._ui_dark = False
+        self._start_maximized = True
+        self._was_maximized = False
+        self._geometry_timer = QTimer(self)
+        self._geometry_timer.setSingleShot(True)
+        self._geometry_timer.setInterval(500)
+        self._geometry_timer.timeout.connect(self._save_geometry)
 
         self.tabs.setDocumentMode(True)
         self.tabs.setTabsClosable(True)
@@ -588,6 +594,7 @@ class MainWindow(QMainWindow):
         if self._active_tab() is None:
             return
         self._presentation = True
+        self._was_maximized = self.isMaximized()
         self._prev_fit_mode = self.view.fit_mode
         self.view.clear_numbering_preview()
         self.toolbar.hide()
@@ -603,7 +610,10 @@ class MainWindow(QMainWindow):
 
     def _exit_presentation(self) -> None:
         self._presentation = False
-        self.showNormal()
+        if getattr(self, "_was_maximized", False):
+            self.showMaximized()
+        else:
+            self.showNormal()
         self.toolbar.show()
         self.statusBar().show()
         self.search_dock.show()
@@ -2197,9 +2207,7 @@ class MainWindow(QMainWindow):
         self._rebuild_recent_menu()
 
     def _restore_state(self) -> None:
-        geo = self.settings.value("geometry")
-        if geo is not None:
-            self.restoreGeometry(geo)
+        self._restore_geometry()
         # restore the preload memory level (Okular) and sync the toolbar combo
         lvl = self.settings.value("memory_level", "normal")
         if lvl not in MEMORY_LEVELS:
@@ -2243,9 +2251,44 @@ class MainWindow(QMainWindow):
                 self.tabs.cornerWidget().show()
         self._rebuild_recent_menu()
 
-    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+    def _restore_geometry(self) -> None:
+        """Restore the geometry saved under the maximized-by-default rule."""
+        self._start_maximized = True
+        geo = self.settings.value("geometry")
+        version = self.settings.value("geometryVersion", 0, type=int)
+        if geo is not None and version >= 2 and self.restoreGeometry(geo):
+            self._start_maximized = False
+
+    def _save_geometry(self) -> None:
+        """Persist geometry, ignoring fullscreen and mid-close states."""
+        if self.isFullScreen():
+            return
         self.settings.setValue("geometry", self.saveGeometry())
+        # Version 2 marks geometry written with the maximized-by-default
+        # behaviour; older blobs are ignored so the upgrade maximizes once.
+        self.settings.setValue("geometryVersion", 2)
+
+    def show_initial(self) -> None:
+        """Open maximized on first run, or where the user left the window."""
+        if self._start_maximized:
+            self.showMaximized()
+        else:
+            self.show()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._geometry_timer.start()
+
+    def moveEvent(self, event) -> None:  # noqa: N802
+        super().moveEvent(event)
+        self._geometry_timer.start()
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        if getattr(self, "_presentation", False):
+            self._exit_presentation()
+        self._geometry_timer.stop()
         # windowState is intentionally not saved to avoid restoring a hidden UI.
+        self._save_geometry()
         self._close_all_tabs()
         self._cancel_search()
         super().closeEvent(event)
@@ -2275,7 +2318,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     app._pdfar_i18n = i18n          # keep the translator alive
 
     win = MainWindow()
-    win.show()
+    win.show_initial()
 
     files = [a for a in argv[1:] if not a.startswith("-")]
     if files:

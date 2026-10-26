@@ -458,3 +458,68 @@ def test_memory_level_combo_applies_and_persists(qapp, sample_pdf, big_pdf):
         win.close()
         win.deleteLater()
         qapp.processEvents()
+
+
+def _keep_settings(*keys):
+    """Snapshot QSettings keys so a test can put them back afterwards."""
+    settings = QSettings(APP_NAME, APP_NAME)
+    return settings, {key: settings.value(key) for key in keys}
+
+
+def _restore_settings(settings, snapshot):
+    for key, value in snapshot.items():
+        if value is None:
+            settings.remove(key)
+        else:
+            settings.setValue(key, value)
+
+
+def test_first_launch_opens_maximized(qapp):
+    settings, snapshot = _keep_settings("geometry", "geometryVersion")
+    try:
+        settings.remove("geometry")
+        settings.remove("geometryVersion")
+        win = MainWindow()
+        try:
+            win.show_initial()
+            qapp.processEvents()
+            assert win.isMaximized()
+        finally:
+            win.close()
+            win.deleteLater()
+            qapp.processEvents()
+    finally:
+        _restore_settings(settings, snapshot)
+
+
+def test_window_position_and_size_are_remembered(qapp):
+    settings, snapshot = _keep_settings("geometry", "geometryVersion")
+    try:
+        settings.remove("geometry")
+        settings.remove("geometryVersion")
+        win = MainWindow()
+        win.showNormal()
+        win.resize(640, 520)
+        win.move(60, 70)
+        qapp.processEvents()
+        expected_size = win.size()
+        expected_pos = win.pos()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+        assert settings.value("geometryVersion", 0, type=int) >= 2
+
+        again = MainWindow()
+        assert again._start_maximized is False
+        again.show_initial()
+        qapp.processEvents()
+        try:
+            assert not again.isMaximized()
+            assert again.size() == expected_size
+            assert again.pos() == expected_pos
+        finally:
+            again.close()
+            again.deleteLater()
+            qapp.processEvents()
+    finally:
+        _restore_settings(settings, snapshot)
