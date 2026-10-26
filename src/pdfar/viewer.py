@@ -1216,13 +1216,15 @@ class PDFView(QAbstractScrollArea):
         z = self.zoom
         dw, dh = self._disp_sizes[page]
 
-        # White mask that will cover the old content, plus a dashed outline so
-        # the draggable area is visible even when masking is off.
-        pad = box.padding if settings.mask else 2.0
-        x0, y0, x1, y1 = map_rect(
-            (box.left - pad, box.top - pad,
-             box.right + pad, box.bottom + pad),
-            w0, h0, self.rotation)
+        # Mask that will cover the old content, plus a dashed outline so the
+        # draggable area is visible even when masking is off.
+        if settings.mask:
+            x0, y0, x1, y1 = box.mask_rect
+        else:
+            x0, y0, x1, y1 = (box.left - 2.0, box.top - 2.0,
+                              box.right + 2.0, box.bottom + 2.0)
+        x0, y0, x1, y1 = map_rect((x0, y0, x1, y1),
+                                  w0, h0, self.rotation)
         mask = QRectF(x + x0 * z, y + y0 * z,
                       (x1 - x0) * z, (y1 - y0) * z)
 
@@ -1230,7 +1232,7 @@ class PDFView(QAbstractScrollArea):
         painter.setClipRect(QRect(int(round(x)), int(round(y)),
                                   int(round(dw)), int(round(dh))))
         if settings.mask:
-            painter.fillRect(mask, QColor(255, 255, 255, 245))
+            painter.fillRect(mask, QColor(settings.mask_color))
         pen = QPen(QColor(220, 30, 30, 170))
         pen.setStyle(Qt.PenStyle.DashLine)
         pen.setWidthF(1.0)

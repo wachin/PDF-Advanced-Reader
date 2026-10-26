@@ -8,24 +8,29 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 import pymupdf as fitz
-from PyQt6.QtCore import QEvent, QPointF, QRect, QSize, Qt
-from PyQt6.QtGui import QColor, QMouseEvent
-from PyQt6.QtWidgets import QFileDialog, QMessageBox
+from PyQt6.QtCore import (
+    QEvent, QPoint, QPointF, QRect, QSettings, QSize, Qt,
+)
+from PyQt6.QtGui import QColor, QImage, QMouseEvent
+from PyQt6.QtWidgets import QColorDialog, QFileDialog, QMessageBox
 
 from conftest import build_sample_pdf
+from pdfar import APP_NAME
 from pdfar.geometry import map_point
 from pdfar.main import MainWindow
 from pdfar.page_numbers import (
-    PageNumbersPanel, PageNumberSettings, box_to_settings, layout_number,
-    number_box, number_text, page_range, points_to_unit, stamp_copy,
-    unit_to_points,
+    MASK_COLORS, PageNumbersPanel, PageNumberSettings, ScreenColorPicker,
+    box_to_settings, layout_number, number_box, number_text, page_range,
+    points_to_unit, sample_screen_color, stamp_copy, unit_to_points,
 )
 
 
 def _settings(**overrides) -> PageNumberSettings:
     values = dict(position="bottom-center", format="number/total",
                   font_family="helv", font_size=12, margin_x=20,
-                  margin_y=20, start_page=1, end_page=0, start_number=1)
+                  margin_y=20, start_page=1, end_page=0, start_number=1,
+                  mask_left=4, mask_right=4, mask_top=4, mask_bottom=4,
+                  mask_color="#ffffff")
     values.update(overrides)
     return PageNumberSettings(**values)
 
@@ -225,6 +230,57 @@ def test_stamp_draws_mask_behind_the_number(tmp_path):
         assert _white_drawings(out[0]) == []
 
 
+def test_mask_margins_expand_each_side():
+    settings = _settings(mask=True, mask_left=2, mask_right=6,
+                         mask_top=10, mask_bottom=1)
+    box = number_box(settings, 200, 300, 1, 1)
+    x0, y0, x1, y1 = box.mask_rect
+    assert x0 == pytest.approx(box.left - 2)
+    assert x1 == pytest.approx(box.right + 6)
+    assert y0 == pytest.approx(box.top - 10)
+    assert y1 == pytest.approx(box.bottom + 1)
+
+    plain = number_box(_settings(mask=False, mask_left=30), 200, 300, 1, 1)
+    assert plain.mask_rect == (plain.left, plain.top,
+                               plain.right, plain.bottom)
+
+
+def test_stamp_uses_per_side_mask_margins(tmp_path):
+    src_path = build_sample_pdf(tmp_path / "doc.pdf", pages=1,
+                                width=200, height=300)
+    settings = _settings(format="number", margin_x=40, margin_y=40,
+                         mask_left=1, mask_right=9, mask_top=3,
+                         mask_bottom=15)
+    with fitz.open(src_path) as src:
+        stamped = tmp_path / "masked-sides.pdf"
+        stamp_copy(src, str(stamped), settings)
+
+    with fitz.open(stamped) as out:
+        masks = _white_drawings(out[0])
+    assert len(masks) == 1
+    expected = fitz.Rect(number_box(settings, 200, 300, 1, 1).mask_rect)
+    assert masks[0].x0 == pytest.approx(expected.x0, abs=0.02)
+    assert masks[0].y0 == pytest.approx(expected.y0, abs=0.02)
+    assert masks[0].x1 == pytest.approx(expected.x1, abs=0.02)
+    assert masks[0].y1 == pytest.approx(expected.y1, abs=0.02)
+
+
+def test_stamp_uses_the_chosen_mask_colour(tmp_path):
+    src_path = build_sample_pdf(tmp_path / "doc.pdf", pages=1,
+                                width=200, height=300)
+    settings = _settings(format="number", margin_x=40, margin_y=40,
+                         mask_color="#00ff80")
+    with fitz.open(src_path) as src:
+        stamped = tmp_path / "masked-colour.pdf"
+        stamp_copy(src, str(stamped), settings)
+
+    with fitz.open(stamped) as out:
+        fills = [drawing["fill"] for drawing in out[0].get_drawings()
+                 if drawing.get("fill")]
+    rounded = [tuple(round(channel, 2) for channel in fill) for fill in fills]
+    assert (0.0, 1.0, 0.5) in rounded
+
+
 def test_box_to_settings_moves_and_reanchors():
     settings = _settings(position="bottom-center", margin_x=20, margin_y=20)
     box = number_box(settings, 200, 300, 1, 1)
@@ -280,19 +336,26 @@ def test_panel_emits_settings_and_keeps_range_ordered(qapp):
 
 def test_panel_unit_switch_converts_offsets(qapp):
     panel = PageNumbersPanel(
-        1, _settings(margin_x=72, margin_y=36, mask_padding=6))
+        1, _settings(margin_x=72, margin_y=36, mask_left=6, mask_right=12,
+                     mask_top=18, mask_bottom=24))
     assert panel.margin_x_spin.value() == pytest.approx(72)
     assert panel.margin_x_spin.suffix().strip() == "pt"
+    assert panel.mask_left_spin.value() == pytest.approx(6)
 
     panel.unit_combo.setCurrentIndex(panel.unit_combo.findData("cm"))
 
     assert panel.margin_x_spin.suffix().strip() == "cm"
     assert panel.margin_x_spin.value() == pytest.approx(2.54, abs=0.01)
+    assert panel.mask_bottom_spin.suffix().strip() == "cm"
+    assert panel.mask_bottom_spin.value() == pytest.approx(0.85, abs=0.01)
     settings = panel.settings()
     assert settings.unit == "cm"
     assert settings.margin_x == pytest.approx(72)
     assert settings.margin_y == pytest.approx(36)
-    assert settings.mask_padding == pytest.approx(6)
+    assert settings.mask_left == pytest.approx(6)
+    assert settings.mask_right == pytest.approx(12)
+    assert settings.mask_top == pytest.approx(18)
+    assert settings.mask_bottom == pytest.approx(24)
 
 
 def test_panel_mask_toggle_and_page_count(qapp):
@@ -300,7 +363,11 @@ def test_panel_mask_toggle_and_page_count(qapp):
     assert not panel.save_btn.isEnabled()
 
     panel.mask_check.setChecked(False)
-    assert not panel.mask_padding_spin.isEnabled()
+    for widget in (panel.mask_left_spin, panel.mask_right_spin,
+                   panel.mask_top_spin, panel.mask_bottom_spin,
+                   panel.mask_color_btn, panel.pick_color_btn,
+                   *panel.swatch_buttons):
+        assert not widget.isEnabled()
     assert panel.settings().mask is False
 
     panel.set_page_count(7)
@@ -308,6 +375,66 @@ def test_panel_mask_toggle_and_page_count(qapp):
     assert panel.last_page_spin.maximum() == 7
     panel.set_page_count(0)
     assert not panel.save_btn.isEnabled()
+
+
+def test_panel_palette_and_custom_mask_colour(qapp, monkeypatch):
+    panel = PageNumbersPanel(1, _settings())
+    emitted = []
+    panel.settings_changed.connect(emitted.append)
+
+    panel.swatch_buttons[2].click()
+    expected = MASK_COLORS[2][1]
+    assert panel.settings().mask_color == expected
+    assert expected in panel.mask_color_btn.text()
+    assert emitted[-1].mask_color == expected
+    assert "2px solid #0078d7" in panel.swatch_buttons[2].styleSheet()
+    assert "2px solid #0078d7" not in panel.swatch_buttons[0].styleSheet()
+
+    monkeypatch.setattr(
+        QColorDialog, "getColor",
+        staticmethod(lambda *args, **kwargs: QColor("#123456")))
+    panel.mask_color_btn.click()
+    assert panel.settings().mask_color == "#123456"
+    assert emitted[-1].mask_color == "#123456"
+
+
+def test_sample_screen_color_maps_scaled_points(qapp):
+    image = QImage(4, 4, QImage.Format.Format_RGB32)
+    image.fill(QColor("#ffffff"))
+    image.setPixelColor(2, 3, QColor("#336699"))
+
+    assert sample_screen_color(
+        image, QPoint(5, 8), QSize(10, 10)) == QColor("#336699")
+    assert not sample_screen_color(
+        image, QPoint(-1, 0), QSize(10, 10)).isValid()
+
+
+def test_screen_picker_emits_the_sampled_pixel(qapp):
+    picker = ScreenColorPicker()
+    picker.resize(10, 10)
+    image = QImage(4, 4, QImage.Format.Format_RGB32)
+    image.fill(QColor("#123456"))
+    picker._image = image
+    picked = []
+    picker.color_picked.connect(picked.append)
+
+    event = QMouseEvent(
+        QEvent.Type.MouseButtonPress, QPointF(5, 5), QPointF(5, 5),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier)
+    picker.mousePressEvent(event)
+
+    assert picked == ["#123456"]
+    picker.deleteLater()
+
+
+def test_pick_button_opens_the_screen_picker(qapp, monkeypatch):
+    started = []
+    monkeypatch.setattr(ScreenColorPicker, "start",
+                        lambda self: started.append(self))
+    panel = PageNumbersPanel(1, _settings())
+    panel.pick_color_btn.click()
+    assert len(started) == 1
 
 
 def test_panel_end_page_follows_the_document_until_edited(qapp):
@@ -344,9 +471,23 @@ def test_settings_roundtrip(qapp):
         position="top-left", format="page-number/total",
         font_family="tiro", font_size=17, margin_x=12, margin_y=34,
         start_page=2, end_page=7, start_number=3, unit="cm",
-        mask=False, mask_padding=9)
+        mask=False, mask_left=9, mask_right=1, mask_top=2,
+        mask_bottom=5, mask_color="#c0ffee")
     saved.save()
     assert PageNumberSettings.load() == saved
+
+
+def test_legacy_mask_padding_is_used_for_every_side(qapp):
+    settings = QSettings(APP_NAME, APP_NAME)
+    settings.remove("pageNumbers")
+    settings.setValue("pageNumbers/maskPadding", 7.5)
+    try:
+        loaded = PageNumberSettings.load()
+        assert (loaded.mask_left, loaded.mask_right, loaded.mask_top,
+                loaded.mask_bottom) == (7.5, 7.5, 7.5, 7.5)
+        assert loaded.mask_color == "#ffffff"
+    finally:
+        settings.remove("pageNumbers")
 
 
 @pytest.fixture
@@ -400,6 +541,32 @@ def test_red_preview_is_painted_and_cleared(win, qapp, tmp_path):
     qapp.processEvents()
     assert _red_pixels(_grab_first_page(view)) == 0
     assert view._numbering_preview is None
+
+
+def _green_pixels(image) -> int:
+    count = 0
+    for y in range(image.height()):
+        for x in range(image.width()):
+            color = image.pixelColor(x, y)
+            if color.green() > 200 and color.red() < 100 and color.blue() < 100:
+                count += 1
+    return count
+
+
+def test_preview_uses_the_chosen_mask_colour(win, qapp, tmp_path):
+    win.open_document(build_sample_pdf(tmp_path / "doc.pdf", pages=2))
+    view = win.view
+    qapp.processEvents()
+    assert _green_pixels(_grab_first_page(view)) == 0
+
+    view.set_numbering_preview(_settings(
+        font_size=30, margin_x=10, margin_y=10, format="number",
+        mask_left=10, mask_right=10, mask_top=10, mask_bottom=10,
+        mask_color="#00ff00"))
+    qapp.processEvents()
+    assert _green_pixels(_grab_first_page(view)) > 10
+
+    view.clear_numbering_preview()
 
 
 def test_right_dock_has_two_icon_only_tabs(win):

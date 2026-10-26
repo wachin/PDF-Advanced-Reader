@@ -1252,6 +1252,42 @@ geometry as the exported copy.
 
 ---
 
+### Numbering Mask Customization — [x] Implemented
+
+**Completed**: 2026-10-25
+
+**Scope**: Let the mask behind each page number grow independently on every
+side (for larger old numbers) and take any colour, including presets, a colour
+dialog, and an on-screen eyedropper for tinted paper.
+
+**Status**: DONE
+
+**Files changed**:
+
+- `src/pdfar/page_numbers.py` — per-side mask pads and `mask_color` in
+  `PageNumberSettings` (with legacy `maskPadding` migration), `mask_rect`,
+  `mask_rgb`, `normalize_color`, preset swatches, `QColorDialog`, and the
+  `ScreenColorPicker` overlay plus its `sample_screen_color` mapping.
+- `src/pdfar/viewer.py` — the preview fills `box.mask_rect` with the chosen
+  colour instead of a fixed white.
+- `tests/test_page_numbers.py` — per-side growth/clamping, stamp and preview
+  colour, palette/custom selection, eyedropper mapping and buttons.
+- `README.md`, `docs/en/developers/ui/page-numbering.md`, `ROADMAP.md`.
+
+**Tests**: `PYTHONPATH=src python3 -m pytest tests/ -q` — **240 passed**.
+
+**Architecture notes**:
+
+1. Mask pads stay in PDF points like the number offsets, so unit switches do
+   not drift.
+2. Drag clamping measures the padded box, so a wide mask never pushes the
+   glyphs outside the page.
+3. The eyedropper captures the screen before showing its overlay; otherwise
+   the overlay itself would be sampled.
+4. Exported masks are opaque: the point is to hide the old number exactly.
+
+---
+
 # 17. RELEASE CRITERIA
 
 A version must not be declared stable solely because it compiles.

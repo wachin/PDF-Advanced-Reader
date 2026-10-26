@@ -16,8 +16,16 @@ Both dock tabs are icon-only; their labels appear on hover.
   the pages selected for numbering.
 - The first printed number is independent of the first page, so a cover can
   be skipped while numbering still starts at 1.
-- The preview is drawn on every selected page: a white mask, a dashed red
-  outline and the red number. Dragging the number updates the offsets live.
+- The mask grows independently on each side (`mask_left`, `mask_right`,
+  `mask_top`, `mask_bottom`), so it can cover an old number that is wider or
+  taller than the new one.
+- The mask colour is any `#rrggbb` value. The panel offers preset swatches, a
+  `QColorDialog`, and an on-screen eyedropper (`ScreenColorPicker`) that grabs
+  the screen before showing a full-screen overlay, so a click samples the
+  actual page background.
+- The preview is drawn on every selected page: a mask in the chosen colour, a
+  dashed red outline and the red number. Dragging the number updates the
+  offsets live.
 - `Save Copy…` writes a new `name-numbered.pdf`; the open file is never
   overwritten.
 
@@ -27,12 +35,15 @@ Both dock tabs are icon-only; their labels appear on hover.
 
 | Piece | Responsibility |
 |---|---|
-| `PageNumberSettings` | Dataclass persisted in `QSettings` (`pageNumbers/*`). All lengths are PDF points. |
+| `PageNumberSettings` | Dataclass persisted in `QSettings` (`pageNumbers/*`). All lengths are PDF points; `mask_*` pads and `mask_color` are stored per side/colour. Legacy `maskPadding` seeds every side. |
 | `UNITS`, `unit_to_points`, `points_to_unit` | UI ↔ point conversion. |
 | `page_range` | Inclusive 0-based page range, clamped to the document. |
 | `layout_number` / `number_box` | Text baseline and glyph/mask geometry in display space. |
 | `box_to_settings` | Drag result → new offsets; clamps inside the page and re-anchors a centred number to the nearest left/right edge. |
 | `stamp_copy` | Non-destructive export. |
+| `mask_rgb` | Hex mask colour → `draw_rect(fill=…)` floats in 0–1. |
+| `sample_screen_color` | Maps an overlay point back to the captured screen pixel, rejecting out-of-bounds positions. |
+| `ScreenColorPicker` | Full-screen eyedropper; captures first, emits `color_picked(hex)`, closes on click or `Esc`. |
 | `PageNumbersPanel` | Embedded controls, `settings_changed` and `save_requested` signals. |
 | `preview_font` | Maps base-14 families to Qt families for the preview. |
 
@@ -43,9 +54,9 @@ switches between mm/cm/in, whose fields are rounded for display.
 ### `viewer.py`
 
 - `set_numbering_preview(settings)` enables the overlay; `None` clears it.
-- `_paint_numbering_preview` maps the mask through `map_rect` and draws the
-  white fill, dashed outline and red text after annotations, hits and
-  selection.
+- `_paint_numbering_preview` maps `NumberBox.mask_rect` through `map_rect` and
+  draws the configured fill colour, dashed outline and red text after
+  annotations, hits and selection.
 - `_numbering_hit_at` maps the pointer back to page display space with
   `unmap_point` and hit-tests the mask.
 - While dragging, the widget delta is divided by the zoom and converted with
@@ -92,6 +103,9 @@ with `os.replace`.
 - all formats and layout anchors;
 - unit conversions and exact point persistence across unit switches;
 - start/end semantics, including “end = last page”;
+- per-side mask growth, legacy `maskPadding` migration, mask colour export and
+  the live preview colour;
+- palette/custom colour selection, screen-pixel mapping and the eyedropper;
 - mask export and mask-less export;
 - drag math, clamping and centre re-anchoring;
 - stamping with `/Rotate` 0/90/180/270, CropBox offsets and encrypted PDFs;
