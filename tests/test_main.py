@@ -9,7 +9,9 @@ import pytest
 
 from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QLabel, QMessageBox, QToolButton, QToolTip
+from PyQt6.QtWidgets import (
+    QCheckBox, QDialogButtonBox, QLabel, QMessageBox, QToolButton, QToolTip,
+)
 
 from pdfar import APP_NAME, __version__
 from pdfar.main import MainWindow
@@ -475,10 +477,10 @@ def _restore_settings(settings, snapshot):
 
 
 def test_first_launch_opens_maximized(qapp):
-    settings, snapshot = _keep_settings("geometry", "geometryVersion")
+    settings, snapshot = _keep_settings("geometry", "window_maximized")
     try:
         settings.remove("geometry")
-        settings.remove("geometryVersion")
+        settings.remove("window_maximized")
         win = MainWindow()
         try:
             win.show_initial()
@@ -493,10 +495,10 @@ def test_first_launch_opens_maximized(qapp):
 
 
 def test_window_position_and_size_are_remembered(qapp):
-    settings, snapshot = _keep_settings("geometry", "geometryVersion")
+    settings, snapshot = _keep_settings("geometry", "window_maximized")
     try:
         settings.remove("geometry")
-        settings.remove("geometryVersion")
+        settings.setValue("window_maximized", False)
         win = MainWindow()
         win.showNormal()
         win.resize(640, 520)
@@ -507,7 +509,6 @@ def test_window_position_and_size_are_remembered(qapp):
         win.close()
         win.deleteLater()
         qapp.processEvents()
-        assert settings.value("geometryVersion", 0, type=int) >= 2
 
         again = MainWindow()
         assert again._start_maximized is False
@@ -522,4 +523,76 @@ def test_window_position_and_size_are_remembered(qapp):
             again.deleteLater()
             qapp.processEvents()
     finally:
+        _restore_settings(settings, snapshot)
+
+
+def test_unmaximized_startup_undoes_a_saved_maximized_state(qapp):
+    settings, snapshot = _keep_settings("geometry", "window_maximized")
+    try:
+        settings.remove("geometry")
+        settings.setValue("window_maximized", True)
+        win = MainWindow()
+        win.showNormal()
+        win.resize(640, 520)
+        win.move(60, 70)
+        qapp.processEvents()
+        expected_size = win.size()
+        expected_pos = win.pos()
+        win.showMaximized()
+        qapp.processEvents()
+        assert win.isMaximized()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+        settings.setValue("window_maximized", False)
+        again = MainWindow()
+        again.show_initial()
+        qapp.processEvents()
+        try:
+            assert not again.isMaximized()
+            assert again.size() == expected_size
+            assert again.pos() == expected_pos
+        finally:
+            again.close()
+            again.deleteLater()
+            qapp.processEvents()
+    finally:
+        _restore_settings(settings, snapshot)
+
+
+def test_settings_dialog_controls_maximized_startup(qapp):
+    settings, snapshot = _keep_settings("window_maximized")
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        settings.setValue("window_maximized", True)
+        win.showMaximized()
+        qapp.processEvents()
+        assert win.isMaximized()
+
+        dlg = win._build_settings_dialog()
+        box = dlg.findChild(QCheckBox, "windowStartMaximized")
+        assert box is not None and box.isChecked()
+        box.setChecked(False)
+        dlg.findChild(QDialogButtonBox).button(
+            QDialogButtonBox.StandardButton.Ok).click()
+        qapp.processEvents()
+        assert settings.value("window_maximized", True, type=bool) is False
+        assert not win.isMaximized()
+
+        dlg = win._build_settings_dialog()
+        box = dlg.findChild(QCheckBox, "windowStartMaximized")
+        assert box is not None and not box.isChecked()
+        box.setChecked(True)
+        dlg.findChild(QDialogButtonBox).button(
+            QDialogButtonBox.StandardButton.Ok).click()
+        qapp.processEvents()
+        assert settings.value("window_maximized", True, type=bool) is True
+        assert win.isMaximized()
+    finally:
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
         _restore_settings(settings, snapshot)

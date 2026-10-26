@@ -407,7 +407,8 @@ class MainWindow(QMainWindow):
         # Settings and Help menu actions
         self.act_settings = QAction("Settings…", self)
         self.act_settings.setShortcut("Ctrl+,")
-        self.act_settings.setToolTip("Configure thumbnail appearance (Ctrl+,)")
+        self.act_settings.setToolTip(
+            "Configure thumbnails and window startup (Ctrl+,)")
         self.act_settings.triggered.connect(self._show_settings)
 
         self.act_about = QAction("About", self)
@@ -1087,6 +1088,22 @@ class MainWindow(QMainWindow):
         form.addRow("Shadow:", shadow)
 
         layout.addWidget(group)
+
+        window_group = QGroupBox("Window", dlg)
+        window_form = QFormLayout(window_group)
+        start_maximized = QCheckBox("Open the window maximized", window_group)
+        start_maximized.setObjectName("windowStartMaximized")
+        start_maximized.setChecked(
+            self.settings.value("window_maximized", True, type=bool))
+        window_form.addRow("Startup:", start_maximized)
+        remember = QLabel(
+            "When this is off, PDFAR reopens at the size and position you "
+            "last used. Resize or move the window to change them.",
+            window_group)
+        remember.setWordWrap(True)
+        window_form.addRow(remember)
+        layout.addWidget(window_group)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel,
@@ -1101,6 +1118,7 @@ class MainWindow(QMainWindow):
             )
             settings.save()
             self._apply_thumbnail_settings(settings)
+            self._apply_window_preference(start_maximized.isChecked())
             dlg.accept()
 
         buttons.accepted.connect(apply)
@@ -2252,28 +2270,39 @@ class MainWindow(QMainWindow):
         self._rebuild_recent_menu()
 
     def _restore_geometry(self) -> None:
-        """Restore the geometry saved under the maximized-by-default rule."""
-        self._start_maximized = True
+        """Restore the saved startup mode and the remembered geometry."""
+        self._start_maximized = self.settings.value(
+            "window_maximized", True, type=bool)
         geo = self.settings.value("geometry")
-        version = self.settings.value("geometryVersion", 0, type=int)
-        if geo is not None and version >= 2 and self.restoreGeometry(geo):
-            self._start_maximized = False
+        if geo is not None:
+            self.restoreGeometry(geo)
 
     def _save_geometry(self) -> None:
         """Persist geometry, ignoring fullscreen and mid-close states."""
         if self.isFullScreen():
             return
         self.settings.setValue("geometry", self.saveGeometry())
-        # Version 2 marks geometry written with the maximized-by-default
-        # behaviour; older blobs are ignored so the upgrade maximizes once.
-        self.settings.setValue("geometryVersion", 2)
 
     def show_initial(self) -> None:
-        """Open maximized on first run, or where the user left the window."""
+        """Open maximized, or at the remembered size and position."""
         if self._start_maximized:
             self.showMaximized()
         else:
             self.show()
+            # restoreGeometry() also restores a saved maximized state.
+            if self.isMaximized():
+                self.showNormal()
+
+    def _apply_window_preference(self, maximized: bool) -> None:
+        """Persist the startup preference and apply it to the live window."""
+        self._start_maximized = maximized
+        self.settings.setValue("window_maximized", maximized)
+        if getattr(self, "_presentation", False):
+            return
+        if maximized:
+            self.showMaximized()
+        elif self.isMaximized() or self.isFullScreen():
+            self.showNormal()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
