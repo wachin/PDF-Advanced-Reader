@@ -207,6 +207,7 @@ class PDFView(QAbstractScrollArea):
         # search
         self._hit_rects: Dict[int, List[Tuple[float, float, float, float]]] = {}
         self._hit_seq: List[Tuple[int, int]] = []
+        self._hit_flat: List[Tuple[int, Tuple[float, float, float, float]]] = []
         self._hit_cur = -1
 
         self._errors: Dict[int, str] = {}
@@ -1450,14 +1451,34 @@ class PDFView(QAbstractScrollArea):
             return flat[self._hit_cur]
         return None
 
+    def first_hit_index(self, page: int) -> int:
+        """Return the flat hit index of *page*'s first match, or -1."""
+        for index, (hit_page, _rect) in enumerate(self._hit_flat):
+            if hit_page == page:
+                return index
+        return -1
+
+    def hit_page(self, index: int) -> int:
+        """Return the page of flat hit *index*, or -1 when out of range."""
+        if 0 <= index < len(self._hit_flat):
+            return self._hit_flat[index][0]
+        return -1
+
     def goto_hit(self, step: int = 1) -> bool:
-        flat = getattr(self, "_hit_flat", [])
+        flat = self._hit_flat
         if not flat:
             return False
-        self._hit_cur = (self._hit_cur + step) % len(flat)
-        page, rect = flat[self._hit_cur]
+        return self.goto_hit_index((self._hit_cur + step) % len(flat))
+
+    def goto_hit_index(self, index: int) -> bool:
+        """Jump to an absolute hit index and make it the current match."""
+        flat = self._hit_flat
+        if not 0 <= index < len(flat):
+            return False
+        self._hit_cur = index
+        page, rect = flat[index]
         self.scroll_to_rect(page, rect)
-        self.hit_changed.emit(self._hit_cur + 1, len(flat))
+        self.hit_changed.emit(index + 1, len(flat))
         self.viewport().update()
         return True
 

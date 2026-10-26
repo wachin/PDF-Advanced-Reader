@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import QLabel, QMessageBox, QToolButton
 
 from pdfar import APP_NAME, __version__
 from pdfar.main import MainWindow
+from pdfar.search import SearchHit
 
 
 @pytest.fixture(autouse=True)
@@ -122,6 +123,75 @@ def test_search_through_the_dock(qapp, sample_pdf):
         assert win.results.count() == 2          # pages 2 and 3 of the sample
         assert win.view._hit_flat, "search highlights should be set on the view"
         assert win.hit_label.text().startswith("Hit")
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_result_click_jumps_to_that_pages_first_hit(qapp, sample_pdf):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        assert win.open_document(sample_pdf) is True
+        win.query_edit.setText("alpha beta")
+        win.mode.setCurrentText("AND")
+        win.start_search()
+
+        assert wait_until(qapp, lambda: win.search_thread is not None
+                          and not win.search_thread.isRunning())
+        assert win.results.count() == 2
+        assert win.view.current_page == 1
+
+        first_index = win.view.first_hit_index(2)
+        win._on_result_clicked(win.results.item(1))
+
+        assert win.view.current_page == 2
+        assert win.hit_label.text() == (
+            f"Hit {first_index + 1} / {len(win.view._hit_flat)}")
+        assert win.results.currentRow() == 1
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_invalid_regex_reports_error(qapp, sample_pdf):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        assert win.open_document(sample_pdf) is True
+        win.query_edit.setText("[invalid")
+        win.mode.setCurrentText("REGEX")
+        win.start_search()
+
+        assert "Invalid regex" in win.hit_label.text()
+        assert win.results.count() == 0
+        assert win.view._hit_flat == []
+        assert win.search_thread is None or not win.search_thread.isRunning()
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_stale_search_results_are_ignored(qapp, sample_pdf):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        assert win.open_document(sample_pdf) is True
+        win._search_generation = 7
+        win._on_search_done(
+            [SearchHit(page=0, snippet="stale", rects=[(0, 0, 1, 1)])], 6)
+
+        assert win.results.count() == 0
+        assert win.view._hit_flat == []
     finally:
         win._close_document()
         win.close()

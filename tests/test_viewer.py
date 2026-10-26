@@ -389,6 +389,31 @@ def test_search_hits_match_rendered_content(qapp, sample_pdf):
         qapp.processEvents()
 
 
+def test_goto_hit_index_selects_exact_match(qapp, sample_pdf):
+    view = PDFView(sample_pdf)
+    view.resize(600, 400)
+    view.show()
+    try:
+        hits = _search(sample_pdf, SearchParams("alpha beta", mode="AND"))
+        view.set_search_hits(hits)
+        index = view.first_hit_index(2)
+        assert index > 0, "page 2's first hit must not be the global first hit"
+        emitted = []
+        view.hit_changed.connect(lambda current, total: emitted.append((current, total)))
+
+        assert view.goto_hit_index(index) is True
+        assert view.current_page == 2
+        assert emitted[-1] == (index + 1, len(view._hit_flat))
+        assert view.hit_page(index) == 2
+        assert view.hit_page(-1) == -1
+        assert view.goto_hit_index(-1) is False
+        assert view.goto_hit_index(len(view._hit_flat)) is False
+    finally:
+        view.shutdown()
+        view.deleteLater()
+        qapp.processEvents()
+
+
 # ------------------------------------------------------------- navigation
 def test_goto_page_updates_current_page(qapp, sample_pdf):
     view = PDFView(sample_pdf)

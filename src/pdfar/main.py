@@ -33,7 +33,9 @@ from .page_numbers import (
     EraseSettings, PageNumbersPanel, PageNumberSettings, erase_copy,
     erased_copy_path, numbered_copy_path, stamp_copy,
 )
-from .search import SearchParams, SearchWorker, normalize_space
+from .search import (
+    SearchParams, SearchWorker, compile_regex, normalize_space,
+)
 from .sidebar import (
     Sidebar, ThumbnailSettings, THUMB_MAX_WIDTH, THUMB_MIN_WIDTH,
     TAB_ATTACHMENTS,
@@ -69,6 +71,7 @@ class MainWindow(QMainWindow):
         self.ctrl_wheel_step = True
         self.search_thread: Optional[QThread] = None
         self.search_worker: Optional[SearchWorker] = None
+        self._search_generation = 0
         self.settings = QSettings(APP_NAME, APP_NAME)
         self._ui_dark = False
 
@@ -554,6 +557,7 @@ class MainWindow(QMainWindow):
         v.addWidget(self.results, 1)
 
         self.hit_label = QLabel("")
+        self.hit_label.setWordWrap(True)
         v.addWidget(self.hit_label)
 
         self.page_numbers_panel = PageNumbersPanel(
@@ -1669,6 +1673,7 @@ class MainWindow(QMainWindow):
         self._update_zoom_label(view)
         self._apply_numbering_preview()
         # search results belong to the previous document
+        self._cancel_search()
         self.results.clear()
         self.hit_label.setText("")
         self.setWindowTitle(f"{os.path.basename(tab.doc_path)} — {APP_NAME}")
@@ -1718,6 +1723,7 @@ class MainWindow(QMainWindow):
             self._enter_empty_state()
 
     def _enter_empty_state(self) -> None:
+        self._cancel_search()
         self.page_spin.setMaximum(1)
         self.page_spin.setValue(1)
         self.page_label.setText("/ 0")
@@ -1911,6 +1917,26 @@ class MainWindow(QMainWindow):
         self.query_edit.setFocus()
         self.query_edit.selectAll()
 
+    def _cancel_search(self) -> None:
+        """Invalidate pending results and stop the current worker."""
+        self._search_generation += 1
+        worker = self.search_worker
+        if worker is not None:
+            worker.cancel()
+        thread = self.search_thread
+        if thread is not None and thread.isRunning():
+            thread.quit()
+            thread.wait(1000)
+
+    def _show_search_error(self, message: str) -> None:
+        self.btn_search.setEnabled(True)
+        self.search_progress.setVisible(False)
+        self.results.clear()
+        if self.view is not None:
+            self.view.clear_search()
+        self.hit_label.setText(message)
+        self.status_left.setText(message)
+
     def start_search(self) -> None:
         if not self.view or not self.doc_path:
             return
@@ -1927,32 +1953,51 @@ class MainWindow(QMainWindow):
             max_regex_hits=10000,
         )
 
+        if mode == "REGEX":
+            try:
+                compile_regex(params)
+            except ValueError as exc:
+                self._cancel_search()
+                self._show_search_error(str(exc))
+                return
+
+        self._cancel_search()
+        generation = self._search_generation
+
         self.results.clear()
+        self.hit_label.setText("")
+        if self.view is not None:
+            self.view.clear_search()
         self.btn_search.setEnabled(False)
         self.search_progress.setVisible(True)
         self.search_progress.setRange(0, 0)
-
-        if self.search_thread is not None and self.search_thread.isRunning():
-            self.search_thread.quit()
-            self.search_thread.wait(1000)
 
         self.search_thread = QThread(self)
         self.search_worker = SearchWorker(self.doc_path, params)
         self.search_worker.moveToThread(self.search_thread)
         self.search_thread.started.connect(self.search_worker.run)
-        self.search_worker.progress.connect(self._on_search_progress)
+        self.search_worker.progress.connect(
+            lambda done, total, g=generation: self._on_search_progress(done, total, g))
         # bound method of a QObject => queued to the GUI thread automatically
-        self.search_worker.done.connect(self._on_search_done)
+        self.search_worker.done.connect(
+            lambda hits, g=generation: self._on_search_done(hits, g))
         self.search_worker.done.connect(self.search_thread.quit)
+        self.search_worker.failed.connect(
+            lambda message, g=generation: self._on_search_failed(message, g))
+        self.search_worker.failed.connect(self.search_thread.quit)
         self.search_thread.start()
         # search hits belong to the document they were run on
         self._search_tab = self._active_tab()
 
-    def _on_search_progress(self, done: int, total: int) -> None:
+    def _on_search_progress(self, done: int, total: int, generation: int) -> None:
+        if generation != self._search_generation:
+            return
         self.search_progress.setRange(0, max(1, total))
         self.search_progress.setValue(done)
 
-    def _on_search_done(self, hits: list) -> None:
+    def _on_search_done(self, hits: list, generation: int) -> None:
+        if generation != self._search_generation:
+            return
         self.btn_search.setEnabled(True)
         self.search_progress.setVisible(False)
 
@@ -1971,11 +2016,19 @@ class MainWindow(QMainWindow):
                 self._search_tab.view.clear_search()
                 self.status_left.setText("No results")
 
+    def _on_search_failed(self, message: str, generation: int) -> None:
+        if generation != self._search_generation:
+            return
+        self._show_search_error(message)
+
     def _on_result_clicked(self, item: QListWidgetItem) -> None:
         page = item.data(Qt.ItemDataRole.UserRole)
         if isinstance(page, int) and self.view:
-            self.view.goto_page(page)
-            self._step_hit(+1)
+            index = self.view.first_hit_index(page)
+            if index >= 0:
+                self.view.goto_hit_index(index)
+            else:
+                self.view.goto_page(page)
 
     def _step_hit(self, step: int) -> None:
         if self.view:
@@ -1983,6 +2036,17 @@ class MainWindow(QMainWindow):
 
     def _on_hit_changed(self, current: int, total: int) -> None:
         self.hit_label.setText(f"Hit {current} / {total}" if total else "")
+        if not current or not self.view:
+            return
+        page = self.view.hit_page(current - 1)
+        if page < 0:
+            return
+        for row in range(self.results.count()):
+            item = self.results.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) == page:
+                if self.results.currentRow() != row:
+                    self.results.setCurrentRow(row)
+                break
 
     # ------------------------------------------------------------- misc
     def _toggle_sidebar(self, checked: bool) -> None:
@@ -2066,9 +2130,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("geometry", self.saveGeometry())
         # windowState is intentionally not saved to avoid restoring a hidden UI.
         self._close_all_tabs()
-        if self.search_thread is not None and self.search_thread.isRunning():
-            self.search_thread.quit()
-            self.search_thread.wait(2000)
+        self._cancel_search()
         super().closeEvent(event)
 
     # ------------------------------------------------------- drag & drop

@@ -8,7 +8,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from pdfar.search import (
-    SearchHit, SearchParams, SearchWorker, make_snippet, normalize_space, page_matches,
+    SearchHit, SearchParams, SearchWorker, compile_regex, make_snippet,
+    normalize_space, page_matches,
 )
 from PyQt6.QtWidgets import QApplication
 
@@ -108,6 +109,11 @@ def test_regex_invalid_pattern():
     assert page_matches(text, SearchParams(r"[invalid", mode="REGEX"), ["[invalid"]) is False
 
 
+def test_compile_regex_rejects_invalid_pattern():
+    with pytest.raises(ValueError, match="Invalid regex"):
+        compile_regex(SearchParams(r"[invalid", mode="REGEX"))
+
+
 def test_regex_worker(sample_pdf):
     """Test regex search worker."""
     hits = []
@@ -133,3 +139,44 @@ def test_regex_worker(sample_pdf):
     # Page 0 has "Hello PDFAR world" instead
     assert [h.page for h in hits] == [1, 2]
     assert all(isinstance(h, SearchHit) for h in hits)
+
+
+def test_worker_cancel_discards_results(sample_pdf):
+    worker = SearchWorker(sample_pdf, SearchParams("alpha beta", mode="AND"))
+    hits, progress = [], []
+
+    def on_progress(done, total):
+        progress.append(done)
+        worker.cancel()
+
+    worker.progress.connect(on_progress)
+    worker.done.connect(hits.extend)
+    worker.run()
+
+    assert progress, "the worker should have started scanning pages"
+    assert hits == [], "a cancelled search must not publish partial results"
+
+
+def test_worker_invalid_regex_reports_failure(sample_pdf):
+    worker = SearchWorker(sample_pdf, SearchParams(r"[invalid", mode="REGEX"))
+    errors, hits = [], []
+    worker.failed.connect(errors.append)
+    worker.done.connect(hits.extend)
+    worker.run()
+
+    assert errors and "Invalid regex" in errors[0]
+    assert hits == []
+
+
+def test_regex_timeout_reports_failure(monkeypatch, sample_pdf):
+    ticks = iter(range(0, 1000))
+    monkeypatch.setattr("pdfar.search._now", lambda: float(next(ticks)))
+    worker = SearchWorker(
+        sample_pdf, SearchParams("alpha", mode="REGEX", regex_timeout_ms=1))
+    errors, hits = [], []
+    worker.failed.connect(errors.append)
+    worker.done.connect(hits.extend)
+    worker.run()
+
+    assert errors and "timed out" in errors[0].lower()
+    assert hits == []
