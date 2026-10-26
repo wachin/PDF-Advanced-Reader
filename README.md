@@ -194,18 +194,46 @@ real publisher layouts live in `external/two-column-test-pdfs/` — see its
 
 ```bash
 sudo apt update
-sudo apt install python3-pyqt6 python3-pymupdf
+sudo apt install python3-pyqt6 python3-pymupdf fontconfig
 ```
 
 ### **Option 2: User install via pip (no virtualenv "venv" needed)**
 
 ```bash
 sudo apt update
-sudo apt install python3-pyqt6          # or: pip3 install --user PyQt6
+sudo apt install python3-pyqt6 fontconfig  # or: pip3 install --user PyQt6
 pip3 install --user pymupdf             # PyMuPDF
 ```
 
 > **Note:** `pip install --user` installs packages to `~/.local/lib/python3.x/site-packages/`, available globally for your user — **no virtualenv activation needed**. 
+
+### Windows and macOS
+
+PDFAR is developed and tested on Linux, but the runtime is pure Python and
+the PyPI wheels of Qt and PyMuPDF are available for both systems.
+
+**Windows** (Python 3.9+ from python.org, with *Add python.exe to PATH*
+enabled during installation):
+
+```powershell
+py -m pip install --user PyQt6 pymupdf
+py run.py
+```
+
+**macOS** (Python 3.9+ from python.org or Homebrew; a virtualenv avoids the
+PEP 668 *externally managed environment* error):
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install PyQt6 pymupdf
+python3 run.py
+```
+
+System-font embedding uses `fc-list` from fontconfig, which Linux desktops
+provide. On Windows and macOS the font dialog still lists and previews every
+installed family through Qt, but when no font file can be resolved, numbered
+copies fall back to a built-in face.
 
 ### Recommended fonts for page numbering (optional)
 
@@ -269,6 +297,27 @@ The program works with both the system package `python3-pymupdf` (Debian/Ubuntu 
 ```bash
 pip3 install --user .
 pdfar /path/to/file.pdf
+```
+
+### Development-only extras (not needed to run PDFAR)
+
+The application itself needs only PyQt6 and PyMuPDF. **ReportLab** is not a
+runtime dependency: `tools/demo_pdf/make_demo_pdf.py` uses it, together with
+Pillow and CairoSVG, to regenerate the bundled demo fixtures. On Debian/Ubuntu:
+
+```bash
+sudo apt install python3-reportlab python3-pil python3-cairosvg
+# equivalent pip install: reportlab pillow cairosvg
+```
+
+`librsvg2-bin` (the `rsvg-convert` binary) can replace CairoSVG for
+rasterising the SVG figures. LibreOffice is optional and only used to rebuild
+the `.ods` file attached to the demo PDF.
+
+Running the test suite needs the `test` extra:
+
+```bash
+pip3 install --user '.[test]'   # pytest, pytest-qt, pytest-cov, hypothesis, typeguard
 ```
 
 ---
