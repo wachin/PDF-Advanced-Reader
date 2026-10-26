@@ -208,9 +208,77 @@ class PageNumberSettings:
         settings.setValue("pageNumbers/maskColor", self.mask_color)
 
 
-def page_range(settings: PageNumberSettings,
-               page_count: int) -> Tuple[int, int]:
-    """Inclusive 0-based range of pages to number (empty: (0, -1))."""
+@dataclass
+class EraseSettings:
+    """Blank mask that covers old page numbers (lengths in points)."""
+
+    position: str = "top-left"
+    width: float = 150.0
+    height: float = 24.0
+    margin_x: float = 24.0
+    margin_y: float = 24.0
+    start_page: int = 1
+    end_page: int = 0
+    unit: str = "pt"
+    color: str = "#ffffff"
+
+    @classmethod
+    def load(cls) -> "EraseSettings":
+        settings = QSettings(APP_NAME, APP_NAME)
+
+        def _text(key: str, default: str, valid: set) -> str:
+            value = str(settings.value(key, default))
+            return value if value in valid else default
+
+        def _int(key: str, default: int, low: int, high: int) -> int:
+            try:
+                value = int(settings.value(key, default))
+            except (TypeError, ValueError):
+                value = default
+            return max(low, min(high, value))
+
+        def _float(key: str, default: float, low: float, high: float) -> float:
+            try:
+                value = float(settings.value(key, default))
+            except (TypeError, ValueError):
+                value = default
+            return max(low, min(high, value))
+
+        return cls(
+            position=_text("pageNumbers/erase/position", cls.position,
+                           _POSITION_KEYS),
+            width=_float("pageNumbers/erase/width", cls.width, 0,
+                         _MAX_OFFSET_POINTS),
+            height=_float("pageNumbers/erase/height", cls.height, 0,
+                          _MAX_OFFSET_POINTS),
+            margin_x=_float("pageNumbers/erase/marginX", cls.margin_x, 0,
+                            _MAX_OFFSET_POINTS),
+            margin_y=_float("pageNumbers/erase/marginY", cls.margin_y, 0,
+                            _MAX_OFFSET_POINTS),
+            start_page=_int("pageNumbers/erase/startPage", cls.start_page, 1,
+                            100000),
+            end_page=_int("pageNumbers/erase/endPage", cls.end_page, 0, 100000),
+            unit=_text("pageNumbers/erase/unit", cls.unit, _UNIT_KEYS),
+            color=normalize_color(
+                settings.value("pageNumbers/erase/color", cls.color),
+                cls.color),
+        )
+
+    def save(self) -> None:
+        settings = QSettings(APP_NAME, APP_NAME)
+        settings.setValue("pageNumbers/erase/position", self.position)
+        settings.setValue("pageNumbers/erase/width", self.width)
+        settings.setValue("pageNumbers/erase/height", self.height)
+        settings.setValue("pageNumbers/erase/marginX", self.margin_x)
+        settings.setValue("pageNumbers/erase/marginY", self.margin_y)
+        settings.setValue("pageNumbers/erase/startPage", self.start_page)
+        settings.setValue("pageNumbers/erase/endPage", self.end_page)
+        settings.setValue("pageNumbers/erase/unit", self.unit)
+        settings.setValue("pageNumbers/erase/color", self.color)
+
+
+def page_range(settings, page_count: int) -> Tuple[int, int]:
+    """Inclusive 0-based range of pages to number or erase ((0, -1) if none)."""
     if page_count <= 0:
         return (0, -1)
     first = max(1, min(int(settings.start_page), page_count))
@@ -346,6 +414,29 @@ def number_box(settings: PageNumberSettings, page_w: float, page_h: float,
                      anchor_x, alignment, *pads)
 
 
+def erase_box(settings: EraseSettings, page_w: float,
+              page_h: float) -> NumberBox:
+    """Blank mask rectangle in display space; no glyph is drawn."""
+    width = min(max(0.0, float(settings.width)), float(page_w))
+    height = min(max(0.0, float(settings.height)), float(page_h))
+    margin_x = min(max(0.0, float(settings.margin_x)),
+                   max(0.0, float(page_w) - width))
+    margin_y = min(max(0.0, float(settings.margin_y)),
+                   max(0.0, float(page_h) - height))
+    alignment = text_alignment(settings.position)
+    if alignment == "left":
+        left = margin_x
+    elif alignment == "right":
+        left = float(page_w) - margin_x - width
+    else:
+        left = (float(page_w) - width) / 2.0
+    top = margin_y if settings.position.startswith("top") \
+        else float(page_h) - margin_y - height
+    right, bottom = left + width, top + height
+    return NumberBox("", left, top, right, bottom, top, left + width / 2.0,
+                     alignment)
+
+
 def box_to_settings(settings: PageNumberSettings, page_w: float, page_h: float,
                     box: NumberBox, dx: float, dy: float) -> PageNumberSettings:
     """Move a number by ``(dx, dy)`` display points and update the offsets.
@@ -415,9 +506,14 @@ def numbered_copy_path(source_path: str) -> str:
     return f"{base}-numbered{ext or '.pdf'}"
 
 
-def stamp_copy(source, dest_path: str,
-               settings: PageNumberSettings) -> int:
-    """Write a numbered copy of ``source`` (a fitz.Document) and return pages.
+def erased_copy_path(source_path: str) -> str:
+    """Default output path: ``name-erased.pdf`` next to the source."""
+    base, ext = os.path.splitext(source_path)
+    return f"{base}-erased{ext or '.pdf'}"
+
+
+def _save_modified_copy(source, dest_path: str, modify) -> int:
+    """Apply ``modify(page, index)`` to a serialized copy and write it.
 
     The in-memory document is serialized to bytes first, so unsaved
     annotations are included.  The copy is decrypted, written atomically, and
@@ -428,6 +524,37 @@ def stamp_copy(source, dest_path: str,
     out = fitz.open(stream=data, filetype="pdf")
     tmp_path: Optional[str] = None
     try:
+        count = modify(out)
+        directory = os.path.dirname(os.path.abspath(dest_path)) or "."
+        fd, tmp_path = tempfile.mkstemp(prefix=".pdfar-numbers-",
+                                        suffix=".pdf", dir=directory)
+        os.close(fd)
+        out.save(tmp_path, garbage=3, deflate=True)
+        out.close()
+        os.replace(tmp_path, dest_path)
+        tmp_path = None
+        return count
+    finally:
+        try:
+            out.close()
+        except Exception:
+            pass
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def stamp_copy(source, dest_path: str,
+               settings: PageNumberSettings) -> int:
+    """Write a numbered copy of ``source`` (a fitz.Document) and return pages.
+
+    The in-memory document is serialized to bytes first, so unsaved
+    annotations are included.  The copy is decrypted, written atomically, and
+    the source document is left untouched.
+    """
+    def modify(out) -> int:
         first, last = page_range(settings, out.page_count)
         if last < first:
             raise ValueError("document has no pages to number")
@@ -435,7 +562,6 @@ def stamp_copy(source, dest_path: str,
         font_file_path, font_name = number_font_source(settings)
         total = last - first + 1
         mask_fill = mask_rgb(settings.mask_color)
-        numbered = 0
         for index in range(first, last + 1):
             page = out.load_page(index)
             if font_file_path:
@@ -452,27 +578,35 @@ def stamp_copy(source, dest_path: str,
                 point, box.text, fontname=font_name,
                 fontsize=settings.font_size, color=(0.0, 0.0, 0.0),
                 rotate=page.rotation, overlay=True)
-            numbered += 1
+        return total
 
-        directory = os.path.dirname(os.path.abspath(dest_path)) or "."
-        fd, tmp_path = tempfile.mkstemp(prefix=".pdfar-numbers-",
-                                        suffix=".pdf", dir=directory)
-        os.close(fd)
-        out.save(tmp_path, garbage=3, deflate=True)
-        out.close()
-        os.replace(tmp_path, dest_path)
-        tmp_path = None
-        return numbered
-    finally:
-        try:
-            out.close()
-        except Exception:
-            pass
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
+    return _save_modified_copy(source, dest_path, modify)
+
+
+def erase_copy(source, dest_path: str, settings: EraseSettings) -> int:
+    """Write a copy of ``source`` with blank masks on the selected pages.
+
+    This is a cover rectangle, not true redaction: the underlying text or
+    image is hidden but remains in the file.  Returns the number of pages
+    that were covered.
+    """
+    if float(settings.width) <= 0 or float(settings.height) <= 0:
+        raise ValueError("the erase mask needs a non-zero width and height")
+
+    def modify(out) -> int:
+        first, last = page_range(settings, out.page_count)
+        if last < first:
+            raise ValueError("document has no pages to erase")
+        fill = mask_rgb(settings.color)
+        for index in range(first, last + 1):
+            page = out.load_page(index)
+            box = erase_box(settings, page.rect.width, page.rect.height)
+            page.draw_rect(
+                _display_rect_to_page(page, box.mask_rect),
+                color=None, fill=fill, overlay=True)
+        return last - first + 1
+
+    return _save_modified_copy(source, dest_path, modify)
 
 
 _PICKER_HINT = "Click a colour to sample it  ·  Esc to cancel"
@@ -803,23 +937,29 @@ class PageNumbersPanel(QWidget):
 
     def __init__(self, page_count: int = 0,
                  initial: Optional[PageNumberSettings] = None,
+                 erase_initial: Optional[EraseSettings] = None,
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._page_count = max(0, int(page_count))
         self._updating = False
-        self._unit = (initial or PageNumberSettings()).unit
         initial = initial or PageNumberSettings()
+        erase_initial = erase_initial or EraseSettings()
+        self._unit = initial.unit
         self._mask_color = normalize_color(initial.mask_color)
+        self._erase_color = normalize_color(erase_initial.color)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
+        layout.addWidget(self._build_units_row(initial))
 
         self.position_page = self._build_position_page(initial)
         self.mask_page = self._build_mask_page(initial)
+        self.erase_page = self._build_erase_page(erase_initial)
         self.sub_tabs = QTabWidget(self)
         self.sub_tabs.setDocumentMode(True)
         self.sub_tabs.addTab(self.position_page, "Position")
         self.sub_tabs.addTab(self.mask_page, "Mask")
+        self.sub_tabs.addTab(self.erase_page, "Erase")
         self.sub_tabs.setCurrentIndex(0)
         layout.addWidget(self.sub_tabs)
         layout.addWidget(self._build_numbering_group(initial))
@@ -829,6 +969,9 @@ class PageNumbersPanel(QWidget):
             float(initial.margin_x), float(initial.margin_y),
             float(initial.mask_left), float(initial.mask_right),
             float(initial.mask_top), float(initial.mask_bottom))
+        self._erase_offsets_points = (
+            float(erase_initial.width), float(erase_initial.height),
+            float(erase_initial.margin_x), float(erase_initial.margin_y))
         # end_page == 0 means "last page": keep that semantic until the user
         # picks an explicit end, even though the panel is built before a
         # document (and its page count) is known.
@@ -846,7 +989,7 @@ class PageNumbersPanel(QWidget):
         layout.addStretch(1)
 
         for widget in (self.position_combo, self.format_combo,
-                       self.font_style_combo):
+                       self.font_style_combo, self.erase_position_combo):
             widget.currentIndexChanged.connect(self._on_changed)
         self.font_combo.currentIndexChanged.connect(self._on_font_changed)
         self.unit_combo.currentIndexChanged.connect(self._on_unit_changed)
@@ -855,12 +998,29 @@ class PageNumbersPanel(QWidget):
             widget.valueChanged.connect(self._on_changed)
         for widget in (self.margin_x_spin, self.margin_y_spin,
                        self.mask_left_spin, self.mask_right_spin,
-                       self.mask_top_spin, self.mask_bottom_spin):
+                       self.mask_top_spin, self.mask_bottom_spin,
+                       self.erase_width_spin, self.erase_height_spin,
+                       self.erase_margin_x_spin, self.erase_margin_y_spin):
             widget.valueChanged.connect(self._on_offset_changed)
         self.mask_check.toggled.connect(self._on_mask_toggled)
+        self.sub_tabs.currentChanged.connect(self._on_mode_changed)
 
         self._sync_range()
-        self._update_range_label()
+        self._on_mode_changed(0)
+
+    def _build_units_row(self, initial: PageNumberSettings):
+        row = QWidget(self)
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.addWidget(QLabel("Units:", row))
+        self.unit_combo = QComboBox(row)
+        for key, label, _factor, _decimals in UNITS:
+            self.unit_combo.addItem(label, key)
+        self.unit_combo.setCurrentIndex(
+            max(0, self.unit_combo.findData(initial.unit)))
+        self._unit = self.unit_combo.currentData()
+        row_layout.addWidget(self.unit_combo, 1)
+        return row
 
     # ------------------------------------------------------------- widgets
     def _build_position_page(self, initial: PageNumberSettings):
@@ -874,14 +1034,6 @@ class PageNumbersPanel(QWidget):
         self.position_combo.setCurrentIndex(
             max(0, self.position_combo.findData(initial.position)))
         form.addRow("Placement:", self.position_combo)
-
-        self.unit_combo = QComboBox(page)
-        for key, label, _factor, _decimals in UNITS:
-            self.unit_combo.addItem(label, key)
-        self.unit_combo.setCurrentIndex(
-            max(0, self.unit_combo.findData(initial.unit)))
-        self._unit = self.unit_combo.currentData()
-        form.addRow("Units:", self.unit_combo)
 
         self.margin_x_spin = QDoubleSpinBox(page)
         self._configure_offset_spin(self.margin_x_spin)
@@ -984,9 +1136,86 @@ class PageNumbersPanel(QWidget):
         self._set_mask_controls_enabled(initial.mask)
         return page
 
+    def _build_erase_page(self, initial: EraseSettings):
+        page = QWidget(self)
+        form = QFormLayout(page)
+        form.setContentsMargins(8, 8, 8, 8)
+
+        hint = QLabel(
+            "Cover old page numbers with a blank rectangle. It hides them "
+            "visually; the text is not removed from the file.", page)
+        hint.setWordWrap(True)
+        form.addRow(hint)
+
+        self.erase_position_combo = QComboBox(page)
+        for key, label in POSITIONS:
+            self.erase_position_combo.addItem(label, key)
+        self.erase_position_combo.setCurrentIndex(
+            max(0, self.erase_position_combo.findData(initial.position)))
+        form.addRow("Placement:", self.erase_position_combo)
+
+        self.erase_width_spin = QDoubleSpinBox(page)
+        self._configure_offset_spin(self.erase_width_spin)
+        self.erase_width_spin.setValue(
+            points_to_unit(initial.width, self._unit))
+        form.addRow("Width:", self.erase_width_spin)
+
+        self.erase_height_spin = QDoubleSpinBox(page)
+        self._configure_offset_spin(self.erase_height_spin)
+        self.erase_height_spin.setValue(
+            points_to_unit(initial.height, self._unit))
+        form.addRow("Height:", self.erase_height_spin)
+
+        self.erase_margin_x_spin = QDoubleSpinBox(page)
+        self._configure_offset_spin(self.erase_margin_x_spin)
+        self.erase_margin_x_spin.setValue(
+            points_to_unit(initial.margin_x, self._unit))
+        form.addRow("Horizontal offset:", self.erase_margin_x_spin)
+
+        self.erase_margin_y_spin = QDoubleSpinBox(page)
+        self._configure_offset_spin(self.erase_margin_y_spin)
+        self.erase_margin_y_spin.setValue(
+            points_to_unit(initial.margin_y, self._unit))
+        form.addRow("Vertical offset:", self.erase_margin_y_spin)
+
+        color_row = QWidget(page)
+        color_layout = QHBoxLayout(color_row)
+        color_layout.setContentsMargins(0, 0, 0, 0)
+        self.erase_color_btn = QPushButton(color_row)
+        self.erase_color_btn.setToolTip("Choose the erase colour…")
+        self.erase_color_btn.clicked.connect(self._choose_erase_color)
+        self.erase_pick_color_btn = QPushButton("Pick…", color_row)
+        self.erase_pick_color_btn.setToolTip(
+            "Sample a colour anywhere on the screen")
+        self.erase_pick_color_btn.clicked.connect(self._pick_erase_color)
+        color_layout.addWidget(self.erase_color_btn, 1)
+        color_layout.addWidget(self.erase_pick_color_btn)
+        form.addRow("Colour:", color_row)
+
+        swatches = QWidget(page)
+        swatch_layout = QHBoxLayout(swatches)
+        swatch_layout.setContentsMargins(0, 0, 0, 0)
+        swatch_layout.setSpacing(4)
+        self.erase_swatch_buttons = []
+        for label, color in MASK_COLORS:
+            button = QPushButton(swatches)
+            button.setFixedSize(24, 18)
+            button.setToolTip(f"{label} ({color})")
+            button.clicked.connect(
+                lambda _checked=False, value=color:
+                self._set_erase_color(value))
+            swatch_layout.addWidget(button)
+            self.erase_swatch_buttons.append(button)
+        swatch_layout.addStretch(1)
+        form.addRow("Swatches:", swatches)
+        self._update_erase_color_ui()
+        return page
+
     def _build_numbering_group(self, initial: PageNumberSettings):
         group = QGroupBox("Numbering", self)
         form = QFormLayout(group)
+        self.numbering_group = group
+        self._numbering_form = form
 
         self.format_combo = QComboBox(group)
         for key, label, _template in FORMATS:
@@ -1013,6 +1242,8 @@ class PageNumbersPanel(QWidget):
         self.first_number_spin.setValue(
             max(0, min(initial.start_number, 100000)))
         form.addRow("First printed number:", self.first_number_spin)
+        self._first_page_label = form.labelForField(self.first_page_spin)
+        self._last_page_label = form.labelForField(self.last_page_spin)
         return group
 
     def _populate_font_combo(self, family: str) -> None:
@@ -1060,7 +1291,7 @@ class PageNumbersPanel(QWidget):
         self._populate_style_combo(
             family, self.font_style_combo.currentData() or "")
         if not self._updating:
-            self.settings_changed.emit(self.settings())
+            self.settings_changed.emit(self.preview_settings())
 
     def _font_sample(self) -> str:
         settings = self.settings()
@@ -1089,7 +1320,7 @@ class PageNumbersPanel(QWidget):
         finally:
             self._updating = False
         self._update_range_label()
-        self.settings_changed.emit(self.settings())
+        self.settings_changed.emit(self.preview_settings())
 
     def _configure_offset_spin(self, spin: QDoubleSpinBox) -> None:
         unit = self.unit_combo.currentData() if hasattr(
@@ -1101,6 +1332,14 @@ class PageNumbersPanel(QWidget):
         spin.setSuffix(f" {unit}")
 
     # ------------------------------------------------------------ settings
+    def erase_active(self) -> bool:
+        """True when the Erase sub-tab is selected."""
+        return self.sub_tabs.currentIndex() == 2
+
+    def preview_settings(self):
+        """Settings for the active sub-tab, used by the live preview."""
+        return self.erase_settings() if self.erase_active() else self.settings()
+
     def settings(self) -> PageNumberSettings:
         (margin_x, margin_y, mask_left, mask_right,
          mask_top, mask_bottom) = self._offsets_points
@@ -1124,13 +1363,27 @@ class PageNumbersPanel(QWidget):
             mask_color=self._mask_color,
         )
 
+    def erase_settings(self) -> EraseSettings:
+        width, height, margin_x, margin_y = self._erase_offsets_points
+        return EraseSettings(
+            position=self.erase_position_combo.currentData(),
+            width=width,
+            height=height,
+            margin_x=margin_x,
+            margin_y=margin_y,
+            start_page=self.first_page_spin.value(),
+            end_page=0 if self._end_is_last else self.last_page_spin.value(),
+            unit=self.unit_combo.currentData(),
+            color=self._erase_color,
+        )
+
     def set_page_count(self, page_count: int) -> None:
         """Match the active document; clamp the range and enable saving."""
         page_count = max(0, int(page_count))
         if page_count == self._page_count:
             self.save_btn.setEnabled(page_count > 0)
             return
-        before = self.settings()
+        before = self.preview_settings()
         self._page_count = page_count
         self._updating = True
         self.save_btn.setEnabled(page_count > 0)
@@ -1147,37 +1400,35 @@ class PageNumbersPanel(QWidget):
         finally:
             self._updating = False
         self._update_range_label()
-        if self.settings() != before:
-            self.settings_changed.emit(self.settings())
+        if self.preview_settings() != before:
+            self.settings_changed.emit(self.preview_settings())
+
+    def _apply_unit(self, unit: str) -> None:
+        """Switch every length spin to *unit*, keeping their point values."""
+        self._unit = unit
+        self.unit_combo.setCurrentIndex(
+            max(0, self.unit_combo.findData(unit)))
+        number_spins = (self.margin_x_spin, self.margin_y_spin,
+                        self.mask_left_spin, self.mask_right_spin,
+                        self.mask_top_spin, self.mask_bottom_spin)
+        erase_spins = (self.erase_width_spin, self.erase_height_spin,
+                       self.erase_margin_x_spin, self.erase_margin_y_spin)
+        for spin in number_spins + erase_spins:
+            self._configure_offset_spin(spin)
+        for spin, value in zip(number_spins, self._offsets_points):
+            spin.setValue(points_to_unit(value, unit))
+        for spin, value in zip(erase_spins, self._erase_offsets_points):
+            spin.setValue(points_to_unit(value, unit))
 
     def apply_settings(self, settings: PageNumberSettings) -> None:
         """Update the controls without emitting (used after dragging)."""
         self._updating = True
         try:
-            self._unit = settings.unit
             self._offsets_points = (
                 float(settings.margin_x), float(settings.margin_y),
                 float(settings.mask_left), float(settings.mask_right),
                 float(settings.mask_top), float(settings.mask_bottom))
-            self.unit_combo.setCurrentIndex(
-                max(0, self.unit_combo.findData(settings.unit)))
-            spins = (self.margin_x_spin, self.margin_y_spin,
-                     self.mask_left_spin, self.mask_right_spin,
-                     self.mask_top_spin, self.mask_bottom_spin)
-            for spin in spins:
-                self._configure_offset_spin(spin)
-            self.margin_x_spin.setValue(
-                points_to_unit(settings.margin_x, settings.unit))
-            self.margin_y_spin.setValue(
-                points_to_unit(settings.margin_y, settings.unit))
-            self.mask_left_spin.setValue(
-                points_to_unit(settings.mask_left, settings.unit))
-            self.mask_right_spin.setValue(
-                points_to_unit(settings.mask_right, settings.unit))
-            self.mask_top_spin.setValue(
-                points_to_unit(settings.mask_top, settings.unit))
-            self.mask_bottom_spin.setValue(
-                points_to_unit(settings.mask_bottom, settings.unit))
+            self._apply_unit(settings.unit)
             self.position_combo.setCurrentIndex(
                 max(0, self.position_combo.findData(settings.position)))
             self.format_combo.setCurrentIndex(
@@ -1207,6 +1458,28 @@ class PageNumbersPanel(QWidget):
             self._updating = False
         self._update_range_label()
 
+    def apply_erase_settings(self, settings: EraseSettings) -> None:
+        """Update the erase controls without emitting (used after dragging)."""
+        self._updating = True
+        try:
+            self._erase_offsets_points = (
+                float(settings.width), float(settings.height),
+                float(settings.margin_x), float(settings.margin_y))
+            self._apply_unit(settings.unit)
+            self.erase_position_combo.setCurrentIndex(
+                max(0, self.erase_position_combo.findData(settings.position)))
+            self._start_page_value = max(1, int(settings.start_page))
+            self._end_is_last = settings.end_page == 0
+            self.first_page_spin.setValue(settings.start_page)
+            self.last_page_spin.setValue(
+                settings.end_page or max(1, self._page_count))
+            self._erase_color = normalize_color(settings.color)
+            self._update_erase_color_ui()
+            self._sync_range()
+        finally:
+            self._updating = False
+        self._update_range_label()
+
     # -------------------------------------------------------------- events
     def _on_offset_changed(self) -> None:
         if self._updating:
@@ -1220,31 +1493,46 @@ class PageNumbersPanel(QWidget):
             unit_to_points(self.mask_top_spin.value(), unit),
             unit_to_points(self.mask_bottom_spin.value(), unit),
         )
+        self._erase_offsets_points = (
+            unit_to_points(self.erase_width_spin.value(), unit),
+            unit_to_points(self.erase_height_spin.value(), unit),
+            unit_to_points(self.erase_margin_x_spin.value(), unit),
+            unit_to_points(self.erase_margin_y_spin.value(), unit),
+        )
         self._on_changed()
 
     def _on_unit_changed(self) -> None:
         if self._updating:
             return
-        points = self._offsets_points
-        self._unit = self.unit_combo.currentData()
         self._updating = True
         try:
-            spins = (self.margin_x_spin, self.margin_y_spin,
-                     self.mask_left_spin, self.mask_right_spin,
-                     self.mask_top_spin, self.mask_bottom_spin)
-            for spin in spins:
-                self._configure_offset_spin(spin)
-            for spin, value in zip(spins, points):
-                spin.setValue(points_to_unit(value, self._unit))
+            self._apply_unit(self.unit_combo.currentData())
         finally:
             self._updating = False
         self._update_range_label()
-        self.settings_changed.emit(self.settings())
+        self.settings_changed.emit(self.preview_settings())
+
+    def _on_mode_changed(self, _index: int) -> None:
+        erase = self.erase_active()
+        self.numbering_group.setTitle("Erase range" if erase else "Numbering")
+        self._numbering_form.setRowVisible(0, not erase)
+        self._numbering_form.setRowVisible(3, not erase)
+        if self._first_page_label is not None:
+            self._first_page_label.setText(
+                "First page:" if erase else "Start page number:")
+        if self._last_page_label is not None:
+            self._last_page_label.setText(
+                "Last page:" if erase else "End page number:")
+        self.save_btn.setText(
+            "Save Erased Copy…" if erase else "Save Copy…")
+        self._update_range_label()
+        if not self._updating:
+            self.settings_changed.emit(self.preview_settings())
 
     def _on_mask_toggled(self, checked: bool) -> None:
         self._set_mask_controls_enabled(checked)
         if not self._updating:
-            self.settings_changed.emit(self.settings())
+            self.settings_changed.emit(self.preview_settings())
 
     def _set_mask_controls_enabled(self, enabled: bool) -> None:
         for widget in (self.mask_left_spin, self.mask_right_spin,
@@ -1253,17 +1541,20 @@ class PageNumbersPanel(QWidget):
                        *self.swatch_buttons):
             widget.setEnabled(enabled)
 
-    def _update_mask_color_ui(self) -> None:
-        color = QColor(self._mask_color)
-        text = "#000000" if color.lightness() > 140 else "#ffffff"
-        self.mask_color_btn.setText(self._mask_color)
-        self.mask_color_btn.setStyleSheet(
+    @staticmethod
+    def _paint_color_button(button: QPushButton, color: str) -> None:
+        qcolor = QColor(color)
+        text = "#000000" if qcolor.lightness() > 140 else "#ffffff"
+        button.setText(color)
+        button.setStyleSheet(
             "QPushButton { background-color: %s; color: %s;"
             " border: 1px solid #7a7a7a; border-radius: 3px;"
-            " padding: 2px 6px; }" % (self._mask_color, text))
-        for (_label, value), button in zip(
-                MASK_COLORS, self.swatch_buttons):
-            border = ("2px solid #0078d7" if value == self._mask_color
+            " padding: 2px 6px; }" % (color, text))
+
+    @staticmethod
+    def _paint_swatches(buttons, color: str) -> None:
+        for (_label, value), button in zip(MASK_COLORS, buttons):
+            border = ("2px solid #0078d7" if value == color
                       else "1px solid #9a9a9a")
             button.setStyleSheet(
                 "QPushButton { background-color: %s; border: %s;"
@@ -1272,6 +1563,14 @@ class PageNumbersPanel(QWidget):
                 "QPushButton:disabled { border-color: #b4b4b4; }"
                 % (value, border))
 
+    def _update_mask_color_ui(self) -> None:
+        self._paint_color_button(self.mask_color_btn, self._mask_color)
+        self._paint_swatches(self.swatch_buttons, self._mask_color)
+
+    def _update_erase_color_ui(self) -> None:
+        self._paint_color_button(self.erase_color_btn, self._erase_color)
+        self._paint_swatches(self.erase_swatch_buttons, self._erase_color)
+
     def _set_mask_color(self, color: str) -> None:
         color = normalize_color(color, self._mask_color)
         if color == self._mask_color:
@@ -1279,7 +1578,16 @@ class PageNumbersPanel(QWidget):
         self._mask_color = color
         self._update_mask_color_ui()
         if not self._updating:
-            self.settings_changed.emit(self.settings())
+            self.settings_changed.emit(self.preview_settings())
+
+    def _set_erase_color(self, color: str) -> None:
+        color = normalize_color(color, self._erase_color)
+        if color == self._erase_color:
+            return
+        self._erase_color = color
+        self._update_erase_color_ui()
+        if not self._updating:
+            self.settings_changed.emit(self.preview_settings())
 
     def _choose_mask_color(self) -> None:
         color = QColorDialog.getColor(
@@ -1287,9 +1595,21 @@ class PageNumbersPanel(QWidget):
         if color.isValid():
             self._set_mask_color(color.name())
 
+    def _choose_erase_color(self) -> None:
+        color = QColorDialog.getColor(
+            QColor(self._erase_color), self, "Erase colour")
+        if color.isValid():
+            self._set_erase_color(color.name())
+
     def _pick_screen_color(self) -> None:
+        self._pick_color(self._set_mask_color)
+
+    def _pick_erase_color(self) -> None:
+        self._pick_color(self._set_erase_color)
+
+    def _pick_color(self, setter) -> None:
         picker = ScreenColorPicker(self)
-        picker.color_picked.connect(self._set_mask_color)
+        picker.color_picked.connect(setter)
         picker.start()
 
     def _sync_range(self) -> None:
@@ -1314,13 +1634,22 @@ class PageNumbersPanel(QWidget):
             self._end_is_last = False
         self._sync_range()
         self._update_range_label()
-        self.settings_changed.emit(self.settings())
+        self.settings_changed.emit(self.preview_settings())
 
     def _update_range_label(self) -> None:
-        settings = self.settings()
+        settings = self.preview_settings()
         first, last = page_range(settings, self._page_count)
         if last < first:
             self.range_label.setText("No pages selected.")
+            return
+        if self.erase_active():
+            if first == last:
+                self.range_label.setText(
+                    f"Page {first + 1} will be covered by the mask.")
+            else:
+                self.range_label.setText(
+                    f"Pages {first + 1}–{last + 1} will be covered "
+                    "by the mask.")
             return
         total = last - first + 1
         first_text = number_text(settings, settings.start_number, total)

@@ -30,7 +30,8 @@ from . import APP_NAME, __version__
 from .i18n import I18n
 from .icons import asset_path as _asset_path, tinted_icon
 from .page_numbers import (
-    PageNumbersPanel, PageNumberSettings, numbered_copy_path, stamp_copy,
+    EraseSettings, PageNumbersPanel, PageNumberSettings, erase_copy,
+    erased_copy_path, numbered_copy_path, stamp_copy,
 )
 from .search import SearchParams, SearchWorker, normalize_space
 from .sidebar import (
@@ -556,7 +557,7 @@ class MainWindow(QMainWindow):
         v.addWidget(self.hit_label)
 
         self.page_numbers_panel = PageNumbersPanel(
-            0, PageNumberSettings.load())
+            0, PageNumberSettings.load(), EraseSettings.load())
         self.page_numbers_panel.settings_changed.connect(
             self._on_numbering_settings)
         self.page_numbers_panel.save_requested.connect(
@@ -601,7 +602,8 @@ class MainWindow(QMainWindow):
             return
         self.page_numbers_panel.set_page_count(view.page_count)
         if self._numbering_panel_active() and not view.reflow_mode:
-            view.set_numbering_preview(self.page_numbers_panel.settings())
+            view.set_numbering_preview(
+                self.page_numbers_panel.preview_settings())
         else:
             view.clear_numbering_preview()
 
@@ -611,6 +613,13 @@ class MainWindow(QMainWindow):
             return
         if not view.reflow_mode:
             view.set_numbering_preview(settings)
+
+    def _on_numbering_dragged(self, settings) -> None:
+        """Reflect an in-page drag back into the matching control page."""
+        if isinstance(settings, EraseSettings):
+            self.page_numbers_panel.apply_erase_settings(settings)
+        else:
+            self.page_numbers_panel.apply_settings(settings)
 
     def _on_right_tab_changed(self, index: int) -> None:
         del index
@@ -782,6 +791,9 @@ class MainWindow(QMainWindow):
         view = self.view
         if not view:
             return
+        if self.page_numbers_panel.erase_active():
+            self._save_erased_copy()
+            return
 
         settings = self.page_numbers_panel.settings()
         source_path = os.path.realpath(view.doc_path)
@@ -826,6 +838,60 @@ class MainWindow(QMainWindow):
             self, "Page Numbers",
             f"Added numbers to {numbered} page(s).\n\nSaved to:\n{path}\n\n"
             "Open the new copy?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if open_copy == QMessageBox.StandardButton.Yes:
+            self.open_document(path)
+
+    def _save_erased_copy(self) -> None:
+        """Cover old page numbers with blank masks in a new PDF copy."""
+        view = self.view
+        if not view:
+            return
+
+        settings = self.page_numbers_panel.erase_settings()
+        source_path = os.path.realpath(view.doc_path)
+        default_path = erased_copy_path(view.doc_path)
+        while True:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save Erased Copy", default_path,
+                "PDF Files (*.pdf)")
+            if not path:
+                return
+            if not path.lower().endswith(".pdf"):
+                path += ".pdf"
+            if os.path.realpath(path) != source_path:
+                break
+            QMessageBox.warning(
+                self, "Page Numbers",
+                "Choose a different file name: the erased copy never "
+                "overwrites the document you have open.")
+            default_path = erased_copy_path(view.doc_path)
+        path = os.path.abspath(path)
+
+        self.status_left.setText("Saving erased copy…")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            erased = erase_copy(view.doc, path, settings)
+        except Exception as exc:
+            error = exc
+        else:
+            error = None
+        finally:
+            QApplication.restoreOverrideCursor()
+        if error is not None:
+            self.status_left.setText("Could not save erased copy")
+            QMessageBox.critical(
+                self, "Page Numbers",
+                f"Could not save the erased copy:\n{error}")
+            return
+
+        settings.save()
+        self.status_left.setText(f"Saved erased copy: {path}")
+        open_copy = QMessageBox.question(
+            self, "Page Numbers",
+            f"Covered {erased} page(s) with the erase mask.\n\n"
+            f"Saved to:\n{path}\n\nOpen the new copy?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
         if open_copy == QMessageBox.StandardButton.Yes:
@@ -1542,7 +1608,7 @@ class MainWindow(QMainWindow):
         tab.view.reflow_progress.connect(self._on_reflow_progress)
         tab.view.reflow_ready.connect(self._on_reflow_ready)
         tab.view.reflow_font_scale_changed.connect(self._on_reflow_font_scale_changed)
-        tab.view.numbering_changed.connect(self.page_numbers_panel.apply_settings)
+        tab.view.numbering_changed.connect(self._on_numbering_dragged)
         tab.sidebar.goto_page_requested.connect(self._goto)
         tab.sidebar.thumbnail_size_changed.connect(self._on_thumbnail_size_changed)
         # Connect annotation manager to sidebar
@@ -1558,7 +1624,7 @@ class MainWindow(QMainWindow):
             tab.view.reflow_progress.disconnect(self._on_reflow_progress)
             tab.view.reflow_ready.disconnect(self._on_reflow_ready)
             tab.view.reflow_font_scale_changed.disconnect(self._on_reflow_font_scale_changed)
-            tab.view.numbering_changed.disconnect(self.page_numbers_panel.apply_settings)
+            tab.view.numbering_changed.disconnect(self._on_numbering_dragged)
             tab.sidebar.goto_page_requested.disconnect(self._goto)
             tab.sidebar.thumbnail_size_changed.disconnect(self._on_thumbnail_size_changed)
         except TypeError:

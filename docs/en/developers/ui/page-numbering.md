@@ -5,16 +5,20 @@ Both dock tabs are icon-only; their labels appear on hover.
 
 ## Behaviour
 
-- Two sub-tabs: **Position** (default) and **Mask**. Only one is visible at a
-  time, which keeps the narrow right dock short; the numbering range, range
-  summary and `Save Copy…` stay below both.
+- Three sub-tabs: **Position** (default), **Mask** and **Erase**. Only one is
+  visible at a time, which keeps the narrow right dock short; the shared
+  **Units** selector, page range, range summary and save button stay outside
+  the sub-tabs.
 - Positions: top/bottom × left/centre/right.
 - Offsets can be entered in **pt, mm, cm or in**. The panel keeps the
   canonical offset in PDF points, so changing the display unit never moves
-  the number.
+  the number. The unit is shared by every sub-tab.
 - **Start page number** and **End page number** restrict the range.
   `end_page == 0` means “last page” and keeps following the document until
-  the user picks an explicit end.
+  the user picks an explicit end. The range is shared by numbering and erase.
+- On the Erase tab the range group retitles itself **Erase range**, hides the
+  format and first-printed-number rows, and relabels the range fields
+  **First page** / **Last page**.
 - Formats: `1`, `1/5`, `Page 1`, `Page 1 of 5`, `- 1 -`. Totals count only
   the pages selected for numbering.
 - The first printed number is independent of the first page, so a cover can
@@ -29,6 +33,12 @@ Both dock tabs are icon-only; their labels appear on hover.
 - The preview is drawn on every selected page: a mask in the chosen colour, a
   dashed red outline and the red number. Dragging the number updates the
   offsets live.
+- **Erase** covers old page numbers with a blank rectangle instead of adding
+  a number. It has its own placement, width, height, X/Y offsets and colour
+  (independent from the numbering mask), plus the same draggable preview.
+  Only the dashed outline is drawn on top of the fill; there is no text.
+  This is a cover rectangle, not PDF redaction: the hidden text stays in the
+  file.
 - Fonts: the built-in Helvetica, Times and Courier faces come first, followed
   by installed families from the recommended catalog, then the current one.
   The **Style** combo lists every style Qt reports for the family. **Choose…**
@@ -36,8 +46,8 @@ Both dock tabs are icon-only; their labels appear on hover.
   installed recommended families, and greyed-out missing ones with their apt
   hint) and **All installed fonts**, with a style list, size field and live
   sample. Saved copies embed the selected system font file.
-- `Save Copy…` writes a new `name-numbered.pdf`; the open file is never
-  overwritten.
+- `Save Copy…` writes a new `name-numbered.pdf`; `Save Erased Copy…` writes a
+  new `name-erased.pdf`. The open file is never overwritten.
 
 ## Modules
 
@@ -46,15 +56,19 @@ Both dock tabs are icon-only; their labels appear on hover.
 | Piece | Responsibility |
 |---|---|
 | `PageNumberSettings` | Dataclass persisted in `QSettings` (`pageNumbers/*`). All lengths are PDF points; `mask_*` pads and `mask_color` are stored per side/colour. Legacy `maskPadding` seeds every side. |
+| `EraseSettings` | Independent blank-mask dataclass persisted under `pageNumbers/erase/*` (`position`, `width`, `height`, margins, shared range, unit, colour). |
 | `UNITS`, `unit_to_points`, `points_to_unit` | UI ↔ point conversion. |
-| `page_range` | Inclusive 0-based page range, clamped to the document. |
+| `page_range` | Inclusive 0-based page range, clamped to the document; shared by numbering and erase. |
 | `layout_number` / `number_box` | Text baseline and glyph/mask geometry in display space. |
-| `box_to_settings` | Drag result → new offsets; clamps inside the page and re-anchors a centred number to the nearest left/right edge. |
-| `stamp_copy` | Non-destructive export. |
-| `mask_rgb` | Hex mask colour → `draw_rect(fill=…)` floats in 0–1. |
+| `erase_box` | Rectangle geometry for the blank mask; clamps width/height/margins inside the page and returns a zero-pad `NumberBox` so hit-testing and dragging reuse the same code. |
+| `box_to_settings` | Drag result → new offsets; clamps inside the page and re-anchors a centred number to the nearest left/right edge. Works for both settings dataclasses. |
+| `stamp_copy` / `erase_copy` | Non-destructive exports for numbering and blank masks. |
+| `numbered_copy_path` / `erased_copy_path` | Default `-numbered.pdf` / `-erased.pdf` output names. |
+| `_save_modified_copy` | Shared atomic export: serialize with `tobytes()`, decrypt, apply a per-page callback, write a temp file and `os.replace`. |
+| `mask_rgb` | Hex mask/erase colour → `draw_rect(fill=…)` floats in 0–1. |
 | `sample_screen_color` | Maps an overlay point back to the captured screen pixel, rejecting out-of-bounds positions. |
 | `ScreenColorPicker` | Full-screen eyedropper; captures first, emits `color_picked(hex)`, closes on click or `Esc`. |
-| `PageNumbersPanel` | Embedded controls, `settings_changed` and `save_requested` signals. |
+| `PageNumbersPanel` | Embedded controls, `settings_changed` and `save_requested` signals. `erase_active()` / `preview_settings()` select the active sub-tab; `settings()` and `erase_settings()` return the two models; `apply_settings()` / `apply_erase_settings()` mirror in-page drags without re-emitting. |
 | `FontDialog` | Searchable recommended/installed font tree, style list, size and live sample. |
 | `preview_font` | Qt preview font for the chosen family and style. |
 | `pdf_number_font`, `number_font_source` | PyMuPDF font or embedded-file source for stamping. |
@@ -78,27 +92,35 @@ switches between mm/cm/in, whose fields are rounded for display.
 
 ### `viewer.py`
 
-- `set_numbering_preview(settings)` enables the overlay; `None` clears it.
+- `set_numbering_preview(settings)` enables the overlay for either settings
+  dataclass; `None` clears it.
+- `_preview_box` returns `number_box()` or `erase_box()` depending on the
+  settings type, so hit-testing, painting and dragging share one path.
 - `_paint_numbering_preview` maps `NumberBox.mask_rect` through `map_rect` and
   draws the configured fill colour, dashed outline and red text after
-  annotations, hits and selection.
+  annotations, hits and selection. Erase settings draw only the fill and
+  outline.
 - `_numbering_hit_at` maps the pointer back to page display space with
   `unmap_point` and hit-tests the mask.
 - While dragging, the widget delta is divided by the zoom and converted with
   `unmap_delta`; each move is computed from the press-time box, so re-anchoring
   cannot make the glyphs jump.
-- `numbering_changed` carries the updated settings to the panel; `Escape`
-  restores the press-time settings.
-- The cursor becomes `SizeAllCursor` over the number.
+- `numbering_changed` carries the updated settings (numbering or erase) to the
+  panel; `Escape` restores the press-time settings.
+- The cursor becomes `SizeAllCursor` over the number or erase mask.
 
 ### `main.py`
 
 - `_apply_numbering_preview` shows or clears the preview depending on whether
-  the Page Numbers tab is selected and a document is open.
+  the Page Numbers tab is selected and a document is open, using the active
+  sub-tab's settings.
+- `_on_numbering_dragged` routes a drag to `apply_settings` or
+  `apply_erase_settings` by settings type.
 - Selecting the tab temporarily leaves reflow; leaving the tab restores it.
 - Presentation mode clears the preview and restores it on exit.
 - `_save_numbered_copy` runs the save dialog, refuses to overwrite the open
-  document, stamps the copy with a wait cursor and offers to open it.
+  document, stamps the copy with a wait cursor and offers to open it. It
+  delegates to `_save_erased_copy` when the Erase sub-tab is active.
 - `_apply_right_tab_icons` re-tints both dock icons for light/dark themes.
 
 ## Stamping coordinates
@@ -107,7 +129,8 @@ switches between mm/cm/in, whose fields are rounded for display.
 (`page.rect`, with the PDF's own `/Rotate` applied). For stamping, the
 baseline point is converted with `page.derotation_matrix` and passed to
 `insert_text(rotate=page.rotation)`. The mask rectangle is converted the same
-way before `draw_rect`.
+way before `draw_rect`; `erase_box` reuses that conversion for its blank
+rectangle.
 
 The source document is serialized first:
 
@@ -116,9 +139,10 @@ data = source.tobytes(
     garbage=0, deflate=True, encryption=fitz.PDF_ENCRYPT_NONE)
 ```
 
-so unsaved annotations are included and the copy is decrypted. The result is
-written to a temporary file in the destination directory and moved into place
-with `os.replace`.
+so unsaved annotations are included and the copy is decrypted. Both
+`stamp_copy` and `erase_copy` go through `_save_modified_copy`, which writes
+the result to a temporary file in the destination directory and moves it into
+place with `os.replace`.
 
 ## Tests
 
@@ -131,12 +155,15 @@ with `os.replace`.
 - per-side mask growth, legacy `maskPadding` migration, mask colour export and
   the live preview colour;
 - palette/custom colour selection, screen-pixel mapping and the eyedropper;
-- the Position/Mask sub-tabs and their page contents;
+- the Position/Mask/Erase sub-tabs and their page contents;
+- erase geometry, clamping, export colour and the zero-size guard;
+- erase settings persistence under `pageNumbers/erase/*`;
+- the shared range, relabelled fields and the erase save button;
 - mask export and mask-less export;
-- drag math, clamping and centre re-anchoring;
+- drag math, clamping and centre re-anchoring, for both numbering and erase;
 - stamping with `/Rotate` 0/90/180/270, CropBox offsets and encrypted PDFs;
 - the icon-only right dock, tooltips, preview lifecycle and reflow handoff;
-- the save-a-copy flow and overwrite guard.
+- the save-a-copy flow, overwrite guard, erase preview and erased-copy flow.
 
 `tests/test_geometry.py` covers `unmap_delta` alongside the existing rotation
 helpers.

@@ -39,8 +39,8 @@ from .geometry import (
     unmap_point,
 )
 from .page_numbers import (
-    PageNumberSettings, box_to_settings, number_box, page_range,
-    pdf_number_font, preview_font,
+    EraseSettings, PageNumberSettings, box_to_settings, erase_box, number_box,
+    page_range, pdf_number_font, preview_font,
 )
 from .reflow import (
     PageLayout, REFLOW_FONT_STEP, REFLOW_PAGE_GAP, ReflowWorker,
@@ -119,7 +119,7 @@ class PDFView(QAbstractScrollArea):
     reflow_progress = pyqtSignal(int, int)  # (pages laid out, page count)
     reflow_ready = pyqtSignal(bool, int)    # (has_text, pages without content)
     reflow_font_scale_changed = pyqtSignal(float)  # text-size multiplier
-    numbering_changed = pyqtSignal(object)  # PageNumberSettings after dragging
+    numbering_changed = pyqtSignal(object)  # settings after dragging
 
     def __init__(self, doc_path: str, parent=None, password: str = ""):
         super().__init__(parent)
@@ -145,7 +145,8 @@ class PDFView(QAbstractScrollArea):
         self.current_page = 0
         self.memory_level = DEFAULT_MEMORY_LEVEL
         self.dark_mode = False
-        self._numbering_preview: Optional[PageNumberSettings] = None
+        self._numbering_preview: Optional[
+            PageNumberSettings | EraseSettings] = None
         self._numbering_font = None
         self._numbering_drag: Optional[dict] = None
 
@@ -363,13 +364,17 @@ class PDFView(QAbstractScrollArea):
         self.viewport().update()
 
     # ------------------------------------------------------ numbering preview
-    def set_numbering_preview(self, settings: Optional[PageNumberSettings]) -> None:
+    def set_numbering_preview(
+            self, settings: Optional[PageNumberSettings
+                                 | EraseSettings]) -> None:
         """Show the mask and red page numbers where they would be stamped."""
         self._numbering_preview = settings
         self._numbering_drag = None
         if settings is None:
             self._numbering_font = None
             self.viewport().unsetCursor()
+        elif isinstance(settings, EraseSettings):
+            self._numbering_font = None
         else:
             self._numbering_font = pdf_number_font(settings)
         self.viewport().update()
@@ -377,6 +382,14 @@ class PDFView(QAbstractScrollArea):
     def clear_numbering_preview(self) -> None:
         if self._numbering_preview is not None:
             self.set_numbering_preview(None)
+
+    def _preview_box(self, settings, page: int, first: int, last: int):
+        w0, h0 = self.page_sizes[page]
+        if isinstance(settings, EraseSettings):
+            return erase_box(settings, w0, h0)
+        return number_box(
+            settings, w0, h0, settings.start_number + (page - first),
+            last - first + 1, font=self._numbering_font)
 
     def _numbering_hit_at(self, pos: QPoint):
         """Return ``(page, NumberBox)`` when ``pos`` is on a preview number."""
@@ -396,9 +409,7 @@ class PDFView(QAbstractScrollArea):
         first, last = page_range(settings, self.page_count)
         if not (first <= page <= last):
             return None
-        box = number_box(
-            settings, w0, h0, settings.start_number + (page - first),
-            last - first + 1, font=self._numbering_font)
+        box = self._preview_box(settings, page, first, last)
         x, y = unmap_point(u, v, w0, h0, self.rotation)
         x0, y0, x1, y1 = box.mask_rect
         tolerance = 2.0
@@ -1207,16 +1218,14 @@ class PDFView(QAbstractScrollArea):
         if not (first <= page <= last):
             return
         w0, h0 = self.page_sizes[page]
-        total = last - first + 1
-        box = number_box(
-            settings, w0, h0, settings.start_number + (page - first), total,
-            font=self._numbering_font)
+        box = self._preview_box(settings, page, first, last)
         z = self.zoom
         dw, dh = self._disp_sizes[page]
+        erase = isinstance(settings, EraseSettings)
 
         # Mask that will cover the old content, plus a dashed outline so the
         # draggable area is visible even when masking is off.
-        if settings.mask:
+        if erase or settings.mask:
             x0, y0, x1, y1 = box.mask_rect
         else:
             x0, y0, x1, y1 = (box.left - 2.0, box.top - 2.0,
@@ -1229,13 +1238,18 @@ class PDFView(QAbstractScrollArea):
         painter.save()
         painter.setClipRect(QRect(int(round(x)), int(round(y)),
                                   int(round(dw)), int(round(dh))))
-        if settings.mask:
+        if erase:
+            painter.fillRect(mask, QColor(settings.color))
+        elif settings.mask:
             painter.fillRect(mask, QColor(settings.mask_color))
         pen = QPen(QColor(220, 30, 30, 170))
         pen.setStyle(Qt.PenStyle.DashLine)
         pen.setWidthF(1.0)
         painter.setPen(pen)
         painter.drawRect(mask)
+        if erase:
+            painter.restore()
+            return
 
         u, v = map_point(box.anchor_x, box.baseline, w0, h0, self.rotation)
         qfont = preview_font(

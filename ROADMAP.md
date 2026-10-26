@@ -1361,6 +1361,51 @@ searchable tree, style list, size field, live sample and install hints.
 
 ---
 
+### Erase Mask — [x] Implemented
+
+**Completed**: 2026-10-26
+
+**Scope**: Add an **Erase** sub-tab to the page-numbering panel that covers
+existing page numbers with a blank rectangle instead of adding a new number —
+for example to remove a header/footer numbering before stamping new numbers
+elsewhere. The erase rectangle has its own placement, width, height, offsets
+and colour, shares the page range and unit with numbering, is draggable on the
+page, and exports a new `name-erased.pdf` copy.
+
+**Status**: DONE
+
+**Files changed**:
+
+- `src/pdfar/page_numbers.py` — `EraseSettings` (`pageNumbers/erase/*`),
+  `erase_box`, `erased_copy_path`, `_save_modified_copy`, `erase_copy`; a
+  third sub-tab built from width/height/placement/offsets/colour controls; a
+  shared Units row; mode-aware range group, labels, save button and preview
+  settings; `apply_erase_settings` for drag round-trips.
+- `src/pdfar/viewer.py` — the preview pipeline accepts either settings type;
+  `_preview_box` picks `erase_box`; erase draws only fill + dashed outline.
+- `src/pdfar/main.py` — loads `EraseSettings`, previews the active sub-tab,
+  routes drags by type, and saves erased copies through `_save_erased_copy`.
+- `tests/test_page_numbers.py` — geometry, export, persistence, sub-tab
+  relabelling, colour isolation, preview, drag and save coverage.
+- `README.md`, `docs/en/developers/ui/page-numbering.md`, `ROADMAP.md`.
+
+**Tests**: `PYTHONPATH=src python3 -m pytest tests/ -q` — **292 passed**.
+
+**Architecture notes**:
+
+1. Erase reuses `NumberBox`/`box_to_settings` with zero pads, so hit-testing,
+   clamping and dragging need no separate implementation; `erase_box` returns
+   a zero-pad box whose `mask_rect` is the rectangle itself.
+2. The rectangle is clamped inside the page (width, height and margins), so a
+   mask wider or taller than the paper covers the whole page instead of
+   spilling outside.
+3. This is a cover rectangle, not redaction: the underlying text/image remains
+   in the PDF. The Erase tab says so explicitly.
+4. One rectangle per page in v1; multiple erase bands would require a list
+   model but the export loop already iterates pages.
+
+---
+
 # 17. RELEASE CRITERIA
 
 A version must not be declared stable solely because it compiles.

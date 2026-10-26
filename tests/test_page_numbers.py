@@ -19,8 +19,9 @@ from pdfar import APP_NAME
 from pdfar.geometry import map_point
 from pdfar.main import MainWindow
 from pdfar.page_numbers import (
-    MASK_COLORS, PageNumbersPanel, PageNumberSettings, ScreenColorPicker,
-    box_to_settings, layout_number, number_box, number_text, page_range,
+    MASK_COLORS, EraseSettings, PageNumbersPanel, PageNumberSettings,
+    ScreenColorPicker, box_to_settings, erase_box, erase_copy,
+    erased_copy_path, layout_number, number_box, number_text, page_range,
     points_to_unit, sample_screen_color, stamp_copy, unit_to_points,
 )
 
@@ -33,6 +34,14 @@ def _settings(**overrides) -> PageNumberSettings:
                   mask_color="#ffffff")
     values.update(overrides)
     return PageNumberSettings(**values)
+
+
+def _erase_settings(**overrides) -> EraseSettings:
+    values = dict(position="top-left", width=80, height=20, margin_x=10,
+                  margin_y=10, start_page=1, end_page=0, unit="pt",
+                  color="#ffffff")
+    values.update(overrides)
+    return EraseSettings(**values)
 
 
 def _spans(page):
@@ -281,6 +290,80 @@ def test_stamp_uses_the_chosen_mask_colour(tmp_path):
     assert (0.0, 1.0, 0.5) in rounded
 
 
+def test_erase_box_places_a_blank_rect_inside_the_page():
+    box = erase_box(_erase_settings(position="top-left", width=80, height=20,
+                                   margin_x=10, margin_y=12), 200, 300)
+    assert (box.left, box.top, box.right, box.bottom) == (10, 12, 90, 32)
+    assert box.mask_rect == (10, 12, 90, 32)
+    assert box.text == ""
+
+    top_right = erase_box(_erase_settings(
+        position="top-right", margin_x=10, margin_y=12), 200, 300)
+    assert (top_right.left, top_right.right) == (110, 190)
+
+    centred = erase_box(_erase_settings(
+        position="top-center", margin_x=99), 200, 300)
+    assert centred.left == pytest.approx(60)
+
+    bottom = erase_box(_erase_settings(
+        position="bottom-left", margin_y=12), 200, 300)
+    assert (bottom.top, bottom.bottom) == (268, 288)
+
+    clamped = erase_box(_erase_settings(
+        width=500, height=500, margin_x=50, margin_y=50), 200, 300)
+    assert (clamped.left, clamped.top, clamped.right,
+            clamped.bottom) == (0, 0, 200, 300)
+
+    edge = erase_box(_erase_settings(margin_x=500, margin_y=500), 200, 300)
+    assert (edge.right, edge.bottom) == (200, 300)
+
+
+def test_erased_copy_path_sits_next_to_the_source():
+    assert erased_copy_path("/tmp/Book.PDF") == "/tmp/Book-erased.PDF"
+    assert erased_copy_path("/tmp/Book") == "/tmp/Book-erased.pdf"
+
+
+def test_erase_copy_covers_only_the_selected_pages(tmp_path):
+    src_path = build_sample_pdf(tmp_path / "doc.pdf", pages=4,
+                                width=200, height=300)
+    before = open(src_path, "rb").read()
+    out_path = tmp_path / "erased.pdf"
+    settings = _erase_settings(width=90, height=30, margin_x=12,
+                               margin_y=9, start_page=2, end_page=3,
+                               color="#00ff40")
+
+    with fitz.open(src_path) as src:
+        assert erase_copy(src, str(out_path), settings) == 2
+
+    assert open(src_path, "rb").read() == before
+    green = (0.0, 1.0, 0.25)
+    with fitz.open(out_path) as out:
+        assert out.page_count == 4
+        fills = [
+            [tuple(round(channel, 2) for channel in drawing["fill"])
+             for drawing in page.get_drawings() if drawing.get("fill")]
+            for page in out
+        ]
+        expected = fitz.Rect(erase_box(settings, 200, 300).mask_rect)
+        covered = [fitz.Rect(drawing["rect"])
+                   for drawing in out[1].get_drawings()
+                   if drawing.get("fill")]
+    assert green not in fills[0]
+    assert green in fills[1] and green in fills[2]
+    assert green not in fills[3]
+    assert any(abs(rect.x0 - expected.x0) < 0.02
+               and abs(rect.y1 - expected.y1) < 0.02
+               for rect in covered)
+
+
+def test_erase_copy_needs_a_non_zero_mask(tmp_path):
+    src_path = build_sample_pdf(tmp_path / "doc.pdf", pages=1)
+    with fitz.open(src_path) as src:
+        with pytest.raises(ValueError):
+            erase_copy(src, str(tmp_path / "x.pdf"),
+                       _erase_settings(height=0))
+
+
 def test_box_to_settings_moves_and_reanchors():
     settings = _settings(position="bottom-center", margin_x=20, margin_y=20)
     box = number_box(settings, 200, 300, 1, 1)
@@ -348,6 +431,9 @@ def test_panel_unit_switch_converts_offsets(qapp):
     assert panel.margin_x_spin.value() == pytest.approx(2.54, abs=0.01)
     assert panel.mask_bottom_spin.suffix().strip() == "cm"
     assert panel.mask_bottom_spin.value() == pytest.approx(0.85, abs=0.01)
+    assert panel.erase_width_spin.suffix().strip() == "cm"
+    assert panel.erase_width_spin.value() == pytest.approx(
+        points_to_unit(150, "cm"), abs=0.01)
     settings = panel.settings()
     assert settings.unit == "cm"
     assert settings.margin_x == pytest.approx(72)
@@ -356,6 +442,8 @@ def test_panel_unit_switch_converts_offsets(qapp):
     assert settings.mask_right == pytest.approx(12)
     assert settings.mask_top == pytest.approx(18)
     assert settings.mask_bottom == pytest.approx(24)
+    assert panel.erase_settings().width == pytest.approx(150)
+    assert panel.erase_settings().height == pytest.approx(24)
 
 
 def test_panel_mask_toggle_and_page_count(qapp):
@@ -398,19 +486,80 @@ def test_panel_palette_and_custom_mask_colour(qapp, monkeypatch):
     assert emitted[-1].mask_color == "#123456"
 
 
-def test_panel_has_position_and_mask_sub_tabs(qapp):
+def test_panel_has_position_mask_and_erase_sub_tabs(qapp):
     panel = PageNumbersPanel(3, _settings())
     tabs = panel.sub_tabs
 
-    assert tabs.count() == 2
-    assert [tabs.tabText(i) for i in range(2)] == ["Position", "Mask"]
+    assert tabs.count() == 3
+    assert [tabs.tabText(i) for i in range(3)] == [
+        "Position", "Mask", "Erase"]
     assert tabs.currentIndex() == 0
     assert tabs.widget(0) is panel.position_page
     assert tabs.widget(1) is panel.mask_page
+    assert tabs.widget(2) is panel.erase_page
     assert panel.position_page.isAncestorOf(panel.position_combo)
     assert panel.mask_page.isAncestorOf(panel.mask_left_spin)
     assert panel.mask_page.isAncestorOf(panel.mask_color_btn)
+    assert panel.erase_page.isAncestorOf(panel.erase_width_spin)
+    assert panel.erase_page.isAncestorOf(panel.erase_color_btn)
     assert not panel.position_page.isAncestorOf(panel.mask_left_spin)
+
+
+def test_erase_tab_shares_the_range_and_relabels(qapp):
+    panel = PageNumbersPanel(5, _settings(start_page=2, end_page=4))
+    emitted = []
+    panel.settings_changed.connect(emitted.append)
+
+    panel.sub_tabs.setCurrentIndex(2)
+    assert panel.erase_active()
+    assert panel.save_btn.text() == "Save Erased Copy…"
+    assert panel.numbering_group.title() == "Erase range"
+    assert not panel._numbering_form.isRowVisible(0)
+    assert not panel._numbering_form.isRowVisible(3)
+    assert emitted and isinstance(emitted[-1], EraseSettings)
+    assert (emitted[-1].start_page, emitted[-1].end_page) == (2, 4)
+    assert "covered" in panel.range_label.text()
+
+    panel.first_page_spin.setValue(3)
+    assert panel.erase_settings().start_page == 3
+    assert panel.settings().start_page == 3
+    assert "3–4" in panel.range_label.text()
+
+    panel.sub_tabs.setCurrentIndex(0)
+    assert not panel.erase_active()
+    assert panel.numbering_group.title() == "Numbering"
+    assert panel._numbering_form.isRowVisible(0)
+    assert panel._numbering_form.isRowVisible(3)
+    assert panel.save_btn.text() == "Save Copy…"
+    assert isinstance(emitted[-1], PageNumberSettings)
+
+
+def test_erase_panel_edits_keep_their_own_colour(qapp):
+    panel = PageNumbersPanel(
+        3, _settings(), _erase_settings(width=90, height=30, margin_x=12,
+                                        margin_y=14, color="#ffffff"))
+    emitted = []
+    panel.settings_changed.connect(emitted.append)
+    panel.sub_tabs.setCurrentIndex(2)
+
+    panel.erase_position_combo.setCurrentIndex(
+        panel.erase_position_combo.findData("bottom-right"))
+    panel.erase_width_spin.setValue(120)
+    panel.erase_height_spin.setValue(40)
+    panel.erase_margin_x_spin.setValue(18)
+    panel.erase_margin_y_spin.setValue(24)
+    settings = panel.erase_settings()
+    assert settings.position == "bottom-right"
+    assert (settings.width, settings.height) == (120, 40)
+    assert (settings.margin_x, settings.margin_y) == (18, 24)
+    assert emitted[-1] == settings
+
+    panel.erase_swatch_buttons[1].click()
+    expected = MASK_COLORS[1][1]
+    assert panel.erase_settings().color == expected
+    assert expected in panel.erase_color_btn.text()
+    assert panel.settings().mask_color == "#ffffff"
+    assert emitted[-1].color == expected
 
 
 def test_sample_screen_color_maps_scaled_points(qapp):
@@ -491,6 +640,14 @@ def test_settings_roundtrip(qapp):
         mask_bottom=5, mask_color="#c0ffee")
     saved.save()
     assert PageNumberSettings.load() == saved
+
+
+def test_erase_settings_roundtrip(qapp):
+    saved = EraseSettings(position="bottom-right", width=120.5, height=18,
+                          margin_x=14, margin_y=22, start_page=3,
+                          end_page=8, unit="mm", color="#123456")
+    saved.save()
+    assert EraseSettings.load() == saved
 
 
 def test_legacy_mask_padding_is_used_for_every_side(qapp):
@@ -583,6 +740,24 @@ def test_preview_uses_the_chosen_mask_colour(win, qapp, tmp_path):
     assert _green_pixels(_grab_first_page(view)) > 10
 
     view.clear_numbering_preview()
+
+
+def test_erase_preview_paints_the_mask_colour(win, qapp, tmp_path):
+    win.open_document(build_sample_pdf(tmp_path / "doc.pdf", pages=2,
+                                       width=200, height=100))
+    view = win.view
+    qapp.processEvents()
+    assert _green_pixels(_grab_first_page(view)) == 0
+
+    view.set_numbering_preview(_erase_settings(
+        width=120, height=40, margin_x=10, margin_y=10, color="#00ff00"))
+    qapp.processEvents()
+    assert view._numbering_font is None
+    assert _green_pixels(_grab_first_page(view)) > 100
+
+    view.clear_numbering_preview()
+    qapp.processEvents()
+    assert _green_pixels(_grab_first_page(view)) == 0
 
 
 def test_right_dock_has_two_icon_only_tabs(win):
@@ -778,3 +953,98 @@ def test_dragging_the_preview_moves_the_number_and_updates_the_panel(
     assert panel_settings.position == "bottom-right"
     assert panel_settings.margin_x == pytest.approx(changes[-1].margin_x, abs=1)
     assert view._numbering_preview == changes[-1]
+
+
+def test_dragging_the_erase_mask_updates_the_panel(win, qapp, tmp_path):
+    win.open_document(build_sample_pdf(tmp_path / "doc.pdf", pages=3,
+                                       width=200, height=100))
+    qapp.processEvents()
+    win.act_page_numbers.trigger()
+    qapp.processEvents()
+    panel = win.page_numbers_panel
+    panel.sub_tabs.setCurrentIndex(2)
+    qapp.processEvents()
+
+    view = win.view
+    settings = panel.erase_settings()
+    w0, h0 = view.page_sizes[0]
+    box = erase_box(settings, w0, h0)
+    px, py = view._page_origin(0)
+    centre_x = box.left + box.width / 2.0
+    centre_y = box.top + box.height / 2.0
+    u, v = map_point(centre_x, centre_y, w0, h0, view.rotation)
+    start = QPointF(
+        px + u * view.zoom - view.horizontalScrollBar().value(),
+        py + v * view.zoom - view.verticalScrollBar().value())
+
+    changes = []
+    view.numbering_changed.connect(changes.append)
+
+    _mouse(view, QEvent.Type.MouseButtonPress, start,
+           Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton)
+    assert view._numbering_drag is not None
+    moved = QPointF(start.x() + 8, start.y() + 6)
+    _mouse(view, QEvent.Type.MouseMove, moved,
+           Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton)
+    _mouse(view, QEvent.Type.MouseButtonRelease, moved,
+           Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton)
+
+    assert view._numbering_drag is None
+    assert changes and isinstance(changes[-1], EraseSettings)
+    assert changes[-1].margin_x > settings.margin_x
+    assert changes[-1].margin_y > settings.margin_y
+    panel_settings = panel.erase_settings()
+    assert panel_settings.margin_x == pytest.approx(
+        changes[-1].margin_x, abs=1)
+    assert panel_settings.margin_y == pytest.approx(
+        changes[-1].margin_y, abs=1)
+    assert isinstance(view._numbering_preview, EraseSettings)
+
+
+def test_erase_tab_saves_an_erased_copy(win, qapp, tmp_path, monkeypatch):
+    src = build_sample_pdf(tmp_path / "doc.pdf", pages=3,
+                           width=200, height=100)
+    win.open_document(src)
+    qapp.processEvents()
+    before = open(src, "rb").read()
+    out = tmp_path / "doc-erased.pdf"
+    opened, asked, defaults = [], [], []
+
+    win.act_page_numbers.trigger()
+    qapp.processEvents()
+    panel = win.page_numbers_panel
+    panel.sub_tabs.setCurrentIndex(2)
+    panel.erase_width_spin.setValue(120)
+    panel.erase_height_spin.setValue(40)
+    panel.erase_margin_x_spin.setValue(10)
+    panel.erase_margin_y_spin.setValue(10)
+    panel.first_page_spin.setValue(2)
+    panel.last_page_spin.setValue(3)
+
+    def _save_name(*args, **kwargs):
+        defaults.append(args[2])
+        return str(out), ""
+
+    monkeypatch.setattr(
+        QFileDialog, "getSaveFileName", staticmethod(_save_name))
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        staticmethod(lambda *args, **kwargs:
+                     asked.append(args[2]) or QMessageBox.StandardButton.No))
+    monkeypatch.setattr(
+        win, "open_document",
+        lambda path, password="": opened.append(path) or True)
+
+    panel.save_btn.click()
+    qapp.processEvents()
+
+    assert out.is_file()
+    assert open(src, "rb").read() == before
+    assert defaults and defaults[0].endswith("doc-erased.pdf")
+    with fitz.open(out) as doc:
+        covered = [_white_drawings(page) for page in doc]
+    assert covered[0] == []
+    assert covered[1] and covered[2]
+    assert opened == []
+    assert asked and "Covered 2 page(s)" in asked[0]
+    assert EraseSettings.load().width == pytest.approx(120)
