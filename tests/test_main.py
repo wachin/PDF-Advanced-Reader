@@ -615,3 +615,199 @@ def test_settings_dialog_controls_maximized_startup(qapp):
         win.deleteLater()
         qapp.processEvents()
         _restore_settings(settings, snapshot)
+
+
+# ------------------------------------------------------ selection tools
+def test_toolbar_has_explore_and_split_button(qapp):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        assert win.act_explore.isCheckable()
+        assert win.act_explore.isChecked() is False
+        button = win.toolbar.widgetForAction(win.act_explore)
+        assert isinstance(button, QToolButton)
+        assert button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
+
+        split = win.tool_split
+        assert (split.popupMode()
+                == QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        assert split.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
+        assert split.defaultAction() is win.act_sel_text
+        assert [a.text() for a in split.menu().actions()] == [
+            "Text Selection", "Area Selection", "Table Selection"]
+        assert win.act_sel_text.isChecked()
+        assert win._tool_mode == "text"
+        assert win._last_selection == "text"
+    finally:
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_split_button_activates_last_selection(qapp, sample_pdf):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        win.open_document(sample_pdf)
+        win.act_sel_area.trigger()
+        assert win._tool_mode == "area"
+        assert win.view.tool_mode == "area"
+        assert win.tool_split.defaultAction() is win.act_sel_area
+        assert win.act_sel_area.isChecked()
+
+        win.act_explore.trigger()
+        assert win._tool_mode == "browse"
+        assert win.view.tool_mode == "browse"
+        assert win.act_explore.isChecked()
+        assert win.act_sel_area.isChecked() is False
+        assert win.tool_split.defaultAction() is win.act_sel_area
+
+        win.tool_split.defaultAction().trigger()
+        assert win._tool_mode == "area"
+        assert win.view.tool_mode == "area"
+        assert win.act_sel_area.isChecked()
+        assert win.act_explore.isChecked() is False
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_selection_mode_is_global_across_tabs(qapp, sample_pdf, tmp_path):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        import shutil
+        second = tmp_path / "second.pdf"
+        shutil.copy(sample_pdf, second)
+
+        win.open_document(sample_pdf)
+        win.act_sel_table.trigger()
+        assert win.view.tool_mode == "table"
+
+        win.open_document(str(second))
+        assert win.tabs.count() == 2
+        assert win.view.tool_mode == "table"
+        assert win.act_sel_table.isChecked()
+
+        win.tabs.setCurrentIndex(0)
+        qapp.processEvents()
+        assert win.view.tool_mode == "table"
+        win.tabs.setCurrentIndex(1)
+        qapp.processEvents()
+        assert win.view.tool_mode == "table"
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_reclicking_checked_action_is_idempotent(qapp, sample_pdf):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        win.open_document(sample_pdf)
+        win.act_sel_area.trigger()
+        win.act_sel_area.trigger()
+        assert win._tool_mode == "area"
+        assert win.act_sel_area.isChecked()
+        assert win.tool_split.defaultAction() is win.act_sel_area
+        assert win.view.tool_mode == "area"
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_reflow_disables_area_table_and_falls_back_to_text(qapp, sample_pdf):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        win.open_document(sample_pdf)
+        win.act_sel_area.trigger()
+        win._toggle_reflow()
+        assert wait_until(qapp, lambda: win.view._reflow_worker is None)
+
+        assert win.act_sel_area.isEnabled() is False
+        assert win.act_sel_table.isEnabled() is False
+        assert win.act_sel_text.isEnabled() is True
+        assert win.act_explore.isEnabled() is True
+        assert win._tool_mode == "text"
+        assert win.view.tool_mode == "text"
+        assert win.tool_split.defaultAction() is win.act_sel_text
+        assert ("unavailable in Reflow"
+                in win.statusBar().currentMessage())
+
+        win._toggle_reflow()
+        assert wait_until(qapp, lambda: win.view._reflow_worker is None)
+        assert win.act_sel_area.isEnabled() is True
+        assert win.act_sel_table.isEnabled() is True
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_no_document_disables_tools(qapp, sample_pdf):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        assert win.act_explore.isEnabled() is False
+        assert win.act_sel_text.isEnabled() is False
+        assert win.act_sel_area.isEnabled() is False
+        assert win.act_sel_table.isEnabled() is False
+        assert win.tool_split.isEnabled() is False
+
+        win.open_document(sample_pdf)
+        assert win.act_explore.isEnabled() is True
+        assert win.act_sel_text.isEnabled() is True
+        assert win.act_sel_area.isEnabled() is True
+        assert win.act_sel_table.isEnabled() is True
+        assert win.tool_split.isEnabled() is True
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_tool_icons_exist_and_tint_dark(qapp, sample_pdf):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        win.open_document(sample_pdf)
+        size = win.toolbar.iconSize()
+        for act in (win.act_explore, win.act_sel_text,
+                    win.act_sel_area, win.act_sel_table):
+            assert not act.icon().isNull()
+            assert act.icon().pixmap(size).size() == size
+
+        win.act_dark_mode.setChecked(True)
+        win._update_zoom_actions(False)
+        qapp.processEvents()
+        image = win.act_sel_area.icon().pixmap(size).toImage()
+        colors = {
+            (image.pixelColor(x, y).red(),
+             image.pixelColor(x, y).green(),
+             image.pixelColor(x, y).blue())
+            for y in range(image.height())
+            for x in range(image.width())
+            if image.pixelColor(x, y).alpha() > 200
+        }
+        assert (230, 230, 230) in colors
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()

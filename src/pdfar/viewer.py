@@ -29,14 +29,18 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QColor, QFont, QFontMetrics, QFontMetricsF, QImage, QKeyEvent, QMouseEvent,
-    QPaintEvent, QPainter, QPen, QWheelEvent, QGuiApplication, QResizeEvent,
+    QPaintEvent, QPainter, QPen, QPixmap, QWheelEvent, QGuiApplication,
+    QResizeEvent,
 )
-from PyQt6.QtWidgets import QAbstractScrollArea, QFrame, QScroller
+from PyQt6.QtWidgets import QAbstractScrollArea, QFrame, QMenu, QScroller
 
 from .cache import PageCache
 from .geometry import (
     display_size, map_point, map_rect, normalize_rotation, unmap_delta,
-    unmap_point,
+    unmap_point, unmap_rect,
+)
+from .selection_tools import (
+    group_lines, table_size, table_text as format_table, words_in_rect,
 )
 from .page_numbers import (
     EraseSettings, PageNumberSettings, box_to_settings, erase_box, number_box,
@@ -120,6 +124,7 @@ class PDFView(QAbstractScrollArea):
     reflow_ready = pyqtSignal(bool, int)    # (has_text, pages without content)
     reflow_font_scale_changed = pyqtSignal(float)  # text-size multiplier
     numbering_changed = pyqtSignal(object)  # settings after dragging
+    transient_message = pyqtSignal(str)     # short status-bar feedback
 
     def __init__(self, doc_path: str, parent=None, password: str = ""):
         super().__init__(parent)
@@ -204,6 +209,12 @@ class PDFView(QAbstractScrollArea):
         self._sel_caret: Optional[Tuple[int, int]] = None
         self._dragging = False
 
+        # Mouse tools (Okular-style): browse pan, text, area, table.
+        self.tool_mode = "text"
+        self._marquee: Optional[dict] = None
+        self._panning = False
+        self._pan_last = QPoint()
+
         # search
         self._hit_rects: Dict[int, List[Tuple[float, float, float, float]]] = {}
         self._hit_seq: List[Tuple[int, int]] = []
@@ -234,6 +245,7 @@ class PDFView(QAbstractScrollArea):
 
         self._relayout()
         self._request_visible()
+        self._apply_tool_cursor()
 
     # ----------------------------------------------------------------- doc
     @property
@@ -364,6 +376,51 @@ class PDFView(QAbstractScrollArea):
         self._apply_theme()
         self.viewport().update()
 
+    # ---------------------------------------------------------- mouse tools
+    TOOL_MODES = ("browse", "text", "area", "table")
+
+    def set_tool_mode(self, mode: str) -> None:
+        """Switch the left-button tool: browse, text, area or table."""
+        if mode not in self.TOOL_MODES:
+            return
+        if self.reflow_mode and mode in ("area", "table"):
+            mode = "text"
+        if mode == self.tool_mode:
+            self._apply_tool_cursor()
+            return
+        self.tool_mode = mode
+        self._cancel_marquee()
+        self._panning = False
+        if mode != "text":
+            self.clear_selection()
+        self._apply_tool_cursor()
+        self.viewport().update()
+
+    def _apply_tool_cursor(self) -> None:
+        """Show the cursor for the active tool unless numbering overrides it."""
+        if self._numbering_preview is not None:
+            return
+        if self.tool_mode == "browse":
+            shape = (Qt.CursorShape.ClosedHandCursor if self._panning
+                     else Qt.CursorShape.OpenHandCursor)
+        elif self.tool_mode == "text":
+            shape = Qt.CursorShape.IBeamCursor
+        else:
+            shape = Qt.CursorShape.CrossCursor
+        self.viewport().setCursor(shape)
+
+    def _update_hover_cursor(self, pos: QPoint) -> None:
+        if (self._numbering_preview is not None and not self.reflow_mode
+                and self._numbering_hit_at(pos) is not None):
+            self.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
+            return
+        self._apply_tool_cursor()
+
+    def _cancel_marquee(self) -> None:
+        if self._marquee is not None:
+            self._marquee = None
+            self.viewport().update()
+
     # ------------------------------------------------------ numbering preview
     def set_numbering_preview(
             self, settings: Optional[PageNumberSettings
@@ -373,7 +430,7 @@ class PDFView(QAbstractScrollArea):
         self._numbering_drag = None
         if settings is None:
             self._numbering_font = None
-            self.viewport().unsetCursor()
+            self._apply_tool_cursor()
         elif isinstance(settings, EraseSettings):
             self._numbering_font = None
         else:
@@ -454,6 +511,8 @@ class PDFView(QAbstractScrollArea):
         self.reflow_mode = enabled
         if enabled:
             self.clear_selection()
+            if self.tool_mode in ("area", "table"):
+                self.set_tool_mode("text")
             self._enter_reflow()
         else:
             self._leave_reflow()
@@ -1025,7 +1084,23 @@ class PDFView(QAbstractScrollArea):
 
             self._paint_overlays(painter, i, x, y)
 
+        self._paint_marquee(painter)
         painter.end()
+
+    def _paint_marquee(self, painter: QPainter) -> None:
+        """Draw the area/table selection rectangle in view coordinates."""
+        if self._marquee is None:
+            return
+        rect = QRect(self._marquee["start"], self._marquee["current"]).normalized()
+        rect.translate(-self.horizontalScrollBar().value(),
+                       -self.verticalScrollBar().value())
+        painter.fillRect(rect, QColor(70, 130, 180, 45))
+        pen = QPen(QColor(70, 130, 180))
+        pen.setWidth(1)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(rect)
 
     def _paint_reflow(self, painter: QPainter, rect: QRect) -> None:
         """Paint the single-column reading view.
@@ -1416,6 +1491,98 @@ class PDFView(QAbstractScrollArea):
             self.selection_changed.emit()
             self.viewport().update()
 
+    # ------------------------------------------------- area/table selection
+    def _page_clips(self, content_rect: QRect):
+        """Split a content-space rectangle into per-page page-space clips."""
+        if not self.page_count or not self.page_sizes:
+            return []
+        top = content_rect.top()
+        bottom = content_rect.bottom()
+        first = self._page_at_y(float(min(top, bottom)))
+        last = self._page_at_y(float(max(top, bottom)))
+        target = QRectF(content_rect)
+        clips = []
+        for page in range(first, last + 1):
+            px, py = self._page_origin(page)
+            dw, dh = self._disp_sizes[page]
+            inter = QRectF(px, py, dw, dh).intersected(target)
+            if inter.isEmpty():
+                continue
+            u0 = (inter.left() - px) / self.zoom
+            v0 = (inter.top() - py) / self.zoom
+            u1 = (inter.right() - px) / self.zoom
+            v1 = (inter.bottom() - py) / self.zoom
+            w0, h0 = self.page_sizes[page]
+            clips.append(
+                (page, unmap_rect((u0, v0, u1, v1), w0, h0, self.rotation)))
+        return clips
+
+    def _content_rect(self, view_rect: QRect) -> QRect:
+        return view_rect.translated(self.horizontalScrollBar().value(),
+                                    self.verticalScrollBar().value())
+
+    def area_text(self, view_rect: QRect) -> str:
+        """Text of the words inside a viewport-space rectangle."""
+        parts = []
+        for page, clip in self._page_clips(self._content_rect(view_rect)):
+            lines = group_lines(words_in_rect(self._page_words(page), clip))
+            if lines:
+                parts.append("\n".join(lines))
+        return "\n".join(parts)
+
+    def area_image(self, view_rect: QRect) -> QPixmap:
+        """Screen-resolution image of a viewport-space rectangle."""
+        rect = view_rect.intersected(self.viewport().rect())
+        if rect.isEmpty():
+            return QPixmap()
+        return self.viewport().grab(rect)
+
+    def _build_area_menu(self, view_rect: QRect) -> QMenu:
+        text = self.area_text(view_rect)
+        menu = QMenu(self)
+        copy_text = menu.addAction(f"Copy Text ({len(text)} characters)")
+        copy_text.setEnabled(bool(text))
+        if text:
+            copy_text.triggered.connect(
+                lambda: QGuiApplication.clipboard().setText(text))
+        copy_image = menu.addAction(
+            f"Copy Image ({view_rect.width()} × {view_rect.height()} pixels)")
+        copy_image.triggered.connect(
+            lambda: QGuiApplication.clipboard().setPixmap(
+                self.area_image(view_rect)))
+        return menu
+
+    def _finish_area_selection(self, view_rect: QRect) -> None:
+        menu = self._build_area_menu(view_rect)
+        menu.exec(self.viewport().mapToGlobal(view_rect.bottomRight()))
+        menu.deleteLater()
+
+    def table_text(self, view_rect: QRect) -> str:
+        """Tab-separated text of the table inside a viewport rectangle."""
+        return self._table_selection(view_rect)[0]
+
+    def _table_selection(self, view_rect: QRect):
+        parts = []
+        rows = 0
+        cols = 0
+        for page, clip in self._page_clips(self._content_rect(view_rect)):
+            text = format_table(self._page_words(page), clip)
+            if not text:
+                continue
+            part_rows, part_cols = table_size(text)
+            rows += part_rows
+            cols = max(cols, part_cols)
+            parts.append(text)
+        return "\n\n".join(parts), rows, cols
+
+    def _finish_table_selection(self, view_rect: QRect) -> None:
+        text, rows, cols = self._table_selection(view_rect)
+        if not text:
+            self.transient_message.emit("No table text in selection")
+            return
+        QGuiApplication.clipboard().setText(text)
+        self.transient_message.emit(f"Table copied ({rows} × {cols})")
+
     # ------------------------------------------------------------- search
     def set_search_hits(self, hits: List[SearchHit]) -> int:
         self._hit_rects = {}
@@ -1797,6 +1964,15 @@ class PDFView(QAbstractScrollArea):
                 self.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
                 event.accept()
                 return
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self.tool_mode == "browse"):
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            self.clear_selection()
+            self._panning = True
+            self._pan_last = event.position().toPoint()
+            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
         if self.reflow_mode:
             # Selection uses page-space geometry that reflow does not have.
             if event.button() == Qt.MouseButton.LeftButton:
@@ -1804,6 +1980,17 @@ class PDFView(QAbstractScrollArea):
                 event.accept()
                 return
             super().mousePressEvent(event)
+            return
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self.tool_mode in ("area", "table")):
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            self.clear_selection()
+            point = event.position().toPoint() + QPoint(
+                self.horizontalScrollBar().value(),
+                self.verticalScrollBar().value())
+            self._marquee = {"start": point, "current": point}
+            self.viewport().update()
+            event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton:
             self.setFocus(Qt.FocusReason.MouseFocusReason)
@@ -1836,12 +2023,28 @@ class PDFView(QAbstractScrollArea):
             self.numbering_changed.emit(settings)
             event.accept()
             return
-        if (self._numbering_preview is not None
-                and not (event.buttons() & Qt.MouseButton.LeftButton)):
-            over = self._numbering_hit_at(event.position().toPoint()) is not None
-            self.viewport().setCursor(
-                Qt.CursorShape.SizeAllCursor if over
-                else Qt.CursorShape.ArrowCursor)
+        if self._panning and (event.buttons() & Qt.MouseButton.LeftButton):
+            pos = event.position().toPoint()
+            delta = pos - self._pan_last
+            if not delta.isNull():
+                self.horizontalScrollBar().setValue(
+                    self.horizontalScrollBar().value() - delta.x())
+                self.verticalScrollBar().setValue(
+                    self.verticalScrollBar().value() - delta.y())
+                self._pan_last = pos
+                self.viewport().update()
+            event.accept()
+            return
+        if (self._marquee is not None
+                and (event.buttons() & Qt.MouseButton.LeftButton)):
+            self._marquee["current"] = event.position().toPoint() + QPoint(
+                self.horizontalScrollBar().value(),
+                self.verticalScrollBar().value())
+            self.viewport().update()
+            event.accept()
+            return
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
+            self._update_hover_cursor(event.position().toPoint())
         if self._dragging:
             word = self._word_at(event.position().toPoint())
             if word is not None and word != self._sel_caret:
@@ -1862,10 +2065,31 @@ class PDFView(QAbstractScrollArea):
         if (event.button() == Qt.MouseButton.LeftButton
                 and self._numbering_drag is not None):
             self._numbering_drag = None
-            over = self._numbering_hit_at(event.position().toPoint()) is not None
-            self.viewport().setCursor(
-                Qt.CursorShape.SizeAllCursor if over
-                else Qt.CursorShape.ArrowCursor)
+            self._update_hover_cursor(event.position().toPoint())
+            event.accept()
+            return
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self._panning):
+            self._panning = False
+            self._apply_tool_cursor()
+            event.accept()
+            return
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self._marquee is not None):
+            start = self._marquee["start"]
+            current = self._marquee["current"]
+            self._marquee = None
+            self.viewport().update()
+            if (abs(current.x() - start.x()) >= 3
+                    or abs(current.y() - start.y()) >= 3):
+                content_rect = QRect(start, current).normalized()
+                view_rect = content_rect.translated(
+                    -self.horizontalScrollBar().value(),
+                    -self.verticalScrollBar().value())
+                if self.tool_mode == "area":
+                    self._finish_area_selection(view_rect)
+                elif self.tool_mode == "table":
+                    self._finish_table_selection(view_rect)
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton and self._dragging:
@@ -1890,6 +2114,10 @@ class PDFView(QAbstractScrollArea):
             self._numbering_preview = original
             self.viewport().update()
             self.numbering_changed.emit(original)
+            event.accept()
+            return
+        if key == Qt.Key.Key_Escape and self._marquee is not None:
+            self._cancel_marquee()
             event.accept()
             return
         ctrl = mods & Qt.KeyboardModifier.ControlModifier

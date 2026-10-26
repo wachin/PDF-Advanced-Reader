@@ -16,7 +16,7 @@ import time
 
 from PyQt6.QtCore import QEvent, QObject, QPoint, QSettings, QSize, QThread, QTimer, Qt
 from PyQt6.QtGui import (
-    QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QIcon,
+    QAction, QActionGroup, QCloseEvent, QDragEnterEvent, QDropEvent, QIcon,
     QKeySequence, QPainter, QPalette, QPixmap, QShortcut, QTextDocument,
 )
 from PyQt6.QtSvg import QSvgRenderer
@@ -247,6 +247,8 @@ class MainWindow(QMainWindow):
         self._search_params: Optional[SearchParams] = None
         self.settings = QSettings(APP_NAME, APP_NAME)
         self._ui_dark = False
+        self._tool_mode = "text"
+        self._last_selection = "text"
         self._start_maximized = True
         self._was_maximized = False
         self._geometry_timer = QTimer(self)
@@ -382,6 +384,41 @@ class MainWindow(QMainWindow):
         self.act_last.setShortcut("End")
         self.act_last.setToolTip("Last page (End)")
         self.act_last.triggered.connect(self._goto_last_page)
+
+        # Mouse tools (Okular-style): explore, text, area and table selection
+        self._tool_group = QActionGroup(self)
+        self._tool_group.setExclusive(True)
+
+        self.act_explore = QAction("Explore", self)
+        self.act_explore.setCheckable(True)
+        self.act_explore.setToolTip("Explore: drag to pan the document")
+        self.act_explore.triggered.connect(
+            lambda: self._set_tool_mode("browse"))
+
+        self.act_sel_text = QAction("Text Selection", self)
+        self.act_sel_text.setCheckable(True)
+        self.act_sel_text.setChecked(True)
+        self.act_sel_text.setToolTip("Text Selection")
+        self.act_sel_text.triggered.connect(
+            lambda: self._set_tool_mode("text"))
+
+        self.act_sel_area = QAction("Area Selection", self)
+        self.act_sel_area.setCheckable(True)
+        self.act_sel_area.setToolTip(
+            "Area Selection: copy the text or image inside a rectangle")
+        self.act_sel_area.triggered.connect(
+            lambda: self._set_tool_mode("area"))
+
+        self.act_sel_table = QAction("Table Selection", self)
+        self.act_sel_table.setCheckable(True)
+        self.act_sel_table.setToolTip(
+            "Table Selection: copy a rectangle as tab-separated text")
+        self.act_sel_table.triggered.connect(
+            lambda: self._set_tool_mode("table"))
+
+        for action in (self.act_explore, self.act_sel_text,
+                       self.act_sel_area, self.act_sel_table):
+            self._tool_group.addAction(action)
 
         # Zoom actions
         self.act_zin = QAction("Zoom In", self)
@@ -559,6 +596,23 @@ class MainWindow(QMainWindow):
         # Navigation
         tb.addAction(self.act_prev)
         tb.addAction(self.act_next)
+
+        # Mouse tools
+        tb.addAction(self.act_explore)
+        self.tool_split = QToolButton(tb)
+        self.tool_split.setPopupMode(
+            QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.tool_split.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.tool_split.setAutoRaise(True)
+        self.tool_split.setToolTip("Selection Tools")
+        select_menu = QMenu(self.tool_split)
+        select_menu.addAction(self.act_sel_text)
+        select_menu.addAction(self.act_sel_area)
+        select_menu.addAction(self.act_sel_table)
+        self.tool_split.setMenu(select_menu)
+        self.tool_split.setDefaultAction(self.act_sel_text)
+        tb.addWidget(self.tool_split)
         tb.addSeparator()
 
         # Page navigation
@@ -1723,6 +1777,11 @@ class MainWindow(QMainWindow):
                     border: none;
                     margin: 2px 2px;
                 }
+                QToolBar QToolButton:checked {
+                    background-color: #4a4a4a;
+                    border: 1px solid #6a6a6a;
+                    border-radius: 4px;
+                }
                 /* Ensure the overflow button text is visible */
                 QToolBar::overflow-button::menu-indicator {
                     image: none;
@@ -1818,6 +1877,7 @@ class MainWindow(QMainWindow):
         tab.view.reflow_ready.connect(self._on_reflow_ready)
         tab.view.reflow_font_scale_changed.connect(self._on_reflow_font_scale_changed)
         tab.view.numbering_changed.connect(self._on_numbering_dragged)
+        tab.view.transient_message.connect(self._show_transient_message)
         tab.sidebar.goto_page_requested.connect(self._goto)
         tab.sidebar.thumbnail_size_changed.connect(self._on_thumbnail_size_changed)
         # Connect annotation manager to sidebar
@@ -1834,6 +1894,7 @@ class MainWindow(QMainWindow):
             tab.view.reflow_ready.disconnect(self._on_reflow_ready)
             tab.view.reflow_font_scale_changed.disconnect(self._on_reflow_font_scale_changed)
             tab.view.numbering_changed.disconnect(self._on_numbering_dragged)
+            tab.view.transient_message.disconnect(self._show_transient_message)
             tab.sidebar.goto_page_requested.disconnect(self._goto)
             tab.sidebar.thumbnail_size_changed.disconnect(self._on_thumbnail_size_changed)
         except TypeError:
@@ -2057,12 +2118,61 @@ class MainWindow(QMainWindow):
             self.zoom_label.setText(zoom)
             self.zoom_label.setToolTip("Zoom level")
 
+    def _tool_action(self, mode: str) -> QAction:
+        return {
+            "browse": self.act_explore,
+            "text": self.act_sel_text,
+            "area": self.act_sel_area,
+            "table": self.act_sel_table,
+        }[mode]
+
+    def _set_tool_mode(self, mode: str) -> None:
+        """Activate a mouse tool and apply it to the current view."""
+        if mode not in ("browse", "text", "area", "table"):
+            return
+        view = self.view
+        if view is not None and view.reflow_mode and mode in ("area", "table"):
+            mode = "text"
+        self._tool_mode = mode
+        action = self._tool_action(mode)
+        action.setChecked(True)
+        if mode != "browse":
+            self._last_selection = mode
+            self.tool_split.setDefaultAction(action)
+        if view is not None:
+            view.set_tool_mode(mode)
+
+    def _update_tool_actions(self, reflow: bool) -> None:
+        """Enable the tools that make sense and reapply the global mode."""
+        view = self.view
+        has_doc = view is not None
+        selection_ok = has_doc and not reflow
+        self.act_explore.setEnabled(has_doc)
+        self.act_sel_text.setEnabled(has_doc)
+        self.act_sel_area.setEnabled(selection_ok)
+        self.act_sel_table.setEnabled(selection_ok)
+        split = getattr(self, "tool_split", None)
+        if split is None:
+            return
+        split.setEnabled(has_doc)
+        if reflow and self._tool_mode in ("area", "table"):
+            self._set_tool_mode("text")
+            self.statusBar().showMessage(
+                "Area and Table selection are unavailable in Reflow", 5000)
+            return
+        if view is not None:
+            view.set_tool_mode(self._tool_mode)
+        self._tool_action(self._tool_mode).setChecked(True)
+
+    def _show_transient_message(self, message: str) -> None:
+        self.statusBar().showMessage(message, 5000)
+
     def _set_compact_toolbar_buttons(self) -> None:
         """Show these toolbar actions as icons only; hover shows the label."""
         toolbar = getattr(self, "toolbar", None)
         if toolbar is None:
             return
-        for action in (self.act_prev, self.act_next,
+        for action in (self.act_prev, self.act_next, self.act_explore,
                        self.act_zout, self.act_zin, self.act_reflow,
                        self.act_rotl, self.act_rotr):
             button = toolbar.widgetForAction(action)
@@ -2077,6 +2187,10 @@ class MainWindow(QMainWindow):
         self.act_rotl.setIcon(tinted_icon("rotate_left.svg", ink))
         self.act_rotr.setIcon(tinted_icon("rotate_right.svg", ink))
         self.act_reflow.setIcon(tinted_icon("reflow.svg", ink))
+        self.act_explore.setIcon(tinted_icon("explore.svg", ink))
+        self.act_sel_text.setIcon(tinted_icon("select_text.svg", ink))
+        self.act_sel_area.setIcon(tinted_icon("select_area.svg", ink))
+        self.act_sel_table.setIcon(tinted_icon("select_table.svg", ink))
         if reflow:
             self.act_zin.setIcon(tinted_icon("text_increase.svg", ink))
             self.act_zout.setIcon(tinted_icon("text_decrease.svg", ink))
@@ -2095,6 +2209,7 @@ class MainWindow(QMainWindow):
             self.act_zout.setToolTip("Zoom out (Ctrl+-)")
             self.act_zoom_100.setText("100%")
             self.act_zoom_100.setToolTip("Actual size (Ctrl+0)")
+        self._update_tool_actions(reflow)
 
     def _update_status(self) -> None:
         if not self.view:
