@@ -10,7 +10,8 @@ import pytest
 from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (
-    QCheckBox, QDialogButtonBox, QLabel, QMessageBox, QToolButton, QToolTip,
+    QCheckBox, QDialogButtonBox, QLabel, QMenu, QMessageBox, QToolButton,
+    QToolTip,
 )
 
 from pdfar import APP_NAME, __version__
@@ -797,6 +798,191 @@ def test_tool_icons_exist_and_tint_dark(qapp, sample_pdf):
         win._update_zoom_actions(False)
         qapp.processEvents()
         image = win.act_sel_area.icon().pixmap(size).toImage()
+        colors = {
+            (image.pixelColor(x, y).red(),
+             image.pixelColor(x, y).green(),
+             image.pixelColor(x, y).blue())
+            for y in range(image.height())
+            for x in range(image.width())
+            if image.pixelColor(x, y).alpha() > 200
+        }
+        assert (230, 230, 230) in colors
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+# ------------------------------------------------------------ view modes
+VIEW_MODE_TEXTS = [
+    "Single Page",
+    "Facing Pages",
+    "Facing Pages (Center First Page)",
+    "Overview",
+    "Continuous",
+]
+
+
+def _page_view_menu(win):
+    for menu in win.findChildren(QMenu):
+        if menu.title() == "Page View":
+            return menu
+    return None
+
+
+def test_view_menu_has_page_view_submenu(qapp):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        menu = _page_view_menu(win)
+        assert menu is not None
+        assert [action.text() for action in menu.actions()] == VIEW_MODE_TEXTS
+        assert win.act_view_continuous.isChecked()
+        assert win._view_actions["continuous"] is win.act_view_continuous
+    finally:
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_toolbar_view_mode_button_matches_current_mode(qapp, sample_pdf):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        button = win.view_mode_button
+        assert button.popupMode() == QToolButton.ToolButtonPopupMode.InstantPopup
+        assert button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
+        assert [action.text() for action in button.menu().actions()] == \
+            VIEW_MODE_TEXTS
+        assert not button.icon().isNull()
+
+        win.open_document(sample_pdf)
+        win.act_view_facing.trigger()
+        qapp.processEvents()
+        assert win.view.view_mode == "facing"
+        assert win.act_view_facing.isChecked()
+        assert button.toolTip() == "Page View: Facing Pages"
+        assert not button.icon().isNull()
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_view_mode_is_per_document(qapp, sample_pdf, tmp_path):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        import shutil
+        second = tmp_path / "second.pdf"
+        shutil.copy(sample_pdf, second)
+
+        win.open_document(sample_pdf)
+        win.act_view_facing.trigger()
+        assert win.view.view_mode == "facing"
+
+        win.open_document(str(second))
+        assert win.tabs.count() == 2
+        assert win.view.view_mode == "continuous"
+        assert win.act_view_continuous.isChecked()
+
+        win.tabs.setCurrentIndex(0)
+        qapp.processEvents()
+        assert win.view.view_mode == "facing"
+        assert win.act_view_facing.isChecked()
+
+        win.tabs.setCurrentIndex(1)
+        qapp.processEvents()
+        assert win.view.view_mode == "continuous"
+        assert win.act_view_continuous.isChecked()
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_reclicking_view_mode_action_is_idempotent(qapp, sample_pdf):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        win.open_document(sample_pdf)
+        win.act_view_facing.trigger()
+        win.act_view_facing.trigger()
+        assert win.view.view_mode == "facing"
+        assert win.act_view_facing.isChecked()
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_reflow_disables_view_mode_actions(qapp, sample_pdf):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        win.open_document(sample_pdf)
+        win.act_view_facing.trigger()
+        win._toggle_reflow()
+        assert wait_until(qapp, lambda: win.view._reflow_worker is None)
+
+        for action in win._view_actions.values():
+            assert action.isEnabled() is False
+        assert win.view_mode_button.isEnabled() is False
+        assert win.view.view_mode == "facing"
+
+        win._toggle_reflow()
+        assert wait_until(qapp, lambda: win.view._reflow_worker is None)
+        for action in win._view_actions.values():
+            assert action.isEnabled() is True
+        assert win.view_mode_button.isEnabled() is True
+        assert win.view.view_mode == "facing"
+        assert win.act_view_facing.isChecked()
+        assert win.view._rows == [[0, 1], [2]]
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_no_document_disables_view_mode_actions(qapp):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        for action in win._view_actions.values():
+            assert action.isEnabled() is False
+        assert win.view_mode_button.isEnabled() is False
+    finally:
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_view_mode_icons_exist_and_tint_dark(qapp, sample_pdf):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        win.open_document(sample_pdf)
+        size = win.toolbar.iconSize()
+        for action in win._view_actions.values():
+            assert not action.icon().isNull()
+            assert action.icon().pixmap(size).size() == size
+
+        win.act_dark_mode.setChecked(True)
+        win._update_zoom_actions(False)
+        qapp.processEvents()
+        image = win.act_view_facing.icon().pixmap(size).toImage()
         colors = {
             (image.pixelColor(x, y).red(),
              image.pixelColor(x, y).green(),

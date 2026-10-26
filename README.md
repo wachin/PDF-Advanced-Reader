@@ -503,6 +503,15 @@ studied Okular's architecture and re-implemented the same *ideas* from scratch
 in Python/PyQt6/PyMuPDF. Without Okular's proven approach, we would not have
 solved this — thank you to the Okular developers.
 
+The **page view modes** (Single Page, Facing Pages, Facing Pages — Center First
+Page, Overview and Continuous) also follow the layout model of Okular's
+`PageView` (`part/pageview.cpp`, `conf/okular.kcfg`). Page pairing, the
+centered first and last pages, the three-column Overview, fit-to-spread and
+row navigation were studied there and re-implemented from scratch in
+Python/PyQt6. No Okular source code was copied, compiled or linked; only the
+behaviour and ideas were reused, which is compatible with both projects' GPL
+licenses.
+
 ---
 
 ## License

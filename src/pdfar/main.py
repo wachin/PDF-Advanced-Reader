@@ -43,7 +43,7 @@ from .sidebar import (
     TAB_ATTACHMENTS,
 )
 from .tabs import DocumentTab
-from .viewer import PDFView, MEMORY_LEVELS
+from .viewer import PDFView, MEMORY_LEVELS, VIEW_MODE_LABELS
 
 ZOOM_STEP_PRESETS = (0.025, 0.05, 0.075, 0.10, 0.125,
                      0.15, 0.175, 0.20, 0.225, 0.25)
@@ -420,6 +420,28 @@ class MainWindow(QMainWindow):
                        self.act_sel_area, self.act_sel_table):
             self._tool_group.addAction(action)
 
+        # Page view modes (Okular-inspired).  Per document; the active view
+        # is the source of truth, this window only mirrors it in the UI.
+        self._view_mode = "continuous"
+        self._view_group = QActionGroup(self)
+        self._view_group.setExclusive(True)
+        self._view_actions = {}
+        for mode in ("single", "facing", "facing_centered", "overview",
+                     "continuous"):
+            action = QAction(VIEW_MODE_LABELS[mode], self)
+            action.setCheckable(True)
+            action.setToolTip(VIEW_MODE_LABELS[mode])
+            action.triggered.connect(
+                lambda _checked=False, m=mode: self._set_view_mode(m))
+            self._view_group.addAction(action)
+            self._view_actions[mode] = action
+        self.act_view_single = self._view_actions["single"]
+        self.act_view_facing = self._view_actions["facing"]
+        self.act_view_facing_centered = self._view_actions["facing_centered"]
+        self.act_view_overview = self._view_actions["overview"]
+        self.act_view_continuous = self._view_actions["continuous"]
+        self.act_view_continuous.setChecked(True)
+
         # Zoom actions
         self.act_zin = QAction("Zoom In", self)
         self.act_zin.setShortcut("Ctrl++")
@@ -557,6 +579,11 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.act_zout)
         view_menu.addAction(self.act_ctrl_wheel_step)
         view_menu.addSeparator()
+        page_view_menu = view_menu.addMenu("Page View")
+        for mode in ("single", "facing", "facing_centered", "overview",
+                     "continuous"):
+            page_view_menu.addAction(self._view_actions[mode])
+        view_menu.addSeparator()
         view_menu.addAction(self.act_sidebar)
         view_menu.addAction(self.act_dark_mode)
         view_menu.addAction(self.act_reflow)
@@ -613,6 +640,21 @@ class MainWindow(QMainWindow):
         self.tool_split.setMenu(select_menu)
         self.tool_split.setDefaultAction(self.act_sel_text)
         tb.addWidget(self.tool_split)
+
+        # Page view mode menu button (icon reflects the active mode)
+        self.view_mode_button = QToolButton(tb)
+        self.view_mode_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.view_mode_button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.view_mode_button.setAutoRaise(True)
+        self.view_mode_button.setToolTip("Page View: Continuous")
+        page_view_menu = QMenu(self.view_mode_button)
+        for mode in ("single", "facing", "facing_centered", "overview",
+                     "continuous"):
+            page_view_menu.addAction(self._view_actions[mode])
+        self.view_mode_button.setMenu(page_view_menu)
+        tb.addWidget(self.view_mode_button)
         tb.addSeparator()
 
         # Page navigation
@@ -1298,7 +1340,8 @@ class MainWindow(QMainWindow):
             "mode, annotations, and tiled rendering that stays smooth on large "
             "documents.</p>"
             "<p style='margin:0 0 10px 0'><b>Technologies used</b><br>"
-            "Python 3 · PyQt6 · PyMuPDF (fitz)</p>"
+            "Python 3 · PyQt6 · PyMuPDF (fitz)<br>"
+            "Page view modes inspired by KDE Okular (GPL-2.0+/3.0+)</p>"
             "<p style='margin:0'><b>Copyright:</b> © 2026 Washington "
             "Indacochea Delgado<br>"
             f"<b>Email:</b> <a href='mailto:linuxfrontier@proton.me' "
@@ -1878,6 +1921,7 @@ class MainWindow(QMainWindow):
         tab.view.reflow_font_scale_changed.connect(self._on_reflow_font_scale_changed)
         tab.view.numbering_changed.connect(self._on_numbering_dragged)
         tab.view.transient_message.connect(self._show_transient_message)
+        tab.view.view_mode_changed.connect(self._on_view_mode_changed)
         tab.sidebar.goto_page_requested.connect(self._goto)
         tab.sidebar.thumbnail_size_changed.connect(self._on_thumbnail_size_changed)
         # Connect annotation manager to sidebar
@@ -1895,6 +1939,7 @@ class MainWindow(QMainWindow):
             tab.view.reflow_font_scale_changed.disconnect(self._on_reflow_font_scale_changed)
             tab.view.numbering_changed.disconnect(self._on_numbering_dragged)
             tab.view.transient_message.disconnect(self._show_transient_message)
+            tab.view.view_mode_changed.disconnect(self._on_view_mode_changed)
             tab.sidebar.goto_page_requested.disconnect(self._goto)
             tab.sidebar.thumbnail_size_changed.disconnect(self._on_thumbnail_size_changed)
         except TypeError:
@@ -2142,6 +2187,63 @@ class MainWindow(QMainWindow):
         if view is not None:
             view.set_tool_mode(mode)
 
+    def _set_view_mode(self, mode: str) -> None:
+        """Apply a page view mode to the active document."""
+        if mode not in VIEW_MODE_LABELS:
+            return
+        view = self.view
+        if view is None:
+            self._view_mode = mode
+            self._update_view_mode_actions()
+            return
+        if view.reflow_mode:
+            self.statusBar().showMessage(
+                "Page view modes are unavailable in Reflow", 5000)
+            self._update_view_mode_actions(True)
+            return
+        self._view_mode = mode
+        view.set_view_mode(mode)
+        self._update_view_mode_actions(False)
+
+    def _on_view_mode_changed(self, mode: str) -> None:
+        """The active view changed its layout (menu, restore, shortcut)."""
+        if self.sender() is not self.view or mode not in VIEW_MODE_LABELS:
+            return
+        self._view_mode = mode
+        self._refresh_view_mode_checks(mode)
+        self._update_view_mode_button()
+
+    def _refresh_view_mode_checks(self, mode: str) -> None:
+        action = self._view_actions.get(mode)
+        if action is not None and not action.isChecked():
+            action.setChecked(True)
+
+    def _update_view_mode_actions(self, reflow: Optional[bool] = None) -> None:
+        """Enable view modes only for a document outside Reflow."""
+        view = self.view
+        if reflow is None:
+            reflow = bool(view is not None and view.reflow_mode)
+        enabled = view is not None and not reflow
+        for action in self._view_actions.values():
+            action.setEnabled(enabled)
+        button = getattr(self, "view_mode_button", None)
+        if button is not None:
+            button.setEnabled(enabled)
+        if view is not None:
+            self._view_mode = view.view_mode
+            self._refresh_view_mode_checks(view.view_mode)
+        self._update_view_mode_button()
+
+    def _update_view_mode_button(self) -> None:
+        button = getattr(self, "view_mode_button", None)
+        if button is None:
+            return
+        mode = (self._view_mode if self._view_mode in VIEW_MODE_LABELS
+                else "continuous")
+        ink = "#e6e6e6" if self.act_dark_mode.isChecked() else "#3c3c3c"
+        button.setIcon(tinted_icon(f"view_{mode}.svg", ink))
+        button.setToolTip(f"Page View: {VIEW_MODE_LABELS[mode]}")
+
     def _update_tool_actions(self, reflow: bool) -> None:
         """Enable the tools that make sense and reapply the global mode."""
         view = self.view
@@ -2191,6 +2293,10 @@ class MainWindow(QMainWindow):
         self.act_sel_text.setIcon(tinted_icon("select_text.svg", ink))
         self.act_sel_area.setIcon(tinted_icon("select_area.svg", ink))
         self.act_sel_table.setIcon(tinted_icon("select_table.svg", ink))
+        for mode in ("single", "facing", "facing_centered", "overview",
+                     "continuous"):
+            self._view_actions[mode].setIcon(
+                tinted_icon(f"view_{mode}.svg", ink))
         if reflow:
             self.act_zin.setIcon(tinted_icon("text_increase.svg", ink))
             self.act_zout.setIcon(tinted_icon("text_decrease.svg", ink))
@@ -2209,6 +2315,7 @@ class MainWindow(QMainWindow):
             self.act_zout.setToolTip("Zoom out (Ctrl+-)")
             self.act_zoom_100.setText("100%")
             self.act_zoom_100.setToolTip("Actual size (Ctrl+0)")
+        self._update_view_mode_actions(reflow)
         self._update_tool_actions(reflow)
 
     def _update_status(self) -> None:

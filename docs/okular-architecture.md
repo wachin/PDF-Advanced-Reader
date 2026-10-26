@@ -187,6 +187,46 @@ with a limit proportional to RAM, evicting the farthest pages first.
 
 ---
 
+## View modes (page layout)
+
+PDFAR's five page view modes are an original Python/PyQt6 reimplementation of
+Okular's `PageView` layout. The mapping is:
+
+| PDFAR mode | Okular equivalent | Rows | Notes |
+|---|---|---|---|
+| Continuous | `Single` + `ViewContinuous=true` | one page | PDFAR's original layout |
+| Single Page | `Single` | one page | one screen at a time |
+| Facing Pages | `Facing` | `[0,1] [2,3] …` | page 1 on the left, odd last page alone |
+| Facing Pages (Center First Page) | `FacingFirstCentered` | `[0]`, then pairs | last page centered when the count is even |
+| Overview | `Summary` | 3 pages per row | `ViewColumns` default is 3 |
+
+Behavior studied and reimplemented:
+
+- `viewColumns()` returns 1 for Single, 2 for Facing/FacingFirstCentered and
+  `Settings::viewColumns()` (default 3) for Summary, clamped to the document
+  size (`part/pageview.cpp:4414-4426`).
+- `centerFirstPage` is true for `FacingFirstCentered` with at least three
+  pages; page 0 is centered alone, then pages pair from index 1.
+  `centerLastPage = centerFirstPage && pageCount % 2 == 0`
+  (`part/pageview.cpp:4748-4755`).
+- With continuous scrolling off, only the current row (`pageRowIdx`) is laid
+  out and it is centered vertically (`part/pageview.cpp:4802-4858`). Okular
+  centers a short last row's pages inside their own grid columns; PDFAR
+  instead centers the short row as a group.
+- In Facing layouts the two page edges touch the viewport centre (the gutter),
+  rather than each page being centered in an arbitrary cell
+  (`part/pageview.cpp:4836-4843`).
+- PDFAR's "Continuous" mode is the single-column continuous stack that PDFAR
+  already had; Okular expresses the same thing with `Single` plus its
+  independent `ViewContinuous` toggle.
+
+The PDFAR implementation (`src/pdfar/viewer.py`, `_relayout`,
+`_rows_for_mode`, `_column_widths`) is written from scratch: no code from
+Okular was copied, compiled or linked. Okular is GPL-2.0+/GPL-3.0+ and
+PDFAR is GPL-3.0+, so reusing the behaviour and ideas is compatible.
+
+---
+
 ## Exact references (for future consultation)
 
 | Topic | File | Approx. lines |
@@ -200,3 +240,6 @@ with a limit proportional to RAM, evicting the farthest pages first.
 | Render threads | `core/generator_p.h/.cpp` | 109–146 / 56–60 |
 | Memory cache | `core/document.cpp` | 253–330 |
 | Scroll handling | `part/pageview.cpp` | `scrollContentsBy()` 3509, QScroller 406 |
+| View-mode enum/defaults | `conf/okular.kcfg` | `ViewMode` 349–357, `ViewContinuous` 334–338, `ViewColumns` 326–333 |
+| Page layout/pairing | `part/pageview.cpp` | `slotRelayoutPages()` 4736–4916 |
+| View columns | `part/pageview.cpp` | `viewColumns()` 4414–4426 |
