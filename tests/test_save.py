@@ -468,31 +468,60 @@ def test_an_owner_only_document_saves_incrementally_with_its_password(tmp_path):
     session.close()
 
 
-def test_an_owner_only_document_is_not_silently_stripped(tmp_path):
-    """A rewrite cannot rebuild a password PDFAR never had, so it asks instead."""
+def test_an_owner_only_document_keeps_the_password_it_never_showed(tmp_path):
+    """Editing it no longer costs the user their protection.
+
+    F10-2 could not rebuild this file: serializing an opened encrypted document
+    yields decrypted bytes, and the owner password was never known, so the only
+    honest answer was to refuse.  Since F10-3c the working copy is a *copy of the
+    file*, so MuPDF reproduces the encryption from the encryption dictionary it
+    is reading — same method, same permissions, same unknown owner password.
+    """
     path = build_encrypted_pdf(tmp_path / "owner.pdf", "pw-owner", owner=True)
-    original = file_bytes(path)
     session = open_session(path)
+    permissions = session.encryption.permissions
     session.apply(AddText(0, "OWNER EDIT"))
 
-    with pytest.raises(ProtectionError) as exc:
-        save_document(session)
+    report = save_document(session)
 
-    assert "owner password" in str(exc.value).lower()
-    assert file_bytes(path) == original
-    assert session.dirty is True
+    assert report.incremental is False
+    doc = fitz.open(str(path))
+    assert (doc.metadata or {}).get("encryption")
+    # Permissions are read before authenticating: the owner password *grants*
+    # full access, so checking afterwards would prove nothing.
+    assert doc.permissions == permissions
+    assert "OWNER EDIT" in page_text(doc)
+    assert is_owner_access(doc.authenticate("pw-owner"))
+    assert doc.authenticate("wrong") == 0
+    doc.close()
     session.close()
 
 
-def test_replacing_an_unknown_owner_password_is_a_choice_not_an_accident(tmp_path):
-    """The copy keeps its restrictions; only the unknown password is replaced."""
+def test_replacing_an_unknown_owner_password_is_a_choice_not_an_accident(
+        tmp_path, monkeypatch):
+    """The case that still cannot be rebuilt: no room for a working copy.
+
+    With nowhere to put a revision, the session edits MuPDF's decrypted buffer
+    instead, and a buffer carries no encryption dictionary.  Weakening the copy
+    is then the user's decision, never ours.
+    """
+    import tempfile as _tempfile
+
+    def refuse(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
     path = build_encrypted_pdf(tmp_path / "owner.pdf", "pw-owner", owner=True)
     session = open_session(path)
-    session.apply(AddText(0, "WEAKENED COPY"))
-    with pytest.raises(ProtectionError):
-        save_document(session)
+    try:
+        monkeypatch.setattr(_tempfile, "mkdtemp", refuse)
+        session.apply(AddText(0, "WEAKENED COPY"))
 
-    report = save_document(session, allow_weakened=True)
+        with pytest.raises(ProtectionError):
+            save_document(session)
+
+        report = save_document(session, allow_weakened=True)
+    finally:
+        session.close()
 
     assert report.incremental is False
     doc = fitz.open(str(path))
@@ -501,7 +530,6 @@ def test_replacing_an_unknown_owner_password_is_a_choice_not_an_accident(tmp_pat
     assert "WEAKENED COPY" in page_text(doc)
     assert doc.authenticate("pw-owner") == 0, "the old owner password still works"
     doc.close()
-    session.close()
 
 
 def test_a_password_typed_at_open_survives_every_rewrite(tmp_path):

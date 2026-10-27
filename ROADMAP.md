@@ -905,7 +905,8 @@ PDFAR must be local-first and privacy-first.
 
 Phase status: **[~] Under way.** F10-0 (document session), F10-1 (edit
 framework) and F10-2 (save, save as, revert) are implemented; **F10-3** is under
-way, with annotations as edits (F10-3a) and the save-cost fix (F10-3b) done.
+way, with annotations as edits (F10-3a), the save-cost fix (F10-3b) and revision
+files for undo (F10-3c) done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -921,6 +922,12 @@ sequence 2.81 s, peak RSS 508 MB — the same shape as F10-1, because saving is 
 on the read path. Recording the encryption at open costs two attribute reads
 (`doc.permissions`, `doc.metadata`) and the verification render only happens on a
 full rewrite, which is a command the user asked for.
+
+*Measured on F10-3c:* GS262 open 1.67 s, first page 0.33 s, jump 0.44 s, zoom
+sequence 1.85 s, peak RSS 494 MB — the read path has never been touched by this
+change, and a worker reading a page off a revision file costs 27.6 ms, which is
+what `fitz.open(path)` plus one page of text has always cost. What changed is the
+edit: 2.1 s and a 25 MB buffer per highlight became 54–70 ms and nothing.
 
 This is the umbrella for every capability that changes a document. F6 (page
 manipulation), F7-3 (true redaction) and F8-1 (content editing) are now
@@ -1134,14 +1141,18 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       F10-2 shipped, and **1.75 s** at `garbage=2` — 3.5 s for the whole action
       once the undo snapshot is included, with the deleted page's bytes and
       objects still leaving the file.
-- [ ] A comment-only edit should not have to copy the whole document to undo it.
-      Measured on GS262 (540 pages, 25 MB): one highlight costs **2.1 s and
-      ~25 MB**, because an undo step is a full `tobytes()` snapshot — the same
-      price F10-1 already charges for rotating a page, but highlighting is the
-      editing action users actually perform. Ten of them reach the history's
-      256 MB byte cap, so the earlier ones start disappearing. Undoing by inverse
-      intent (`AddHighlight` ↔ `RemoveHighlight`) would make it free; that is a
-      change to the edit framework, not to annotations.
+- [x] A comment-only edit no longer has to copy the whole document to undo it
+      (**F10-3c.** The session keeps its live document as a file in a private
+      scratch directory; an edit copies the current revision, appends to that
+      copy and hands the file it came from over as the undo point, so undo is a
+      reopen instead of a replay. One highlight on GS262 went from **2.1 s and
+      ~25 MB of RAM** to **54–70 ms and no buffer at all** — undo 4.5 ms, redo
+      3.4 ms. Readers open the revision file as well, so the history no longer
+      parks a serialized copy of the book in memory. The 256 MB cap still
+      applies and now bounds scratch *disk*: the book keeps about ten revisions
+      before the oldest steps fall off. Undoing by inverse intent is off the
+      table — reopening a file is already cheaper than reasoning about what an
+      edit undid.)
 - [ ] Notes persisted as real `/Text` annotations, not only in memory
       (a note *on* a highlight is that annotation's own `/Contents` and is done;
       a standalone sticky note is not)
@@ -1257,8 +1268,10 @@ Save, Save As, Revert (atomic, verified, incremental when possible)
 
 F10-3 — under way
 Finish the annotation system. Done: annotation changes are routed through F10-1,
-so they undo and mark dirty (F10-3a). Next: undo a comment-only edit without a
-whole-document snapshot, then standalone `/Text` notes and the comments panel.
+so they undo and mark dirty (F10-3a); a save stopped compacting the object table
+(F10-3b); undo is a revision file in a scratch copy, so a highlight costs 55 ms
+instead of 2.1 s and no buffer (F10-3c). Next: standalone `/Text` notes and the
+comments panel.
 
 Goal:
 
@@ -1996,7 +2009,12 @@ without asking (`needs_pass == 0`), so the session holds the *method* and the
 the user chooses: don't save, or save a copy with a fresh random owner password
 and the original permissions. Silently dropping the encryption is not offered.
 `owner_pw == user_pw` is also refused on the way in, because MuPDF answers such an
-authentication with 6 and resets the permissions to full.
+authentication with 6 and resets the permissions to full. *(This was the story for
+a document serialized out of memory. Since F10-3c the working copy is a copy of
+the *file*, so MuPDF rebuilds the encryption from the encryption dictionary it
+read and an edited owner-only document saves with its protection — and its
+unknown owner password — intact. The refusal is now the fallback's behaviour: it
+comes back only when there is no scratch space and the edit happened in a buffer.)*
 
 **Measured**: GS262 (540 pages) open 2.12 s, first page 0.25 s, distant jump
 0.70 s, zoom sequence 2.81 s, peak RSS 508 MB — unchanged from F10-1, since
@@ -2127,6 +2145,88 @@ fails and level 2 passes, so the level cannot silently drop back.
 zoom are the F10-3a numbers, since nothing here runs before a save.
 
 **Tests**: 490 passed, unchanged in count; three consecutive full runs.
+
+---
+
+### F10-3c Undo is a file, not a buffer — [x] Implemented
+
+**Completed**: 2026-10-27
+
+**What landed**: the session keeps its live document in a private scratch
+directory, and an undo step is a *revision file* rather than a `tobytes()`
+buffer. `src/pdfar/revisions.py` (new) owns the directory — `create()`,
+`from_file(path)` which seeds it with a copy of the user's file, `next_path()`
+handing out `r0001.pdf`, `r0002.pdf`, …, `copy_into`, `release`, `size_of`, and
+`close()` which removes the whole tree. `edits.py` gained `Snapshot` (bytes *or*
+a path, with the `size` the byte budget counts) and an `on_release` callback, so
+a step that leaves the history takes its file with it. `session.py`'s editing
+core is now: copy the current revision → apply the edit to the copy → append to
+the copy → adopt it, and record the file the copy came from as what undo returns
+to. Readers go the same way: `open_copy()` opens the revision instead of parsing
+a buffer, and `content_path()` tells the render workers which file to read.
+
+**The cheaper idea that did not work**: an undo point as a byte offset into one
+appended file. MuPDF's incremental save *rewrites the section a previous save
+appended* — the prefix bytes shift and the object order changes — so a truncate
+to a recorded mark produced a document with the annotations gone. Measured by
+diffing the prefix of a save against the file it was appended to, then
+abandoned. Whole revisions are the honest unit.
+
+**What it costs** (GS262, 540 pages, 25 MB, through `DocumentSession`):
+
+| step | before | after |
+|------|--------|-------|
+| one highlight | 2.1 s and ~25 MB of RAM | **54–70 ms, no buffer** |
+| undo | reopen of a serialized copy | **4.5 ms** |
+| redo | — | **3.4 ms** |
+| a reader's page fetch | parse a 25 MB buffer | **27.6 ms** off the file |
+| Ctrl+S afterwards | 1.75 s | 1.95 s (unchanged rewrite) |
+
+Saving is still a full rewrite because the live document's `doc.name` is now a
+scratch path, never the user's — `_can_append` correctly refuses to append into
+someone else's file. The 256 MB history cap was written for RAM and now bounds
+scratch disk: three highlights plus the seed sit at 100 MB, so the book keeps
+about ten revisions before the oldest steps fall off, and the directory is gone
+when the session closes.
+
+**Fallbacks, because an edit must not fail for want of a temp dir**: a session
+with no file to copy, no writable scratch, or a scratch that stops working edits
+the way F10-1 did — `tobytes()` buffers in RAM — chosen per session on the first
+accepted edit. `revert()` clears the revisions and the next edit re-seeds from
+the file the user just restored.
+
+**Two consequences found here**:
+1. Four view tests in `tests/test_edits.py` started failing because a render
+   job queued before `close()` called `read_version()` afterwards, when the
+   revision pointer had already been cleared — the cached buffer used to hide
+   that. `DocumentSession` now records that it is closed and reads return
+   nothing instead of resurrecting content from a deleted file.
+2. An **edited owner-only document keeps its protection** (see F10-2 above): the
+   working copy carries the encryption dictionary, so MuPDF reproduces the
+   original method, permissions *and* the owner password PDFAR never saw.
+   `tests/test_save.py`'s two `ProtectionError` tests were rewritten — one now
+   asserts preservation, the other forces the buffer fallback to keep the
+   refusal covered.
+
+**Files changed**: `src/pdfar/revisions.py` (new), `src/pdfar/edits.py`,
+`src/pdfar/session.py`.
+
+**Measured**: the read path is unchanged — GS262 open 1.67 s, first page 0.33 s,
+distant jump 0.44 s, zoom sequence 1.85 s, peak RSS 494 MB, all inside the
+F10-2/F10-3b spread.
+
+**Verified by eye** (headless, on a copy of the book — `external/` is never
+written to): three highlights on page 301, undone and redone, saved with
+Ctrl+S; the saved file reopens with all three `/Highlight` annotations and the
+screenshot shows the bands in the page view and in the thumbnail strip.
+
+**Tests**: 514 passed (was 490) — `tests/test_revisions.py` (24) covers the
+store's privacy, a failed write leaving nothing behind, the user's file staying
+untouched, undo/redo walking the files, a structure edit round-tripping, a
+half-applied edit leaving directory, content, version and history exactly as they
+were, readers taking the file with no buffer published, trimming releasing files,
+the byte budget counting revisions, close removing the directory, revert and
+re-seeding, and both fallback routes. Three consecutive full runs.
 
 ---
 

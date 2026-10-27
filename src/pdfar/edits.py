@@ -9,21 +9,23 @@ Two rules shape the implementation:
 
 * **Copy and adopt.**  An edit runs against a throwaway clone of the document.
   The live document is replaced only when the edit returns without raising, so a
-  failed edit cannot leave the user's document half-changed — the bytes on the
-  undo stack are taken from the document *before* the attempt, and the attempt
+  failed edit cannot leave the user's document half-changed — the state on the
+  undo stack is taken from the document *before* the attempt, and the attempt
   never touches it.
-* **Undo is a byte snapshot, not an inverse operation.**  Writing the inverse of
-  an arbitrary PDF edit correctly is the hard part of a PDF editor; keeping the
-  previous state is not.  The cost is memory, so the stack is bounded by both a
-  step count and a byte budget.
+* **Undo is a snapshot, not an inverse operation.**  Writing the inverse of an
+  arbitrary PDF edit correctly is the hard part of a PDF editor; keeping the
+  previous state is not.  The cost is a whole document per step, so the stack is
+  bounded by both a step count and a byte budget, and since F10-3c the whole
+  document is a *file* in :mod:`pdfar.revisions` rather than a buffer in RAM.
 """
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import IntFlag
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
@@ -92,46 +94,107 @@ class SetMetadata(Edit):
             raise EditError(f"Could not set metadata: {exc}") from exc
 
 
+@dataclass(frozen=True)
+class Snapshot:
+    """The document as it was before one step: a byte buffer, or a revision file.
+
+    Two shapes because two mechanisms reach them.  A session with a file to seed
+    from keeps whole revisions on disk (:mod:`pdfar.revisions`) and hands them
+    over as paths, which costs a copy of the file and no RAM at all; a session
+    without one keeps MuPDF's ``tobytes()`` buffer in memory, which is what F10-1
+    did.  ``size`` is what the byte budget counts — the buffer's length or the
+    file's size, so one number still means "what this step is holding".
+    """
+
+    data: Optional[bytes] = None
+    path: Optional[str] = None
+    size: int = 0
+
+    @property
+    def is_revision(self) -> bool:
+        return self.path is not None
+
+    def content(self) -> bytes:
+        """The snapshot as PDF bytes, reading the revision file if that is what it is."""
+        if self.data is not None:
+            return self.data
+        if self.path is None:
+            raise ValueError("an empty snapshot has no content")
+        with open(self.path, "rb") as handle:
+            return handle.read()
+
+
+def _as_snapshot(value: Union["Snapshot", bytes, str]) -> "Snapshot":
+    """Accept the shapes callers reach for: a snapshot, a buffer, or a path."""
+    if isinstance(value, Snapshot):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        return Snapshot(data=bytes(value), size=len(value))
+    if isinstance(value, str):
+        try:
+            size = os.path.getsize(value)
+        except OSError:
+            size = 0
+        return Snapshot(path=value, size=size)
+    raise TypeError(f"not a document snapshot: {type(value).__name__}")
+
+
 @dataclass
 class _Step:
     """One accepted edit: what it was called, what it can have changed, and
-    the document bytes as they were *before* it ran."""
-
+    the document as it was *before* it ran."""
     label: str
     scope: Scope
-    before: bytes
+    before: Snapshot
+
+    @property
+    def size(self) -> int:
+        return self.before.size
 
 
 class EditHistory:
-    """Undo/redo as whole-document byte snapshots, bounded two ways.
+    """Undo/redo as whole-document snapshots, bounded two ways.
 
     A step count alone is not a bound: 50 snapshots of a 500 MB scanned manual
     is 25 GB.  So the oldest steps are dropped until the stack fits both
     ``max_steps`` and ``max_bytes``.  Dropping the *oldest* keeps the most
     recent work undoable, which is what a user reaching for Ctrl+Z expects.
+
+    ``on_release`` is called with the path of a revision file that no step refers
+    to any more; a buffer needs nothing.
     """
 
-    def __init__(self, max_steps: int = 50, max_bytes: int = 256 * 1024 * 1024):
+    def __init__(self, max_steps: int = 50, max_bytes: int = 256 * 1024 * 1024,
+                 on_release=None):
         self.max_steps = max(1, int(max_steps))
         self.max_bytes = max(1, int(max_bytes))
+        self._on_release = on_release
         self._undo: List[_Step] = []
         self._redo: List[_Step] = []
         self._bytes = 0
 
     # ------------------------------------------------------------- recording
-    def record(self, edit: Edit, before: bytes) -> None:
+    def record(self, edit: Edit, before: Union[Snapshot, bytes, str]) -> None:
         """Store the pre-edit state for ``edit`` and clear the redo branch."""
-        self._undo.append(_Step(edit.label, edit.scope, bytes(before)))
-        self._bytes += len(before)
-        self._bytes -= sum(len(step.before) for step in self._redo)
+        step = _Step(edit.label, edit.scope, _as_snapshot(before))
+        self._undo.append(step)
+        self._bytes += step.size
+        self._bytes -= sum(s.size for s in self._redo)
+        for dropped in self._redo:
+            self._release(dropped.before)
         self._redo.clear()
         self._trim()
+
+    def _release(self, snapshot: Snapshot) -> None:
+        if snapshot.path and self._on_release is not None:
+            self._on_release(snapshot.path)
 
     def _trim(self) -> None:
         while self._undo and (len(self._undo) > self.max_steps
                               or self._bytes > self.max_bytes):
             dropped = self._undo.pop(0)
-            self._bytes -= len(dropped.before)
+            self._bytes -= dropped.size
+            self._release(dropped.before)
 
     # ------------------------------------------------------------------- state
     def __len__(self) -> int:
@@ -172,25 +235,27 @@ class EditHistory:
     def redo_target(self) -> Optional[_Step]:
         return self._redo[-1] if self._redo else None
 
-    def take_undo(self, current: bytes) -> _Step:
+    def take_undo(self, current: Union[Snapshot, bytes, str]) -> _Step:
         """Move to the previous state, parking *current* for redo."""
         if not self._undo:
             raise EditError("Nothing to undo")
         step = self._undo.pop()
-        self._bytes -= len(step.before)
-        self._redo.append(_Step(step.label, step.scope, current))
-        self._bytes += len(current)
+        self._bytes -= step.size
+        parked = _Step(step.label, step.scope, _as_snapshot(current))
+        self._redo.append(parked)
+        self._bytes += parked.size
         self._trim_redo()
         return step
 
-    def take_redo(self, current: bytes) -> _Step:
+    def take_redo(self, current: Union[Snapshot, bytes, str]) -> _Step:
         """Move forward again, parking *current* for undo."""
         if not self._redo:
             raise EditError("Nothing to redo")
         step = self._redo.pop()
-        self._bytes -= len(step.before)
-        self._undo.append(_Step(step.label, step.scope, current))
-        self._bytes += len(current)
+        self._bytes -= step.size
+        parked = _Step(step.label, step.scope, _as_snapshot(current))
+        self._undo.append(parked)
+        self._bytes += parked.size
         self._trim()
         return step
 
@@ -199,11 +264,15 @@ class EditHistory:
         # then the oldest undo, which is the least useful end of each.
         while self._bytes > self.max_bytes and (self._redo or self._undo):
             if self._redo:
-                self._bytes -= len(self._redo.pop(0).before)
+                dropped = self._redo.pop(0)
             else:
-                self._bytes -= len(self._undo.pop(0).before)
+                dropped = self._undo.pop(0)
+            self._bytes -= dropped.size
+            self._release(dropped.before)
 
     def clear(self) -> None:
+        for step in self._undo + self._redo:
+            self._release(step.before)
         self._undo.clear()
         self._redo.clear()
         self._bytes = 0
