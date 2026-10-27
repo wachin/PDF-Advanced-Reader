@@ -730,8 +730,9 @@ def test_toolbar_has_explore_and_split_button(qapp):
                 == QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         assert split.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
         assert split.defaultAction() is win.act_sel_text
-        assert [a.text() for a in split.menu().actions()] == [
-            "Text Selection", "Area Selection", "Table Selection"]
+        assert [a.text() for a in split.menu().actions()
+                if not a.isSeparator()] == [
+            "Text Selection", "Area Selection", "Table Selection", "Freehand"]
         assert win.act_sel_text.isChecked()
         assert win._tool_mode == "text"
         assert win._last_selection == "text"

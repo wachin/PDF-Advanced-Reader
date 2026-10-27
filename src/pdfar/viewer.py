@@ -29,8 +29,8 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QColor, QFont, QFontMetrics, QFontMetricsF, QImage, QKeyEvent, QMouseEvent,
-    QPaintEvent, QPainter, QPen, QPixmap, QWheelEvent, QGuiApplication,
-    QResizeEvent,
+    QPaintEvent, QPainter, QPainterPath, QPen, QPixmap, QWheelEvent,
+    QGuiApplication, QResizeEvent,
 )
 from PyQt6.QtWidgets import (
     QAbstractScrollArea, QFrame, QInputDialog, QMenu, QScroller,
@@ -58,8 +58,14 @@ from .search import SearchHit
 from .session import DocumentSession
 from .tiles import Tile, TileGrid, TILE_SIZE
 from .annotations import (
-    Annotation, AnnotationManager, HIGHLIGHT_COLORS, NoteAnnotation,
+    INK_COLOR, INK_WIDTH, Annotation, AnnotationManager, HIGHLIGHT_COLORS,
+    NoteAnnotation,
 )
+
+#: How far apart two captured points of a pen stroke have to be, in screen
+#: pixels.  A drag delivers a point every couple of pixels; keeping all of them
+#: would put thousands of numbers in the file to draw one line.
+PEN_MIN_STEP = 2.0
 
 PAD = 16          # outer margin (content coords)
 GAP = 12          # gap between pages / columns
@@ -243,11 +249,18 @@ class PDFView(QAbstractScrollArea):
         self._sel_caret: Optional[Tuple[int, int]] = None
         self._dragging = False
 
-        # Mouse tools (Okular-style): browse pan, text, area, table.
+        # Mouse tools (Okular-style): browse pan, text, area, table, pen.
         self.tool_mode = "text"
         self._marquee: Optional[dict] = None
         self._panning = False
         self._pan_last = QPoint()
+        #: The stroke being dragged: ``{"page": int, "points": [(x, y), …]}`` in
+        #: page space, or ``None`` when the pen is not down.
+        self._stroke: Optional[dict] = None
+        #: What the pen draws with.  Both go into the annotation, so a drawing
+        #: keeps its look when another reader shows the file.
+        self.ink_color = INK_COLOR
+        self.ink_width = INK_WIDTH
 
         # search
         self._hit_rects: Dict[int, List[Tuple[float, float, float, float]]] = {}
@@ -686,19 +699,23 @@ class PDFView(QAbstractScrollArea):
         self.viewport().update()
 
     # ---------------------------------------------------------- mouse tools
-    TOOL_MODES = ("browse", "text", "area", "table")
+    TOOL_MODES = ("browse", "text", "area", "table", "draw")
+
+    #: Tools that need the page geometry reflow does not have.
+    _PAGE_ONLY_TOOLS = ("area", "table", "draw")
 
     def set_tool_mode(self, mode: str) -> None:
-        """Switch the left-button tool: browse, text, area or table."""
+        """Switch the left-button tool: browse, text, area, table or pen."""
         if mode not in self.TOOL_MODES:
             return
-        if self.reflow_mode and mode in ("area", "table"):
+        if self.reflow_mode and mode in self._PAGE_ONLY_TOOLS:
             mode = "text"
         if mode == self.tool_mode:
             self._apply_tool_cursor()
             return
         self.tool_mode = mode
         self._cancel_marquee()
+        self._cancel_stroke()
         self._panning = False
         if mode != "text":
             self.clear_selection()
@@ -729,6 +746,52 @@ class PDFView(QAbstractScrollArea):
         if self._marquee is not None:
             self._marquee = None
             self.viewport().update()
+
+    def _cancel_stroke(self) -> None:
+        """Give up the stroke in progress: it never reaches the document."""
+        if self._stroke is not None:
+            self._stroke = None
+            self.viewport().update()
+
+    def _extend_stroke(self, pos: QPoint) -> None:
+        """Add the point under the cursor to the stroke in progress.
+
+        The point is captured in page space, the space the annotation will be
+        stored in, so scroll bars, zoom and a turned view cannot move it later.
+        A point closer than :data:`PEN_MIN_STEP` to the last one kept is
+        dropped: a drag reports every couple of pixels, and a line that leaned on
+        that would be thousands of numbers in the file for one stroke.
+        """
+        stroke = self._stroke
+        hit = self._pdf_point_at(pos)
+        if hit is None or hit[0] != stroke["page"]:
+            return                      # off the page, or over a neighbour
+        _page, x, y = hit
+        last_x, last_y = stroke["points"][-1]
+        step = PEN_MIN_STEP / self.zoom
+        if abs(x - last_x) < step and abs(y - last_y) < step:
+            return
+        stroke["points"].append((x, y))
+        self.viewport().update()
+
+    def _commit_stroke(self, stroke: dict, pos: QPoint) -> None:
+        """Hand the finished stroke to the document as one edit.
+
+        One press-to-release is one drawing, so it is one annotation and one
+        Ctrl+Z — the same rule a highlight of several lines follows (F10-3a).
+        The release position is appended when it is new, so the stroke ends
+        where the pen was lifted rather than at the last move Qt delivered.
+        """
+        points = stroke["points"]
+        hit = self._pdf_point_at(pos)
+        if hit is not None and hit[0] == stroke["page"]:
+            _page, x, y = hit
+            last_x, last_y = points[-1]
+            if abs(x - last_x) > 0.01 or abs(y - last_y) > 0.01:
+                points.append((x, y))
+        self.annotation_manager.add_ink(stroke["page"], [points],
+                                        color=self.ink_color,
+                                        width=self.ink_width)
 
     # ------------------------------------------------------ numbering preview
     def set_numbering_preview(
@@ -820,7 +883,7 @@ class PDFView(QAbstractScrollArea):
         self.reflow_mode = enabled
         if enabled:
             self.clear_selection()
-            if self.tool_mode in ("area", "table"):
+            if self.tool_mode in self._PAGE_ONLY_TOOLS:
                 self.set_tool_mode("text")
             self._enter_reflow()
         else:
@@ -1257,6 +1320,7 @@ class PDFView(QAbstractScrollArea):
             return
         self.view_mode = mode
         self._cancel_marquee()
+        self._cancel_stroke()
         if not self.reflow_mode:
             self._relayout()
             if self.fit_mode != "none":
@@ -1648,7 +1712,44 @@ class PDFView(QAbstractScrollArea):
             self._paint_overlays(painter, i, x, y)
 
         self._paint_marquee(painter)
+        self._paint_stroke(painter)
         painter.end()
+
+    def _paint_stroke(self, painter: QPainter) -> None:
+        """Draw the pen stroke in progress, in view coordinates.
+
+        The captured points are page space, so they are mapped the same way the
+        page is: a turned view has to carry the half-drawn line with the page
+        instead of leaving it under the mouse (F10-3g).
+        """
+        if self._stroke is None:
+            return
+        points = self._stroke["points"]
+        page = self._stroke["page"]
+        if not points or page >= len(self.page_sizes):
+            return
+        w0, h0 = self.page_sizes[page]
+        ox, oy = self._page_origin(page)
+        ox -= self.horizontalScrollBar().value()
+        oy -= self.verticalScrollBar().value()
+        mapped = []
+        for x, y in points:
+            u, v = map_point(x, y, w0, h0, self.rotation)
+            mapped.append(QPointF(ox + u * self.zoom, oy + v * self.zoom))
+        pen = QPen(QColor(self.ink_color))
+        pen.setWidthF(max(1.0, self.ink_width * self.zoom))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if len(mapped) == 1:
+            # A tap is a dot, and a path of one move-to paints nothing.
+            painter.drawPoint(mapped[0])
+            return
+        path = QPainterPath(mapped[0])
+        for point in mapped[1:]:
+            path.lineTo(point)
+        painter.drawPath(path)
 
     def _paint_marquee(self, painter: QPainter) -> None:
         """Draw the area/table selection rectangle in view coordinates."""
@@ -2633,6 +2734,17 @@ class PDFView(QAbstractScrollArea):
             super().mousePressEvent(event)
             return
         if (event.button() == Qt.MouseButton.LeftButton
+                and self.tool_mode == "draw"):
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            self.clear_selection()
+            hit = self._pdf_point_at(event.position().toPoint())
+            if hit is not None:
+                page, x, y = hit
+                self._stroke = {"page": page, "points": [(x, y)]}
+                self.viewport().update()
+            event.accept()
+            return
+        if (event.button() == Qt.MouseButton.LeftButton
                 and self.tool_mode in ("area", "table")):
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             self.clear_selection()
@@ -2686,6 +2798,11 @@ class PDFView(QAbstractScrollArea):
                 self.viewport().update()
             event.accept()
             return
+        if (self._stroke is not None
+                and (event.buttons() & Qt.MouseButton.LeftButton)):
+            self._extend_stroke(event.position().toPoint())
+            event.accept()
+            return
         if (self._marquee is not None
                 and (event.buttons() & Qt.MouseButton.LeftButton)):
             self._marquee["current"] = event.position().toPoint() + QPoint(
@@ -2723,6 +2840,14 @@ class PDFView(QAbstractScrollArea):
                 and self._panning):
             self._panning = False
             self._apply_tool_cursor()
+            event.accept()
+            return
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self._stroke is not None):
+            stroke = self._stroke
+            self._stroke = None
+            self.viewport().update()
+            self._commit_stroke(stroke, event.position().toPoint())
             event.accept()
             return
         if (event.button() == Qt.MouseButton.LeftButton
@@ -2765,6 +2890,10 @@ class PDFView(QAbstractScrollArea):
             self._numbering_preview = original
             self.viewport().update()
             self.numbering_changed.emit(original)
+            event.accept()
+            return
+        if key == Qt.Key.Key_Escape and self._stroke is not None:
+            self._cancel_stroke()
             event.accept()
             return
         if key == Qt.Key.Key_Escape and self._marquee is not None:

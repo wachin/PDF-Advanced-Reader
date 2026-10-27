@@ -43,6 +43,10 @@ NOTE_ICON_SIZE = 16.0
 #: it was drawn with rather than the viewer's.
 INK_WIDTH = 2.0
 
+#: The pen's default colour.  Ink is drawn to be read on the page, so unlike a
+#: highlight — which sits *under* the text — it starts out opaque and dark.
+INK_COLOR = "#000000"
+
 #: What a damaged annotation can raise while the list is being read.  MuPDF
 #: signals its failures through these; asking for less than ``Exception`` means a
 #: mistake in :func:`_highlight_model` still surfaces instead of quietly
@@ -438,7 +442,7 @@ class AddInk(SinglePageEdit):
     ann_id: str
     page: int
     paths: Tuple[tuple, ...]
-    color: str = "#000000"
+    color: str = INK_COLOR
     width: float = INK_WIDTH
     author: str = ""
     note: str = ""
@@ -719,7 +723,7 @@ class AnnotationManager(QObject):
         return made if isinstance(made, NoteAnnotation) else None
 
     def add_ink(self, page: int, paths: Sequence[Sequence[tuple]],
-                color: str = "#000000", width: float = INK_WIDTH,
+                color: str = INK_COLOR, width: float = INK_WIDTH,
                 author: str = "",
                 note: str = "") -> Optional[InkAnnotation]:
         """Draw *paths* — one list of points per stroke — on *page*.

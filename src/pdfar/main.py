@@ -485,8 +485,14 @@ class MainWindow(QMainWindow):
         self.act_sel_table.triggered.connect(
             lambda: self._set_tool_mode("table"))
 
+        self.act_draw = QAction("Freehand", self)
+        self.act_draw.setCheckable(True)
+        self.act_draw.setToolTip("Freehand: drag to draw on the page")
+        self.act_draw.triggered.connect(
+            lambda: self._set_tool_mode("draw"))
+
         for action in (self.act_explore, self.act_sel_text,
-                       self.act_sel_area, self.act_sel_table):
+                       self.act_sel_area, self.act_sel_table, self.act_draw):
             self._tool_group.addAction(action)
 
         # Page view modes (Okular-inspired).  Per document; the active view
@@ -777,6 +783,8 @@ class MainWindow(QMainWindow):
         select_menu.addAction(self.act_sel_text)
         select_menu.addAction(self.act_sel_area)
         select_menu.addAction(self.act_sel_table)
+        select_menu.addSeparator()
+        select_menu.addAction(self.act_draw)
         self.tool_split.setMenu(select_menu)
         self.tool_split.setDefaultAction(self.act_sel_text)
         tb.addWidget(self.tool_split)
@@ -2502,14 +2510,15 @@ class MainWindow(QMainWindow):
             "text": self.act_sel_text,
             "area": self.act_sel_area,
             "table": self.act_sel_table,
+            "draw": self.act_draw,
         }[mode]
 
     def _set_tool_mode(self, mode: str) -> None:
         """Activate a mouse tool and apply it to the current view."""
-        if mode not in ("browse", "text", "area", "table"):
+        if mode not in ("browse", "text", "area", "table", "draw"):
             return
         view = self.view
-        if view is not None and view.reflow_mode and mode in ("area", "table"):
+        if view is not None and view.reflow_mode and mode in ("area", "table", "draw"):
             mode = "text"
         self._tool_mode = mode
         action = self._tool_action(mode)
@@ -2586,14 +2595,15 @@ class MainWindow(QMainWindow):
         self.act_sel_text.setEnabled(has_doc)
         self.act_sel_area.setEnabled(selection_ok)
         self.act_sel_table.setEnabled(selection_ok)
+        self.act_draw.setEnabled(selection_ok)
         split = getattr(self, "tool_split", None)
         if split is None:
             return
         split.setEnabled(has_doc)
-        if reflow and self._tool_mode in ("area", "table"):
+        if reflow and self._tool_mode in ("area", "table", "draw"):
             self._set_tool_mode("text")
             self.statusBar().showMessage(
-                "Area and Table selection are unavailable in Reflow", 5000)
+                "Area, Table and Freehand tools are unavailable in Reflow", 5000)
             return
         if view is not None:
             view.set_tool_mode(self._tool_mode)
@@ -2626,6 +2636,7 @@ class MainWindow(QMainWindow):
         self.act_sel_text.setIcon(tinted_icon("select_text.svg", ink))
         self.act_sel_area.setIcon(tinted_icon("select_area.svg", ink))
         self.act_sel_table.setIcon(tinted_icon("select_table.svg", ink))
+        self.act_draw.setIcon(tinted_icon("draw_freehand.svg", ink))
         for mode in ("single", "facing", "facing_centered", "overview",
                      "continuous"):
             self._view_actions[mode].setIcon(

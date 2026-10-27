@@ -1216,11 +1216,21 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       F10-3h's per-page re-read carries over: drawing on one page re-reads one
       page. An empty drawing is refused — MuPDF turns an empty `/InkList` into an
       annotation whose rectangle is the whole coordinate range.)
-- [ ] The tool that draws one: a pen mode that captures the mouse, turns the
+- [x] The tool that draws one: a pen mode that captures the mouse, turns the
       drag into page-space points, and hands them to `AddInk` as one edit per
-      drawing — with the colour and thickness the user picks
-      (**F10-3j, next**). The document side is done; nothing in the interface can
-      reach it yet.
+      drawing (**F10-3j.** A "Freehand" tool beside Text, Area and Table; the
+      press starts a stroke, the moves extend it, the release turns the whole
+      drag into one `AddInk` — one Ctrl+Z, not one per pixel. Points are taken
+      in page space, so a rotated view draws where the pointer is; points that
+      leave the page are dropped rather than clamped; the stroke paints under
+      the pointer while the button is held; Escape and changing tools cancel an
+      unfinished stroke. The pen is a page tool, so reflow disables it with
+      Area and Table. Colour and thickness are view attributes with the
+      defaults from `annotations.py`, not yet a picker — that is F10-3k.)
+- [ ] Pen colour and thickness: a picker for both, and the stroke previewed in
+      the chosen colour while drawing (**F10-3k, next**). The view already
+      holds `ink_color`/`ink_width` and `AddInk` already writes both; nothing
+      in the interface can set them yet.
 - [ ] Shapes: rectangle, ellipse, line, arrow, polygon (`/Square`, `/Circle`,
       `/Line`, `/Polygon`)
 - [ ] Stamps, including the standard pre-defined rubber-stamp images
@@ -1341,11 +1351,12 @@ instead of 2.1 s and no buffer (F10-3c); a sticky note is a real `/Text`
 annotation in the document (F10-3d), right-clicking a page is how you place one
 (F10-3e), a comment row in the panel jumps to the comment it names (F10-3f), a
 highlight lands on its words whatever the view rotation (F10-3g), the
-annotation list re-reads only the pages an edit wrote to (F10-3h), and a
-freehand drawing is a real `/Ink` annotation in the document (F10-3i).
-Next, in order: the tool that draws one, the rest of the kinds (shapes, stamps,
-measurement), appearance streams so other readers show what PDFAR wrote, and
-XFDF import/export.
+annotation list re-reads only the pages an edit wrote to (F10-3h), a
+freehand drawing is a real `/Ink` annotation in the document (F10-3i), and the
+pen tool draws one where the pointer is, under any rotation (F10-3j).
+Next, in order: the pen's colour and thickness pickers (F10-3k), the rest of
+the kinds (shapes, stamps, measurement), appearance streams so other readers
+show what PDFAR wrote, and XFDF import/export.
 
 Goal:
 
@@ -2663,6 +2674,74 @@ note costs, and most of that is repainting the page the user drew on.
 **What is not here**: the tool. Nothing in the interface can make a stroke yet,
 so this is the same split F10-3d/F10-3e made — the document first, the mouse
 next (F10-3j).
+
+---
+
+### F10-3j The pen draws a stroke where the pointer is — [x] Implemented
+
+**Completed**: 2026-10-27
+
+**What landed**: a fifth left-button tool, "Freehand", in the selection split
+button below a separator — it is the only one that writes a drawing rather than
+selecting text. Press starts a stroke, moves extend it, release turns the whole
+drag into one `AddInk`; so one drag is one annotation, one Ctrl+Z and one row
+in the panel. The stroke previews under the pointer while the button is held.
+Escape, a tool change or a view-mode change throws an unfinished stroke away.
+A pencil icon, `draw_freehand.svg`, follows the toolbar's tint.
+
+**Page space, not screen space.** Each point goes through `_pdf_point_at()` at
+the moment Qt delivers it, so a rotated view — the F10-3g lesson — draws where
+the pointer is, and the pairs handed to `AddInk` are already in the coordinates
+the annotation stores. The preview is the only thing in view space: it maps
+those same page points on every paint, so it follows zoom and rotation without
+capturing anything twice.
+
+**Two small rules that keep the stroke usable.** `PEN_MIN_STEP` of 2 screen
+pixels (divided by zoom) keeps a held pen from filling `/InkList` with points a
+thousandth of a point apart, while a press-and-release with no move still makes
+a dot from the single point. And a point that leaves the page is dropped, not
+clamped: clamping would drag the line along the page edge whenever the user's
+hand strayed, whereas dropping ends the visible stroke where the paper does.
+
+**Reflow.** The pen is a page tool like Area and Table — reflow has no page
+geometry to draw on — so `set_reflow_mode()` and `_update_tool_actions()` both
+refuse it, fall back to Text and say so in the status bar.
+
+**Files changed**: `src/pdfar/viewer.py` (`TOOL_MODES`, `_PAGE_ONLY_TOOLS`,
+`_stroke`, `ink_color`/`ink_width`, page-space capture, `_extend_stroke`,
+`_commit_stroke`, `_cancel_stroke`, `_paint_stroke`, the mouse/key handlers),
+`src/pdfar/main.py` (`act_draw`, the split-menu entry, mode mapping, enable and
+reflow rules, tinted icon), `assets/icons/draw_freehand.svg`,
+`tests/test_pen_tool.py`, `tests/test_main.py` (the split-menu assertion).
+
+**Verified by eye** (headless): the real window opens a three-page sample, the
+Freehand action switches the tool, and a four-point zig-zag leaves one drawing
+whose points sit under the drag (within a widget pixel); the page darkens while
+the button is held (1.0 % → 4.0 %) and stays after release (4.6 %); the sidebar
+lists 📝 Freehand; a second stroke drawn under a 90° view still lands on the
+page points; undo leaves one drawing; save and reopen returns the first stroke
+point for point. Screenshots `/tmp/f103j_draw.png`, `/tmp/f103j_rotated.png`.
+
+**Tests**: 618 passed (was 598) — `tests/test_pen_tool.py` (20): the pen is a
+mouse tool, the text tool draws nothing, the edit is committed only on release
+(one row, one undo step), two drags make two drawings and two Ctrl+Z, a tap is
+a dot, colour and width come from the view, the stroke lands where the pen went
+at 0/90/180/270° and at 0.8×/1×/2.5×, off-page points are dropped without
+clamping, a press off-page draws nothing, the live preview repaints, Escape and
+a tool change cancel, and reflow disables the pen. Three consecutive full runs.
+
+**Performance on the 540-page book**: 39 moves are captured in 0.73 ms —
+tracking is a list append and a viewport update. Releasing is the edit, not the
+point count: a 40-point stroke commits in 89–253 ms and a one-point tap in
+82–289 ms, the same `AddInk` the F10-3i bench measured at 83.7 ms plus this
+machine's variance; undo + re-list is 99–225 ms. The annotation list reads only
+the edited page — the neighbouring page loads visible in a trace are the tile
+renderer repainting what the viewport shows.
+
+**What is not here**: the colour and thickness pickers. `view.ink_color` and
+`view.ink_width` exist and `AddInk` writes both, but nothing in the interface
+sets them, so the pen draws the document default (black, 2 pt) for now — that
+is F10-3k.
 
 ---
 
