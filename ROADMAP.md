@@ -906,8 +906,9 @@ PDFAR must be local-first and privacy-first.
 Phase status: **[~] Under way.** F10-0 (document session), F10-1 (edit
 framework) and F10-2 (save, save as, revert) are implemented; **F10-3** is under
 way, with annotations as edits (F10-3a), the save-cost fix (F10-3b), revision
-files for undo (F10-3c), standalone `/Text` notes (F10-3d) and the interface that
-places them (F10-3e) done.
+files for undo (F10-3c), standalone `/Text` notes (F10-3d), the interface that
+places them (F10-3e) and a comments panel that jumps to what it lists (F10-3f)
+done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1190,7 +1191,16 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       so this is a wrong-rectangle bug rather than a crash. It is the reason the
       note tool converts its click back to PDF space explicitly instead of
       reusing the selection's rectangles.
-- [ ] Comments panel listing annotations and jumping to them
+- [x] Comments panel listing annotations and jumping to them
+      (**F10-3f.** The panel is the sidebar's Annotations tab: it groups what the
+      document holds by page — both kinds, since F10-3d's subtype dispatch — and
+      activating a row now goes to the *annotation*, not to its page. It used to
+      emit `goto_page_requested`, which on a 540-page book left the user hunting
+      for the band they had just clicked in the list; the row now emits the
+      annotation's id, the view scrolls its rectangle to the middle of the
+      viewport and draws a ring around it until the next click. What this panel
+      is not is a reply thread: anchored popups and the appearance streams other
+      readers need to show them are the item below.)
 - [ ] Freehand, shapes, stamps, measurement
 - [ ] Appearance streams, so other readers show the same thing without
       regenerating them
@@ -1305,8 +1315,11 @@ Finish the annotation system. Done: annotation changes are routed through F10-1,
 so they undo and mark dirty (F10-3a); a save stopped compacting the object table
 (F10-3b); undo is a revision file in a scratch copy, so a highlight costs 55 ms
 instead of 2.1 s and no buffer (F10-3c); a sticky note is a real `/Text`
-annotation in the document (F10-3d) and right-clicking a page is how you place one
-(F10-3e). Next: the comments panel that lists annotations and jumps to them.
+annotation in the document (F10-3d), right-clicking a page is how you place one
+(F10-3e), and a comment row in the panel jumps to the comment it names (F10-3f).
+Next, in order: the two found-and-open items under F10-3 — the annotation list
+re-read from every page after each edit, and a highlight placed while the view is
+rotated — then the remaining kinds (freehand, shapes, stamps).
 
 Goal:
 
@@ -2394,6 +2407,67 @@ a note on GS262 is **59 ms**, undo 10 ms, redo 5 ms, a reader's copy 13–22 ms.
 What the tool adds is `AnnotationManager._run()` re-listing every page after each
 edit: **108–175 ms** on 540 pages, which is where the ~220 ms a note takes in the
 running app actually comes from. Recorded as its own open item above.
+
+---
+
+### F10-3f A comment row jumps to its comment — [x] Implemented
+
+**Completed**: 2026-10-27
+
+**What landed**: the last half of the comments panel. The sidebar had listed
+annotations since F10-3a, but double-clicking a row emitted
+`goto_page_requested(page)` and the window centered that page — which on a long
+document is a direction, not an address. A row now emits the annotation's id, the
+view scrolls the annotation's own rectangle into the middle of the viewport and
+draws a ring around it, and the ring goes away when the user clicks the page
+again. `PDFView` gained `select_annotation()`, `clear_annotation_selection()` and
+`_annotation_outline_rects()`; `Sidebar` gained the `annotation_activated(str)`
+signal; `_on_annotation_activated()` now tells a comment row from a page row
+instead of assuming every row is only a page.
+
+**The selection is an id, never a rectangle.** The document can lose the
+annotation between one paint and the next — an undo, a revert, a Revert to Saved —
+and a ring drawn around the cached geometry would be reporting something that is
+not there. So `_annotation_outline_rects()` resolves the id through the manager on
+every call and paints nothing when it does not resolve, which is what the
+round-trip test asserts: select, `Ctrl+Z`, no ring. A highlight keeps several
+rectangles because that is what it is (one annotation, one quad per line), and
+each gets its own ring.
+
+**A border, not a fill.** The search hit that is currently selected paints a
+translucent block; an annotation already paints itself — a highlight band, a note
+icon — and covering it with a second color would hide the very thing the user
+jumped to look at. Two points of solid blue around the mapped rectangle leaves it
+readable, and the same helper feeds `paintEvent`, so the geometry the tests check
+is the geometry drawn.
+
+**Why the row does not go through the window**: `MainWindow` routes
+`goto_page_requested` through `self.view`, the *active* tab's view. An annotation
+id belongs to the document it came from, and the tab already owns both ends, so
+the connection is `tab.sidebar.annotation_activated → tab.view.select_annotation`.
+Routing it by window would mean a stale tab's row could ring something in the tab
+now on screen.
+
+**Files changed**: `src/pdfar/viewer.py` (the three methods, the ring in
+`_paint_overlays()`, the clear on a left press, `ANNOTATION_SELECTED`),
+`src/pdfar/sidebar.py` (the signal and the row dispatch),
+`src/pdfar/main.py` (the per-tab connection and its disconnect).
+
+**Verified by eye** (headless): with two comments on page 3 and the view on page
+1, activating the highlight row moved the view to page 3 and put a 256×20 ring
+over the band (275 sampled pixels in the selection color); activating the note row
+moved the ring to the 16-point icon (23×23 with the pen); a left-click on the page
+left zero ring pixels behind. The screenshot shows the yellow band ringed in blue
+with the note icon above it unringed.
+
+**Tests**: 560 passed (was 549) — `tests/test_annotation_navigation.py` (11)
+covers the jump bringing the annotation inside the viewport, the outline matching
+the annotation's rectangle at five zoom/rotation pairs, a multi-quad highlight
+outlining every quad and nothing on a neighbouring page, a note being ringed at
+its icon, clearing, selecting another annotation moving the ring, an undo drawing
+nothing, an unknown id saying why, activating a sidebar row jumping to its
+annotation, a row without an annotation still going to its page, and a click on
+the page letting go. Three consecutive full runs.
 
 ---
 

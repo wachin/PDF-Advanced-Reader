@@ -2147,6 +2147,9 @@ class MainWindow(QMainWindow):
         tab.view.view_mode_changed.connect(self._on_view_mode_changed)
         tab.view.content_changed.connect(tab.sidebar.invalidate_thumbnails)
         tab.sidebar.goto_page_requested.connect(self._goto)
+        # A comment row belongs to its own view: the id means nothing to a tab
+        # that is not showing the document it came from.
+        tab.sidebar.annotation_activated.connect(tab.view.select_annotation)
         tab.sidebar.thumbnail_size_changed.connect(self._on_thumbnail_size_changed)
         tab.sidebar.save_requested.connect(self._save_annotations)
         # Connect annotation manager to sidebar
@@ -2167,6 +2170,7 @@ class MainWindow(QMainWindow):
             tab.view.view_mode_changed.disconnect(self._on_view_mode_changed)
             tab.view.content_changed.disconnect(tab.sidebar.invalidate_thumbnails)
             tab.sidebar.goto_page_requested.disconnect(self._goto)
+            tab.sidebar.annotation_activated.disconnect(tab.view.select_annotation)
             tab.sidebar.thumbnail_size_changed.disconnect(self._on_thumbnail_size_changed)
             tab.sidebar.save_requested.disconnect(self._save_annotations)
         except TypeError:

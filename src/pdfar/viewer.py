@@ -106,6 +106,9 @@ SHADOW = QColor(0, 0, 0, 90)
 HIT_COLOR = QColor(255, 213, 79, 120)
 HIT_CURRENT = QColor(255, 143, 0, 170)
 SEL_COLOR = QColor(63, 145, 255, 110)
+# The ring around the annotation the comments panel pointed at.  A border rather
+# than a fill: the highlight or note icon underneath has to stay recognisable.
+ANNOTATION_SELECTED = QColor(0, 150, 255)
 
 # Light theme colors (default)
 LIGHT_BG_COLOR = QColor(46, 46, 46)
@@ -260,6 +263,9 @@ class PDFView(QAbstractScrollArea):
         self.annotation_manager.annotations_edited.connect(self._on_annotation_edit)
         self.annotation_manager.annotation_edit_failed.connect(self._on_annotation_edit_failed)
         self._highlight_color_idx = 0  # Current highlight color index
+        # The annotation the comments panel last pointed at, by id: the document
+        # can drop it from under us, so nothing about it is cached.
+        self._selected_ann: Optional[str] = None
 
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -618,6 +624,56 @@ class PDFView(QAbstractScrollArea):
             return
         page, x, y = hit
         self._note_menu(hit, self._note_at(page, x, y)).exec(event.globalPos())
+
+    # ------------------------------------------------- annotation navigation
+    def select_annotation(self, annotation_id: str) -> bool:
+        """Scroll an annotation into view and draw the view's attention on it.
+
+        The comments panel names an annotation, and a page on a long document is
+        not an address: the ring is what says *this* one.
+        """
+        ann = self._annotation_or_warn(annotation_id)
+        if ann is None or not ann.rects:
+            return False
+        rects = ann.rects
+        box = (min(r[0] for r in rects), min(r[1] for r in rects),
+               max(r[2] for r in rects), max(r[3] for r in rects))
+        self._selected_ann = annotation_id
+        self.scroll_to_rect(ann.page, box)
+        self.viewport().update()
+        return True
+
+    def clear_annotation_selection(self) -> None:
+        """Let go of the annotation the panel had pointed at."""
+        if self._selected_ann is None:
+            return
+        self._selected_ann = None
+        self.viewport().update()
+
+    def _annotation_outline_rects(self, page: int) -> List[QRect]:
+        """Where the selected annotation paints, if it is on *page*.
+
+        Resolved from the id on every call rather than from cached geometry: the
+        document can lose the annotation between one paint and the next (an undo,
+        a revert), and a ring around the place it used to be would report
+        something that is not there.
+        """
+        ann = (self.annotation_manager.get_annotation(self._selected_ann)
+               if self._selected_ann else None)
+        if ann is None or ann.page != page:
+            return []
+        px, py = self._page_origin(page)
+        px -= self.horizontalScrollBar().value()
+        py -= self.verticalScrollBar().value()
+        w0, h0 = self.page_sizes[page]
+        z = self.zoom
+        out = []
+        for rect in ann.rects:
+            x0, y0, x1, y1 = map_rect(rect, w0, h0, self.rotation)
+            out.append(QRect(round(px + x0 * z), round(py + y0 * z),
+                             max(1, round((x1 - x0) * z)),
+                             max(1, round((y1 - y0) * z))))
+        return out
 
     def set_dark_mode(self, enabled: bool) -> None:
         """Enable or disable dark mode."""
@@ -1782,6 +1838,12 @@ class PDFView(QAbstractScrollArea):
             painter.setPen(QPen(QColor(230, 120, 0), 1))
             painter.drawRect(r)
 
+        # the annotation the comments panel pointed at: a ring, not a fill, so it
+        # still reads as the highlight or the note icon underneath it
+        for r in self._annotation_outline_rects(page):
+            painter.setPen(QPen(ANNOTATION_SELECTED, 2))
+            painter.drawRect(r)
+
         # text selection
         for rect in self._selection_rects_for_page(page):
             x0, y0, x1, y1 = rect
@@ -2531,6 +2593,10 @@ class PDFView(QAbstractScrollArea):
         super().wheelEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            # A press on the page means the user has moved on from whatever the
+            # comments panel had pointed at.
+            self.clear_annotation_selection()
         if (event.button() == Qt.MouseButton.LeftButton
                 and self._numbering_preview is not None):
             hit = self._numbering_hit_at(event.position().toPoint())

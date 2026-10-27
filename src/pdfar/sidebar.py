@@ -227,6 +227,9 @@ class Sidebar(QWidget):
     """Thumbnails + table of contents + user bookmarks."""
 
     goto_page_requested = pyqtSignal(int)
+    # A comment row names an annotation, not just a page: on a long document the
+    # page is where to look, this is what to look at.
+    annotation_activated = pyqtSignal(str)
     thumbnail_size_changed = pyqtSignal(int)
     # The window owns saving: it is the one place that can explain a refusal, and
     # a second opinion from here would only be able to say "failed".
@@ -974,7 +977,11 @@ class Sidebar(QWidget):
         self._build_annotations()
 
     def _on_annotation_activated(self, item: QTreeWidgetItem, _col: int) -> None:
-        """Navigate to the annotation's page on double-click/Enter."""
+        """Navigate to what the row points at: a comment, or a page."""
+        ann_id = item.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(ann_id, str) and ann_id:
+            self.annotation_activated.emit(ann_id)
+            return
         page = item.data(0, Qt.ItemDataRole.UserRole + 1)
         if isinstance(page, int) and page >= 0:
             self.goto_page_requested.emit(page)
