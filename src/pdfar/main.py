@@ -345,12 +345,19 @@ class MainWindow(QMainWindow):
         self.act_presentation.setShortcut("F11")
         self.act_presentation.triggered.connect(self.toggle_presentation)
 
-        self.act_sidebar = QAction("Sidebar", self)
+        self.act_sidebar = QAction("Pages Panel", self)
         self.act_sidebar.setCheckable(True)
         self.act_sidebar.setChecked(True)
         self.act_sidebar.setShortcut("F9")
-        self.act_sidebar.setToolTip("Toggle sidebar (F9)")
+        self.act_sidebar.setToolTip("Show or hide the Pages panel (F9)")
         self.act_sidebar.triggered.connect(self._toggle_sidebar)
+
+        self.act_tools_panel = QAction("Tools Panel", self)
+        self.act_tools_panel.setCheckable(True)
+        self.act_tools_panel.setChecked(True)
+        self.act_tools_panel.setToolTip(
+            "Show or hide the Tools panel (Search and Page Numbers)")
+        self.act_tools_panel.triggered.connect(self._toggle_tools_panel)
 
         self.act_dark_mode = QAction("Dark Mode", self)
         self.act_dark_mode.setCheckable(True)
@@ -585,6 +592,7 @@ class MainWindow(QMainWindow):
             page_view_menu.addAction(self._view_actions[mode])
         view_menu.addSeparator()
         view_menu.addAction(self.act_sidebar)
+        view_menu.addAction(self.act_tools_panel)
         view_menu.addAction(self.act_dark_mode)
         view_menu.addAction(self.act_reflow)
         view_menu.addAction(self.act_presentation)
@@ -868,6 +876,8 @@ class MainWindow(QMainWindow):
         dock.setWidget(self.right_tabs)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         self.search_dock = dock
+        # Closing the dock with its X must update the View menu check mark.
+        dock.visibilityChanged.connect(self.act_tools_panel.setChecked)
         self._apply_right_tab_icons()
 
     def _apply_right_tab_icons(self) -> None:
@@ -1890,6 +1900,9 @@ class MainWindow(QMainWindow):
             self.side_dock = QDockWidget("Pages", self)
             self.side_dock.setObjectName("sideDock")
             self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.side_dock)
+            # Closing the dock with its X must update the View menu check mark.
+            self.side_dock.visibilityChanged.connect(
+                self.act_sidebar.setChecked)
         index = self.tabs.addTab(tab, tab.title)
         tab.view.set_memory_level(self.memory_level)
         self.tabs.setCurrentIndex(index)
@@ -2051,7 +2064,11 @@ class MainWindow(QMainWindow):
         if hasattr(self, "page_numbers_panel"):
             self.page_numbers_panel.set_page_count(0)
         if hasattr(self, "side_dock") and self.side_dock is not None:
+            # Hide it because there is no document, but keep the user's
+            # Pages Panel preference for the next document.
+            self.side_dock.blockSignals(True)
             self.side_dock.setVisible(False)
+            self.side_dock.blockSignals(False)
 
     def _close_document(self) -> None:
         """Close the active document tab (kept for compatibility)."""
@@ -2489,6 +2506,12 @@ class MainWindow(QMainWindow):
     def _toggle_sidebar(self, checked: bool) -> None:
         if hasattr(self, "side_dock") and self.side_dock is not None:
             self.side_dock.setVisible(checked)
+
+    def _toggle_tools_panel(self, checked: bool) -> None:
+        if hasattr(self, "search_dock") and self.search_dock is not None:
+            self.search_dock.setVisible(checked)
+            if checked:
+                self.search_dock.raise_()
 
     def _open_recent(self) -> None:
         """Open the file attached to the menu action that sent this."""

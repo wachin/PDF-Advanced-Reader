@@ -122,6 +122,58 @@ def test_window_starts_with_ui_visible(qapp):
         qapp.processEvents()
 
 
+def test_view_menu_toggles_pages_and_tools_panels(qapp, sample_pdf):
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        view_menu = next(a.menu() for a in win.menuBar().actions()
+                         if a.text().replace("&", "") == "View")
+        assert win.act_sidebar in view_menu.actions()
+        assert win.act_tools_panel in view_menu.actions()
+        assert win.act_sidebar.text() == "Pages Panel"
+        assert win.act_tools_panel.text() == "Tools Panel"
+
+        assert win.search_dock.isVisible()
+        assert win.act_tools_panel.isChecked()
+
+        # The dock's X hides it; the menu option follows and restores it.
+        win.search_dock.close()
+        qapp.processEvents()
+        assert not win.search_dock.isVisible()
+        assert not win.act_tools_panel.isChecked()
+        win.act_tools_panel.trigger()
+        qapp.processEvents()
+        assert win.search_dock.isVisible()
+        assert win.act_tools_panel.isChecked()
+
+        assert win.open_document(sample_pdf)
+        qapp.processEvents()
+        assert win.side_dock.isVisible()
+        assert win.act_sidebar.isChecked()
+        win.side_dock.close()
+        qapp.processEvents()
+        assert not win.side_dock.isVisible()
+        assert not win.act_sidebar.isChecked()
+        win.act_sidebar.trigger()
+        qapp.processEvents()
+        assert win.side_dock.isVisible()
+        assert win.act_sidebar.isChecked()
+
+        # Closing the last document keeps the preference for the next one.
+        win._close_document()
+        qapp.processEvents()
+        assert win.act_sidebar.isChecked()
+        assert win.open_document(sample_pdf)
+        qapp.processEvents()
+        assert win.side_dock.isVisible()
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
 def test_search_through_the_dock(qapp, sample_pdf):
     """1.x search never ran at all (the worker was never started)."""
     win = MainWindow()
