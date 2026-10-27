@@ -14,17 +14,24 @@ reached the disk — the gap described in ``docs/pdfcraft-editing-analysis.md``
 
 ``version`` is also how readers stay honest: a render job pins the version it
 was submitted for, and the view drops results for any other version.
+
+F10-1 adds the editing half: :meth:`DocumentSession.apply` runs an
+:class:`pdfar.edits.Edit` against a *working copy* and adopts the result only if
+the edit returns without raising, so a failed edit cannot be half-applied.
+:meth:`undo` / :meth:`redo` walk whole-document byte snapshots.
 """
 
 from __future__ import annotations
 
 import threading
-from typing import Optional
+from typing import Optional, Tuple
 
 try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
 except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
+
+from .edits import Edit, EditError, EditHistory, Scope
 
 
 class SnapshotNotPublished(RuntimeError):
@@ -37,10 +44,100 @@ class DocumentSession:
         self.path = path
         self.password = password or ""
         self.version = 0
+        self._saved_version = 0
+        # Bumped whenever ``self.doc`` becomes a different Document object.
+        # ``version`` answers "which content is this?", generation answers
+        # "is it the same object?" — caches built from the object itself
+        # (annotation references, page handles) must rebind on the latter.
+        self.generation = 0
+        self.history = EditHistory()
         self._snapshot: Optional[bytes] = None
         # fitz documents may only be touched by one thread at a time, so
         # serializing happens here and workers read the immutable bytes.
         self._owner_thread = threading.get_ident()
+
+    @property
+    def dirty(self) -> bool:
+        """The live content is not what the file on disk holds."""
+        return self.version != self._saved_version
+
+    # ------------------------------------------------------------- ownership
+    def _require_owner(self) -> None:
+        if threading.get_ident() != self._owner_thread:
+            raise SnapshotNotPublished(
+                f"content v{self.version} must be serialized on the thread that "
+                "owns the document; call read_version() before starting workers")
+
+    # --------------------------------------------------------------- editing
+    def apply(self, edit: Edit) -> Tuple[int, Scope]:
+        """Carry *edit* out on a working copy; adopt the copy if it succeeds.
+
+        Returns ``(version, scope)`` — scope is what the caller invalidates on.
+        The live document is never handed to the edit, so however far into an
+        edit the failure happens, the document is byte-for-byte what it was and
+        the undo stack is untouched.
+        """
+        self._require_owner()
+        before = self._serialize()
+        clone = self._open_clone(before)
+        try:
+            edit.apply(clone)
+        except EditError:
+            clone.close()
+            raise
+        except Exception as exc:                      # noqa: BLE001 - user-facing
+            clone.close()
+            raise EditError(f"{edit.label} failed: {exc}") from exc
+        self._adopt(clone)
+        self.history.record(edit, before)
+        return self.version, edit.scope
+
+    def undo(self) -> Tuple[int, Scope]:
+        """Step back to the previous document.  Returns ``(version, scope)``."""
+        self._require_owner()
+        return self._step("undo")
+
+    def redo(self) -> Tuple[int, Scope]:
+        """Step forward again.  Returns ``(version, scope)``."""
+        self._require_owner()
+        return self._step("redo")
+
+    def _step(self, direction: str) -> Tuple[int, Scope]:
+        history = self.history
+        target = history.undo_target if direction == "undo" else history.redo_target
+        if target is None:
+            raise EditError(f"Nothing to {direction}")
+        leaving = self._serialize()
+        # Open the destination *before* touching the history: if MuPDF refuses
+        # these bytes, the stacks still describe the document we are in.
+        clone = self._open_clone(target.before)
+        self._adopt(clone)
+        if direction == "undo":
+            history.take_undo(leaving)
+        else:
+            history.take_redo(leaving)
+        return self.version, target.scope
+
+    def _serialize(self) -> bytes:
+        try:
+            return bytes(self.doc.tobytes())
+        except Exception as exc:                      # noqa: BLE001 - user-facing
+            raise EditError(f"Could not read the document: {exc}") from exc
+
+    def _open_clone(self, data: bytes) -> fitz.Document:
+        try:
+            return fitz.open(stream=data, filetype="pdf")
+        except Exception as exc:                      # noqa: BLE001 - user-facing
+            raise EditError(f"Could not open a working copy: {exc}") from exc
+
+    def _adopt(self, clone: fitz.Document) -> None:
+        old, self.doc = self.doc, clone
+        try:
+            old.close()
+        except Exception:
+            pass
+        self.generation += 1
+        self.content_changed()
 
     # ------------------------------------------------------------- content
     def content_changed(self) -> int:
@@ -48,7 +145,7 @@ class DocumentSession:
 
         Call it exactly once per accepted edit (a batch of edits is one call),
         then drop everything derived from the previous content — see
-        ``PDFView.invalidate_content``.
+        ``PDFView.invalidate``.
         """
         self.version += 1
         self._snapshot = None
@@ -63,11 +160,8 @@ class DocumentSession:
         return self._snapshot
 
     def _publish(self) -> None:
-        if threading.get_ident() != self._owner_thread:
-            raise SnapshotNotPublished(
-                f"content v{self.version} must be serialized on the thread that "
-                "owns the document; call read_version() before starting workers")
-        self._snapshot = bytes(self.doc.tobytes())
+        self._require_owner()
+        self._snapshot = self._serialize()
 
     def read_version(self) -> int:
         """Version a new background read should target.  Call from the GUI thread.
@@ -101,6 +195,7 @@ class DocumentSession:
         return doc
 
     def close(self) -> None:
+        self.history.clear()          # byte snapshots are the expensive part
         try:
             self.doc.close()
         except Exception:

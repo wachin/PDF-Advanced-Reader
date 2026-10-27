@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-from conftest import build_sample_pdf
+from conftest import build_sample_pdf, make_session
 from pdfar.main import MainWindow
 from pdfar.annotations import (
     AnnotationManager,
@@ -45,11 +45,10 @@ def win(qapp):
 
 def test_highlight_annotation_note_methods(tmp_path):
     """Test HighlightAnnotation note getter/setter."""
-    import pymupdf as fitz
 
     p = build_sample_pdf(tmp_path / "test.pdf", pages=3)
-    doc = fitz.open(p)
-    mgr = AnnotationManager(p, doc)
+    session = make_session(p)
+    mgr = AnnotationManager(session)
 
     hl = mgr.add_highlight(0, [(10.0, 10.0, 50.0, 20.0)], color="#FFFF00")
 
@@ -70,16 +69,15 @@ def test_highlight_annotation_note_methods(tmp_path):
     hl.set_note("")
     assert not hl.has_note()
 
-    doc.close()
+    session.close()
 
 
 def test_annotation_manager_add_note_to_highlight(tmp_path):
     """Test adding notes to highlights via AnnotationManager."""
-    import pymupdf as fitz
 
     p = build_sample_pdf(tmp_path / "test.pdf", pages=3)
-    doc = fitz.open(p)
-    mgr = AnnotationManager(p, doc)
+    session = make_session(p)
+    mgr = AnnotationManager(session)
 
     hl = mgr.add_highlight(0, [(10.0, 10.0, 50.0, 20.0)], color="#FFFF00")
     ann_id = hl.id
@@ -98,34 +96,33 @@ def test_annotation_manager_add_note_to_highlight(tmp_path):
     assert mgr.remove_note_from_highlight(ann_id) is True
     assert mgr.get_note_for_highlight(ann_id) == ""
 
-    doc.close()
+    session.close()
 
 
 def test_note_persistence_in_pdf(tmp_path):
     """Test that notes saved to PDF are loaded back."""
-    import pymupdf as fitz
 
     p = build_sample_pdf(tmp_path / "test.pdf", pages=3)
-    doc = fitz.open(p)
-    mgr = AnnotationManager(p, doc)
+    session = make_session(p)
+    mgr = AnnotationManager(session)
 
     hl = mgr.add_highlight(0, [(10.0, 10.0, 50.0, 20.0)], color="#FFFF00")
     hl.set_note("Persistent note")
 
     # Save to PDF
     assert mgr.save_to_pdf() is True
-    doc.close()
+    session.close()
 
     # Reload
-    doc2 = fitz.open(p)
-    mgr2 = AnnotationManager(p, doc2)
+    session2 = make_session(p)
+    mgr2 = AnnotationManager(session2)
 
     hls = mgr2.get_highlights_for_page(0)
     assert len(hls) == 1
     assert hls[0].has_note()
     assert hls[0].get_note() == "Persistent note"
 
-    doc2.close()
+    session2.close()
 
 
 def test_sidebar_shows_notes(win, tmp_path):

@@ -35,6 +35,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import QAbstractScrollArea, QFrame, QMenu, QScroller
 
 from .cache import PageCache
+from .edits import Edit, EditError, Scope
 from .geometry import (
     display_size, map_point, map_rect, normalize_rotation, unmap_delta,
     unmap_point, unmap_rect,
@@ -143,23 +144,22 @@ class PDFView(QAbstractScrollArea):
     numbering_changed = pyqtSignal(object)  # settings after dragging
     transient_message = pyqtSignal(str)     # short status-bar feedback
     view_mode_changed = pyqtSignal(str)     # page layout mode
-    content_changed = pyqtSignal(int)       # new content version (F10-0)
+    content_changed = pyqtSignal(int, int)  # (content version, Scope value)
 
     def __init__(self, doc_path: str, parent=None, password: str = ""):
         super().__init__(parent)
-        self.doc_path = doc_path
-        self._password = password
-        self.doc = fitz.open(doc_path)
-        if self.doc.needs_pass:
-            if not password or not self.doc.authenticate(password):
-                self.doc.close()
+        doc = fitz.open(doc_path)
+        if doc.needs_pass:
+            if not password or not doc.authenticate(password):
+                doc.close()
                 raise ValueError("encrypted")
-        self.session = DocumentSession(self.doc, doc_path, password)
+        self.session = DocumentSession(doc, doc_path, password)
+        self._invalidated_version = self.session.version
 
-        self.page_count = self.doc.page_count
+        self.page_count = doc.page_count
         self.page_sizes: List[Tuple[float, float]] = []
         for i in range(self.page_count):
-            r = self.doc[i].rect
+            r = doc[i].rect
             self.page_sizes.append((r.width, r.height))
 
         self.zoom = 1.0
@@ -250,7 +250,7 @@ class PDFView(QAbstractScrollArea):
         self._press_pos = QPoint()
 
         # Annotations
-        self.annotation_manager = AnnotationManager(doc_path, self.doc, self)
+        self.annotation_manager = AnnotationManager(self.session, self)
         self.annotation_manager.annotations_changed.connect(self._on_annotations_changed)
         self._highlight_color_idx = 0  # Current highlight color index
 
@@ -274,6 +274,19 @@ class PDFView(QAbstractScrollArea):
 
     # ----------------------------------------------------------------- doc
     @property
+    def doc(self) -> fitz.Document:
+        """The live document — read it through the session, never store it.
+
+        An accepted edit (or an undo) replaces the ``Document`` object, so a
+        reference kept anywhere else becomes a handle on a closed document.
+        """
+        return self.session.doc
+
+    @property
+    def doc_path(self) -> str:
+        return self.session.path
+
+    @property
     def title(self) -> str:
         try:
             return (self.doc.metadata or {}).get("title") or ""
@@ -286,33 +299,90 @@ class PDFView(QAbstractScrollArea):
         self.pool.shutdown(wait=True)
         self.session.close()
 
-    def invalidate_content(self) -> int:
-        """Announce an accepted content change and drop everything stale.
+    def apply_edit(self, edit: Edit) -> bool:
+        """Run *edit* against a working copy and adopt it if it succeeded.
 
-        Every pixel, word and layout in this view was derived from the previous
-        version of the document, so all of it goes; the pool's queued jobs are
-        cancelled because their results would be dropped anyway.  Background
-        readers pick up the new content from the session's snapshot, not from
-        the file on disk — which is what makes "what is on screen is what will
-        be saved" true (F10-0).
+        On failure the user keeps the document exactly as it was and gets the
+        reason in the status bar; nothing is re-rendered because nothing changed.
         """
-        version = self.session.content_changed()
-        self.pool.cancel_if(lambda job: True)
-        self.cache.clear()
-        self._words.clear()
-        self._tiles.clear()
-        self._tile_grids.clear()
-        self._errors.clear()
-        self._hit_rects.clear()
-        self._hit_seq.clear()
-        self._hit_flat.clear()
-        self.content_changed.emit(version)
-        if self.reflow_mode:
-            self._enter_reflow()
-        self._relayout()
-        self._request_visible()
+        try:
+            _version, scope = self.session.apply(edit)
+        except EditError as exc:
+            self.transient_message.emit(f"{edit.label}: {exc}")
+            return False
+        self.invalidate(scope)
+        return True
+
+    def undo_edit(self) -> bool:
+        """Undo the last edit.  False with a reason when there is nothing to undo."""
+        return self._step_edit(self.session.undo)
+
+    def redo_edit(self) -> bool:
+        """Redo the last undone edit.  False with a reason when there is none."""
+        return self._step_edit(self.session.redo)
+
+    def _step_edit(self, step) -> bool:
+        try:
+            _version, scope = step()
+        except EditError as exc:
+            self.transient_message.emit(str(exc))
+            return False
+        self.invalidate(scope)
+        return True
+
+    def invalidate(self, scope: Scope = Scope.FULL) -> int:
+        """React to a change to the document and drop what *scope* made stale.
+
+        An edit that came through ``apply_edit`` / ``undo_edit`` / ``redo_edit``
+        has already bumped the version; a change made in place has not, and bumps
+        here — readers are turned away by version, so a change that never bumped
+        would be painted over by renders of the old content.  What is graded is
+        the expensive part: re-rendering 540 pages for a title change is the waste
+        scope grading exists to prevent (F10-1).
+        """
+        version = self.session.version
+        if version == self._invalidated_version:
+            # The change did not arrive through the session — annotations still
+            # mutate the document in place (F10-3) — so bump it here. Without a
+            # new version, renders of the old content that are already in flight
+            # would be accepted as current the moment they land.
+            version = self.session.content_changed()
+        self._invalidated_version = version
+        if scope & self._PAINTED:
+            self.pool.cancel_if(lambda job: True)
+            self.cache.clear()
+            self._tiles.clear()
+            self._tile_grids.clear()
+            self._errors.clear()
+        if scope & self._STALE_TEXT:
+            self._words.clear()
+            self._hit_rects.clear()
+            self._hit_seq.clear()
+            self._hit_flat.clear()
+        if scope & Scope.STRUCTURE:
+            self._refresh_page_geometry()
+        if scope & self._PAINTED:
+            self._relayout()
+            if self.reflow_mode and scope & (Scope.STRUCTURE | Scope.CONTENT):
+                self._enter_reflow()
+            self._request_visible()
+        self.content_changed.emit(version, int(scope))
         self.viewport().update()
         return version
+
+    # Kept in sync with ``Scope``: what each kind of change can make stale.
+    # ``LINKS`` is deliberately in neither set — an invisible link rectangle does
+    # not move a pixel or a word.
+    _PAINTED = Scope.STRUCTURE | Scope.CONTENT | Scope.COMMENTS | Scope.FORM
+    _STALE_TEXT = Scope.STRUCTURE | Scope.CONTENT
+
+    def _refresh_page_geometry(self) -> None:
+        """Re-derive the page count and page sizes from the live document."""
+        self.page_count = self.doc.page_count
+        self.page_sizes = [(self.doc[i].rect.width, self.doc[i].rect.height)
+                           for i in range(self.page_count)]
+        if self.current_page >= self.page_count:
+            self.current_page = max(0, self.page_count - 1)
 
     def _on_annotations_changed(self) -> None:
         """Called when annotations change - trigger repaint."""

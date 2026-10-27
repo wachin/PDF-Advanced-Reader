@@ -18,6 +18,8 @@ except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from .session import DocumentSession
+
 
 class AnnotationType(Enum):
     HIGHLIGHT = "highlight"
@@ -131,12 +133,20 @@ class AnnotationManager(QObject):
     annotation_removed = pyqtSignal(str)     # annotation id
     annotation_modified = pyqtSignal(object) # Annotation
 
-    def __init__(self, doc_path: str, doc: fitz.Document, parent=None):
+    def __init__(self, session: DocumentSession, parent=None):
         super().__init__(parent)
-        self.doc_path = doc_path
-        self.doc = doc
+        self.session = session
         self._annotations: Dict[str, Annotation] = {}
         self._load_from_pdf()
+
+    @property
+    def doc(self) -> fitz.Document:
+        """The live document; an accepted edit replaces the object."""
+        return self.session.doc
+
+    @property
+    def doc_path(self) -> str:
+        return self.session.path
 
     def _load_from_pdf(self) -> None:
         """Load annotations from the PDF file."""

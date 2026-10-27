@@ -18,6 +18,7 @@ from PyQt6.QtGui import QImage
 from PyQt6.QtTest import QTest
 
 from conftest import build_sample_pdf, make_session
+from pdfar.edits import Scope
 from pdfar.render import RenderPool, RenderResult, _Job
 from pdfar.session import DocumentSession, SnapshotNotPublished
 from pdfar.viewer import PDFView
@@ -251,7 +252,7 @@ def _stale_render(view, version):
                         ok=True, version=version)
 
 
-def test_invalidate_content_clears_caches_and_bumps_version(qapp, tmp_path):
+def test_invalidate_clears_caches_and_bumps_version(qapp, tmp_path):
     path = str(build_sample_pdf(tmp_path / "v.pdf", pages=2))
     view = PDFView(path)
     try:
@@ -260,7 +261,7 @@ def test_invalidate_content_clears_caches_and_bumps_version(qapp, tmp_path):
         view._tiles[0] = {(0, 0): _tiny_image()}
         before = view.session.version
 
-        assert view.invalidate_content() == before + 1
+        assert view.invalidate(Scope.CONTENT) == before + 1
 
         assert view.session.version == before + 1
         assert len(view.cache) == 0
@@ -283,7 +284,7 @@ def test_edited_content_reaches_the_view(qapp, tmp_path):
         before = view.cache.get(0, view.zoom, 0)
 
         view.doc.load_page(0).insert_text((10, 80), "EDITEDMARK", fontsize=12)
-        view.invalidate_content()
+        view.invalidate(Scope.CONTENT)
         assert view.cache.get(0, view.zoom, 0) is None
 
         assert _wait(qapp, lambda: view.cache.get(0, view.zoom, 0) is not None)

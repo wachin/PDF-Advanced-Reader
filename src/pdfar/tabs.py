@@ -23,16 +23,19 @@ class DocumentTab(QWidget):
     def __init__(self, doc_path: str, parent: Optional[QWidget] = None,
                  password: str = ""):
         super().__init__(parent)
-        self.doc_path = doc_path
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.view = PDFView(doc_path, parent=self, password=password)
         # Sidebar is created without a parent so it can be moved to the dock widget.
         # It is hidden initially and will be shown when placed in the dock widget.
-        self.sidebar = Sidebar(self.view.doc, self.view.pool, doc_path, None)
+        self.sidebar = Sidebar(self.view.session, self.view.pool, None)
         self.sidebar.hide()
         layout.addWidget(self.view)
+
+    @property
+    def doc_path(self) -> str:
+        return self.view.session.path
 
     @property
     def title(self) -> str:

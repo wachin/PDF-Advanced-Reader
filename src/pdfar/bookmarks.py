@@ -17,6 +17,8 @@ except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 from PyQt6.QtCore import QSettings
 
+from .session import DocumentSession
+
 
 @dataclass
 class Bookmark:
@@ -36,14 +38,22 @@ class BookmarkManager:
     - User bookmarks: stored in QSettings, persisted per document path
     """
 
-    def __init__(self, doc_path: str, doc: fitz.Document):
-        self.doc_path = doc_path
-        self.doc = doc
+    def __init__(self, session: DocumentSession):
+        self.session = session
         self.settings = QSettings("PDFAR", "PDFAR")
         self._user_bookmarks: List[Bookmark] = []
         self._outline_bookmarks: List[Bookmark] = []
         self._load_outline()
         self._load_user_bookmarks()
+
+    @property
+    def doc(self) -> fitz.Document:
+        """The live document; an accepted edit replaces the object."""
+        return self.session.doc
+
+    @property
+    def doc_path(self) -> str:
+        return self.session.path
 
     # ------------------------------------------------------------------ outline (PDF internal)
     def _load_outline(self) -> None:

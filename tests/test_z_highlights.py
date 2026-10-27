@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-from conftest import build_sample_pdf
+from conftest import build_sample_pdf, make_session
 from pdfar.main import MainWindow
 from pdfar.annotations import (
     AnnotationManager,
@@ -42,11 +42,10 @@ def win(qapp):
 
 def test_annotation_manager_add_get_highlight(tmp_path):
     """Test AnnotationManager creating and querying highlights."""
-    import pymupdf as fitz
 
     p = build_sample_pdf(tmp_path / "test.pdf", pages=3)
-    doc = fitz.open(p)
-    mgr = AnnotationManager(p, doc)
+    session = make_session(p)
+    mgr = AnnotationManager(session)
 
     assert mgr.get_annotations() == []
 
@@ -64,16 +63,15 @@ def test_annotation_manager_add_get_highlight(tmp_path):
     page1_hls = mgr.get_highlights_for_page(1)
     assert len(page1_hls) == 0
 
-    doc.close()
+    session.close()
 
 
 def test_annotation_manager_update_and_remove(tmp_path):
     """Test updating and removing annotations."""
-    import pymupdf as fitz
 
     p = build_sample_pdf(tmp_path / "test.pdf", pages=3)
-    doc = fitz.open(p)
-    mgr = AnnotationManager(p, doc)
+    session = make_session(p)
+    mgr = AnnotationManager(session)
 
     hl = mgr.add_highlight(0, [(10.0, 10.0, 50.0, 20.0)], color="#FFFF00")
     ann_id = hl.id
@@ -89,27 +87,26 @@ def test_annotation_manager_update_and_remove(tmp_path):
     assert len(mgr.get_annotations()) == 0
     assert mgr.remove_annotation("non-existent") is False
 
-    doc.close()
+    session.close()
 
 
 def test_save_and_reload_highlights_from_pdf(tmp_path):
     """Test that highlights saved to PDF can be loaded back."""
-    import pymupdf as fitz
 
     p = build_sample_pdf(tmp_path / "test.pdf", pages=3)
-    doc = fitz.open(p)
-    mgr = AnnotationManager(p, doc)
+    session = make_session(p)
+    mgr = AnnotationManager(session)
 
     mgr.add_highlight(0, [(10.0, 10.0, 50.0, 20.0)], color="#FFFF00")
     mgr.add_highlight(1, [(20.0, 30.0, 80.0, 45.0)], color="#FF6B6B")
 
     # save to PDF
     assert mgr.save_to_pdf() is True
-    doc.close()
+    session.close()
 
     # reopen with a new doc and manager
-    doc2 = fitz.open(p)
-    mgr2 = AnnotationManager(p, doc2)
+    session2 = make_session(p)
+    mgr2 = AnnotationManager(session2)
 
     hls_p0 = mgr2.get_highlights_for_page(0)
     hls_p1 = mgr2.get_highlights_for_page(1)
@@ -118,7 +115,7 @@ def test_save_and_reload_highlights_from_pdf(tmp_path):
     assert len(hls_p1) == 1
     assert len(mgr2.get_annotations()) == 2
 
-    doc2.close()
+    session2.close()
 
 
 def test_create_highlight_from_selection(win, tmp_path):

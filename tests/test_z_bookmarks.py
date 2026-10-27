@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-from conftest import build_sample_pdf
+from conftest import build_sample_pdf, make_session
 from pdfar.main import MainWindow
 from pdfar.bookmarks import BookmarkManager
 from PyQt6.QtWidgets import QMessageBox, QInputDialog
@@ -43,10 +43,9 @@ def win(qapp):
 def test_bookmark_manager_creates_user_bookmark(tmp_path):
     """Test BookmarkManager basic operations."""
     pdf_path = build_sample_pdf(tmp_path / "test.pdf", pages=5)
-    import pymupdf as fitz
-    doc = fitz.open(pdf_path)
+    session = make_session(pdf_path)
 
-    mgr = BookmarkManager(pdf_path, doc)
+    mgr = BookmarkManager(session)
 
     # Initially no user bookmarks
     assert mgr.get_user_bookmarks() == []
@@ -68,27 +67,26 @@ def test_bookmark_manager_creates_user_bookmark(tmp_path):
     assert len(user_bms) == 2
 
     # Test persistence - create new manager with same path
-    doc.close()
-    doc2 = fitz.open(pdf_path)
-    mgr2 = BookmarkManager(pdf_path, doc2)
+    session.close()
+    session2 = make_session(pdf_path)
+    mgr2 = BookmarkManager(session2)
     user_bms2 = mgr2.get_user_bookmarks()
     assert len(user_bms2) == 2
     assert user_bms2[0].title == "Chapter 1"
     assert user_bms2[1].title == "Chapter 2"
 
-    doc2.close()
+    session2.close()
 
 
 def test_bookmark_manager_outline_bookmarks(tmp_path):
     """Test that PDF outline bookmarks are loaded."""
     pdf_path = build_sample_pdf(tmp_path / "test.pdf", pages=5)
-    import pymupdf as fitz
-    doc = fitz.open(pdf_path)
+    session = make_session(pdf_path)
 
     # Add a TOC to the PDF
-    doc.set_toc([[1, "Chapter 1", 1], [2, "Section 1.1", 2], [1, "Chapter 2", 3]])
+    session.doc.set_toc([[1, "Chapter 1", 1], [2, "Section 1.1", 2], [1, "Chapter 2", 3]])
 
-    mgr = BookmarkManager(pdf_path, doc)
+    mgr = BookmarkManager(session)
     outline = mgr.get_outline_bookmarks()
 
     assert len(outline) == 3
@@ -102,17 +100,16 @@ def test_bookmark_manager_outline_bookmarks(tmp_path):
     assert outline[2].page == 2
     assert outline[2].level == 1
 
-    doc.close()
+    session.close()
 
 
 def test_bookmark_manager_all_bookmarks(tmp_path):
     """Test get_all_bookmarks returns user + outline."""
     pdf_path = build_sample_pdf(tmp_path / "test.pdf", pages=5)
-    import pymupdf as fitz
-    doc = fitz.open(pdf_path)
-    doc.set_toc([[1, "Outline Chapter", 2]])
+    session = make_session(pdf_path)
+    session.doc.set_toc([[1, "Outline Chapter", 2]])
 
-    mgr = BookmarkManager(pdf_path, doc)
+    mgr = BookmarkManager(session)
     mgr.add_user_bookmark("My Bookmark", 0)
 
     all_bms = mgr.get_all_bookmarks()
@@ -123,16 +120,15 @@ def test_bookmark_manager_all_bookmarks(tmp_path):
     assert all_bms[1].is_user is False
     assert all_bms[1].title == "Outline Chapter"
 
-    doc.close()
+    session.close()
 
 
 def test_bookmark_manager_rename_delete(tmp_path):
     """Test renaming and deleting user bookmarks."""
     pdf_path = build_sample_pdf(tmp_path / "test.pdf", pages=5)
-    import pymupdf as fitz
-    doc = fitz.open(pdf_path)
+    session = make_session(pdf_path)
 
-    mgr = BookmarkManager(pdf_path, doc)
+    mgr = BookmarkManager(session)
     mgr.add_user_bookmark("Old Title", 1)
     mgr.add_user_bookmark("Another", 3)
 
@@ -148,7 +144,7 @@ def test_bookmark_manager_rename_delete(tmp_path):
     # Delete out of bounds
     assert mgr.remove_user_bookmark(5) is False
 
-    doc.close()
+    session.close()
 
 
 def test_sidebar_bookmarks_tab(win, tmp_path):

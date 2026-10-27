@@ -22,8 +22,10 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate, QLabel, QToolButton, QLayout, QLayoutItem,
 )
 from . import APP_NAME
+from .edits import Scope
 from .icons import tinted_icon
 from .render import RenderPool, RenderResult
+from .session import DocumentSession
 from .bookmarks import BookmarkManager
 from .annotations import AnnotationManager, HIGHLIGHT_COLORS, AnnotationType
 
@@ -227,15 +229,14 @@ class Sidebar(QWidget):
     goto_page_requested = pyqtSignal(int)
     thumbnail_size_changed = pyqtSignal(int)
 
-    def __init__(self, doc: fitz.Document, pool: RenderPool, doc_path: str, parent=None):
+    def __init__(self, session: DocumentSession, pool: RenderPool, parent=None):
         super().__init__(parent)
-        self.doc = doc
+        self.session = session
         self.pool = pool
-        self.doc_path = doc_path
         self._thumb_zoom: Dict[int, float] = {}
         self._thumb_settings = ThumbnailSettings.load()
 
-        self.bookmark_manager = BookmarkManager(doc_path, doc)
+        self.bookmark_manager = BookmarkManager(session)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -355,6 +356,16 @@ class Sidebar(QWidget):
         self.thumbs.verticalScrollBar().valueChanged.connect(self._request_visible_thumbs)
         self.tabs.currentChanged.connect(self._on_sidebar_tab_changed)
         self._request_visible_thumbs()
+
+    # ----------------------------------------------------------------- doc
+    @property
+    def doc(self) -> fitz.Document:
+        """The live document; an accepted edit replaces the object."""
+        return self.session.doc
+
+    @property
+    def doc_path(self) -> str:
+        return self.session.path
 
     def _build_thumb_size_row(self) -> QWidget:
         """Slim row with minus, current size, and plus controls."""
@@ -533,12 +544,32 @@ class Sidebar(QWidget):
                 w0 = 595.0
             self._thumb_zoom[i] = self._thumb_settings.width / w0
 
-    def invalidate_thumbnails(self, version: int = -1) -> None:
-        """Drop every thumbnail: they were drawn from older content."""
-        for i in range(self.thumbs.count()):
-            item = self.thumbs.item(i)
-            if item is not None:
-                item.setIcon(QIcon())
+    #: What can make a thumbnail stale.  Metadata is not in it: a title change
+    #: moves no pixel, and clearing 540 thumbnails for one is the waste F10-1
+    #: scope grading exists to avoid.
+    _THUMB_SCOPES = Scope.STRUCTURE | Scope.CONTENT | Scope.COMMENTS | Scope.FORM
+
+    def invalidate_thumbnails(self, version: int = -1, scope: int = Scope.FULL) -> None:
+        """Drop thumbnails after a change to the document.
+
+        Connected to ``PDFView.content_changed``, which reports the scope of the
+        edit that caused it; ``scope`` decides how much of the sidebar is rebuilt.
+        """
+        affected = Scope(scope)
+        if not affected & self._THUMB_SCOPES:
+            return
+        if affected & Scope.STRUCTURE:
+            # The page tree itself moved: the list can be the wrong length.
+            self.thumbs.clear()
+            self._thumb_zoom.clear()
+            self._build_thumbs()
+            self.outline.clear()
+            self._build_outline()
+        else:
+            for i in range(self.thumbs.count()):
+                item = self.thumbs.item(i)
+                if item is not None:
+                    item.setIcon(QIcon())
         self._request_visible_thumbs()
 
     def apply_thumbnail_settings(self, settings: ThumbnailSettings) -> None:
