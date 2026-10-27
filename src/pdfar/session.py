@@ -61,6 +61,17 @@ class DocumentSession:
         """The live content is not what the file on disk holds."""
         return self.version != self._saved_version
 
+    def mark_saved(self, path: Optional[str] = None) -> None:
+        """The file now holds exactly this content, so the session is clean.
+
+        ``path`` moves where that file is (Save As); omit it when the existing
+        file was overwritten.  F10-2 owns the writing; this is the bookkeeping
+        the dirty flag needs to be able to go away again.
+        """
+        if path:
+            self.path = path
+        self._saved_version = self.version
+
     # ------------------------------------------------------------- ownership
     def _require_owner(self) -> None:
         if threading.get_ident() != self._owner_thread:

@@ -363,6 +363,18 @@ class MainWindow(QMainWindow):
         self.act_quit.triggered.connect(self.close)
 
         # Edit menu actions
+        self.act_undo = QAction("&Undo", self)
+        self.act_undo.setShortcut(QKeySequence.StandardKey.Undo)
+        self.act_undo.setToolTip("Undo the last change to this document")
+        self.act_undo.setEnabled(False)
+        self.act_undo.triggered.connect(self._undo_edit)
+
+        self.act_redo = QAction("&Redo", self)
+        self.act_redo.setShortcut(QKeySequence.StandardKey.Redo)
+        self.act_redo.setToolTip("Redo the last undone change")
+        self.act_redo.setEnabled(False)
+        self.act_redo.triggered.connect(self._redo_edit)
+
         self.act_copy = QAction("&Copy", self)
         self.act_copy.setShortcut(QKeySequence.StandardKey.Copy)
         self.act_copy.triggered.connect(self._copy)
@@ -598,6 +610,9 @@ class MainWindow(QMainWindow):
 
         # Edit menu
         edit_menu = menubar.addMenu("&Edit")
+        edit_menu.addAction(self.act_undo)
+        edit_menu.addAction(self.act_redo)
+        edit_menu.addSeparator()
         edit_menu.addAction(self.act_copy)
         edit_menu.addAction(self.act_select_all)
 
@@ -1084,16 +1099,30 @@ class MainWindow(QMainWindow):
 
     def _save_document_as(self) -> None:
         """Save the document to a new location."""
-        if not self.view:
-            return
-        path, _ = QFileDialog.getSaveFileName(self, "Save Document As", "",
+        tab = self._active_tab()
+        if tab is not None:
+            self._save_tab_as(tab)
+
+    def _save_tab_as(self, tab: DocumentTab) -> bool:
+        """Write *tab*'s document to a file the user picks.
+
+        F10-2 replaces the bare ``doc.save`` here with the atomic, verified
+        write.  The answer matters now: it decides whether the unsaved-changes
+        mark may be cleared.
+        """
+        path, _ = QFileDialog.getSaveFileName(self, "Save Document As", tab.doc_path,
                                               "PDF Files (*.pdf)")
-        if path:
-            try:
-                self.view.doc.save(path)
-                self.status_left.setText(f"Document saved to {path}")
-            except Exception as exc:
-                QMessageBox.critical(self, "Save As", f"Could not save document:\n{exc}")
+        if not path:
+            return False
+        try:
+            tab.view.doc.save(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Save As", f"Could not save document:\n{exc}")
+            return False
+        tab.view.session.mark_saved(path)
+        self._on_document_changed(tab)
+        self.status_left.setText(f"Document saved to {path}")
+        return True
 
     def _show_page_numbers(self) -> None:
         """Reveal the Page Numbers tab with its live in-page preview."""
@@ -1961,6 +1990,7 @@ class MainWindow(QMainWindow):
             self.side_dock.visibilityChanged.connect(
                 self.act_sidebar.setChecked)
         index = self.tabs.addTab(tab, tab.title)
+        tab.document_changed.connect(self._on_document_changed)
         tab.view.set_memory_level(self.memory_level)
         self.tabs.setCurrentIndex(index)
 
@@ -1973,7 +2003,8 @@ class MainWindow(QMainWindow):
         self._set_fit("width")
         # Restore saved view state for this document (after initial fit mode)
         self._restore_tab_state(tab.view, path)
-        self.setWindowTitle(f"{os.path.basename(path)} — {APP_NAME}")
+        self._set_window_title(tab)
+        self._refresh_history_actions()
         self.status_left.setText(f"Loaded: {path}")
         self._remember_file(path)
         self._update_status()
@@ -2059,8 +2090,89 @@ class MainWindow(QMainWindow):
         self._cancel_search()
         self.results.clear()
         self.hit_label.setText("")
-        self.setWindowTitle(f"{os.path.basename(tab.doc_path)} — {APP_NAME}")
+        self.setWindowTitle(f"{os.path.basename(tab.doc_path)}[*] — {APP_NAME}")
+        self.setWindowModified(tab.dirty)
+        self._refresh_history_actions()
         self._update_status()
+
+    # ------------------------------------------------------- document changes
+    def _set_window_title(self, tab: Optional[DocumentTab]) -> None:
+        """Title bar for *tab*.  ``[*]`` is where Qt puts the modified marker,
+        which follows ``setWindowModified`` — so the asterisk cannot lie."""
+        if tab is None:
+            self.setWindowModified(False)
+            self.setWindowTitle(f"{APP_NAME} — Advanced PDF Reader")
+            return
+        self.setWindowTitle(f"{os.path.basename(tab.doc_path)}[*] — {APP_NAME}")
+        self.setWindowModified(tab.dirty)
+
+    def _on_document_changed(self, tab: DocumentTab) -> None:
+        """Something was edited, undone or redone: refresh what derives from it."""
+        index = self.tabs.indexOf(tab)
+        if index >= 0:
+            self.tabs.setTabText(index, tab.display_title)
+        active = self._active_tab()
+        if tab is active:
+            self._set_window_title(tab)
+        self._refresh_history_actions()
+
+    def _refresh_history_actions(self) -> None:
+        """Enable Undo/Redo and name them after the step they would perform."""
+        tab = self._active_tab()
+        history = tab.view.session.history if tab is not None else None
+        for action, verb, label in (
+            (self.act_undo, "&Undo",
+             history.undo_label if history is not None else None),
+            (self.act_redo, "&Redo",
+             history.redo_label if history is not None else None),
+        ):
+            # A label exists exactly when there is a step of that direction:
+            # ``EditHistory.__len__`` counts the undo stack, so never test the
+            # object itself for truthiness — an empty stack is falsy.
+            action.setEnabled(label is not None)
+            # A label is document text: an "&" in it must not become a mnemonic.
+            action.setText(f"{verb} {label.replace('&', '&&')}" if label else verb)
+
+    def _undo_edit(self) -> None:
+        tab = self._active_tab()
+        if tab is not None:
+            tab.view.undo_edit()
+
+    def _redo_edit(self) -> None:
+        tab = self._active_tab()
+        if tab is not None:
+            tab.view.redo_edit()
+
+    def _confirm_close(self, tab: DocumentTab) -> bool:
+        """Ask before throwing away edits that are not in any file.
+
+        ``Save`` here means Save As: F10-2 is the save framework that makes an
+        in-place save safe, so until it exists a plain "Save" could not write the
+        edited bytes without pretending to.
+        """
+        if not tab.dirty:
+            return True
+        answer = QMessageBox.question(
+            self, "Unsaved changes",
+            f"“{tab.title}” has changes that are not in the file.\n"
+            "Save them before closing?",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save)
+        if answer == QMessageBox.StandardButton.Cancel:
+            return False
+        if answer == QMessageBox.StandardButton.Save:
+            return self._save_tab_as(tab)
+        return True
+
+    def _confirm_discard_all(self) -> bool:
+        """Ask about each document with unsaved edits, in tab order."""
+        for i in range(self.tabs.count()):
+            tab = self.tabs.widget(i)
+            if isinstance(tab, DocumentTab) and not self._confirm_close(tab):
+                return False
+        return True
 
     def _save_tab_state(self, tab: DocumentTab) -> None:
         """Save the view state for a document tab."""
@@ -2090,12 +2202,15 @@ class MainWindow(QMainWindow):
                 # Immediate restoration for tab switching (layout already established)
                 view.restore_state(state)
 
-    def _close_tab(self, index: int) -> None:
+    def _close_tab(self, index: int, confirm: bool = True) -> bool:
+        """Close a tab.  False means the user chose to keep it open."""
         if index < 0 or index >= self.tabs.count():
-            return
+            return False
         tab = self.tabs.widget(index)
         # Save state before closing
         if isinstance(tab, DocumentTab):
+            if confirm and not self._confirm_close(tab):
+                return False
             self._save_tab_state(tab)
         self.tabs.removeTab(index)
         if isinstance(tab, DocumentTab):
@@ -2104,6 +2219,7 @@ class MainWindow(QMainWindow):
             tab.deleteLater()
         if self.tabs.count() == 0:
             self._enter_empty_state()
+        return True
 
     def _enter_empty_state(self) -> None:
         self._cancel_search()
@@ -2118,7 +2234,8 @@ class MainWindow(QMainWindow):
         self.hit_label.setText("")
         self.status_left.setText("No document")
         self.status_right.setText("")
-        self.setWindowTitle(f"{APP_NAME} — Advanced PDF Reader")
+        self._set_window_title(None)
+        self._refresh_history_actions()
         self._numbering_prior_reflow = False
         if hasattr(self, "page_numbers_panel"):
             self.page_numbers_panel.set_page_count(0)
@@ -2147,9 +2264,12 @@ class MainWindow(QMainWindow):
         if count > 1:
             self.tabs.setCurrentIndex((self.tabs.currentIndex() - 1) % count)
 
-    def _close_all_tabs(self) -> None:
+    def _close_all_tabs(self, confirm: bool = True) -> bool:
+        """Close every tab.  False when the user stopped us to keep working."""
         while self.tabs.count() > 0:
-            self._close_tab(self.tabs.count() - 1)
+            if not self._close_tab(self.tabs.count() - 1, confirm):
+                return False
+        return True
 
     # ------------------------------------------------------------- zoom
     def _set_zoom(self, zoom: float) -> None:
@@ -2690,10 +2810,15 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if getattr(self, "_presentation", False):
             self._exit_presentation()
+        # Ask about every document *before* closing any of them, so a Cancel
+        # late in the list cannot have already thrown away earlier work.
+        if not self._confirm_discard_all():
+            event.ignore()
+            return
         self._geometry_timer.stop()
         # windowState is intentionally not saved to avoid restoring a hidden UI.
         self._save_geometry()
-        self._close_all_tabs()
+        self._close_all_tabs(confirm=False)
         self._cancel_search()
         super().closeEvent(event)
 

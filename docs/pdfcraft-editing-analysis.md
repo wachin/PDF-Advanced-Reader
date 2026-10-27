@@ -83,8 +83,9 @@ after the edit.
 
 The page cache key deliberately did **not** gain a version dimension
 (it stays `(page, round(zoom,4), rot%360, tag)`, `src/pdfar/cache.py:40`):
-`PDFView.invalidate_content()` drops everything derived from the previous
-content instead. Keeping several generations of the same page in a
+`PDFView.invalidate(scope)` drops the caches that the change's scope made stale
+instead (until F10-1 graded it, this was the unconditional
+`invalidate_content()`). Keeping several generations of the same page in a
 byte-budgeted cache would trade a clear-on-change cost for pages the user will
 never look at again.
 
@@ -372,15 +373,16 @@ that writes a **copy** rather than the open file and already stages it atomicall
 (`tempfile.mkstemp` → `save` → `os.replace`, `page_numbers.py:525-556`),
 page-number stamping, reflow, thumbnails, outline reading, and a toolbar/dock
 architecture with exclusive tool groups and a Reflow-exclusion pattern to copy.
-Missing: any dirty/undo machinery, a save-with-confirmation flow, content
-versioning, and an `fsync` before the rename in that staging write.
+Content versioning, the dirty flag and undo/redo have since landed (F10-0,
+F10-1). Still missing: a save-with-confirmation flow that writes the *edited*
+bytes, and an `fsync` before the rename in that staging write.
 
 Recommended order, each step independently shippable:
 
 | # | Increment | Reuses | New risk |
 |---|---|---|---|
 | 0 | ✅ **Done (F10-0) — Document session**: GUI thread owns the doc; `DocumentSession` publishes `doc.tobytes()` + a `version`; workers open from the buffer; stale render results are dropped and `invalidate_content()` clears the derived caches | `session.py`, `render.py`, `search.py`, `reflow.py`, `viewer.py` | none user-visible — but everything after depends on it |
-| 1 | **Edit framework**: `Edit` dataclasses + `apply(edit)` on a cloned doc, undo/redo as document snapshots, `Scope`-style invalidation, dirty flag + `setWindowModified`, atomic staging write, reopen-and-verify before replacing | step 0 | low |
+| 1 | ✅ **Done (F10-1) — Edit framework**: `Edit` dataclasses + `apply(edit)` on a cloned doc, undo/redo as document snapshots, `Scope`-style invalidation, dirty flag + `setWindowModified`, confirm-before-discard. The atomic staging write and reopen-and-verify were pulled out into step 2, where they actually pay off | step 0 | low |
 | 2 | **Save/Save As/Revert** UI with the confirm-on-close flow, incremental when `can_save_incrementally()`, full otherwise | step 1 | low |
 | 3 | **Annotation editing** (note, highlight/underline/strike, ink, shapes, free text, stamps): PyMuPDF annot APIs; regenerate `/AP` or keep painting in the view and flatten on save; delete/reply/lock/properties | steps 0-2 | medium (appearances) |
 | 4 | **Page organization**: rotate, delete, extract, split, combine, insert blank, reorder, page boxes, metadata + outline editing; flatten inherited attributes before reordering | step 1 | medium |
@@ -419,3 +421,4 @@ OpenType shaping, JIS line-breaking and a 240-glyph Type 3 generator to make ste
 |---|---|---|
 | 2026-10-26 | created | Study of `external/pdfcraft/` (Rust, MIT OR Apache-2.0) before that reference copy is deleted: COS overlay model, snapshot undo, incremental save, content-stream splicing, font ladder, redaction verification, and an 8-step path to editing in PDFAR |
 | 2026-10-26 | step 0 built | F10-0 landed: `src/pdfar/session.py` (`DocumentSession`, `version`, `snapshot()`, `open_copy()`) plus version-stamped render jobs/results and `PDFView.invalidate_content()`. §2 updated from "the gap" to "how it is closed", including why the cache key stayed version-free |
+| 2026-10-27 | step 1 built | F10-1 landed: `src/pdfar/edits.py` (`Edit`, `Scope`, `EditError`, `EditHistory`), copy-and-adopt `DocumentSession.apply()` with snapshot undo/redo, `generation`, `PDFView.invalidate(scope)`, and the dirty UI (`[*]` title, `•` tab marker, named Undo/Redo, confirm-before-discard). Two findings that shape step 2: `tobytes()` is not deterministic (MuPDF regenerates the second `/ID`, so a failed edit cannot be proven unchanged by bytes), and serializing an authenticated encrypted document yields **decrypted** bytes |

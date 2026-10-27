@@ -903,8 +903,17 @@ PDFAR must be local-first and privacy-first.
 
 # F10 — PDF EDITING (MASTER PLAN)
 
-Phase status: **[~] Under way.** F10-0 (document session) is implemented; the
-next task is **F10-1**.
+Phase status: **[~] Under way.** F10-0 (document session) and F10-1 (edit
+framework) are implemented; the next task is **F10-2**.
+
+*Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
+for the first time when an edit is accepted, not when a document is read — and
+the GS262 benchmark is unchanged. Two rounds against the F10-0 baseline, on a
+notably busy machine: F10-1 open 2.48 / 2.14 s, first page 0.24 / 0.25 s, jump
+0.81 / 0.58 s, scroll 2.34 / 3.37 s, peak RSS 449 / 494 MB; F10-0 3.30 / 2.10,
+0.34 / 0.41, 0.74 / 0.56, 3.77 / 3.36, 495 / 513 MB. Every F10-1 figure sits
+inside the F10-0 spread, so the extra `Document` clone and history bookkeeping
+cost nothing measurable.
 
 This is the umbrella for every capability that changes a document. F6 (page
 manipulation), F7-3 (true redaction) and F8-1 (content editing) are now
@@ -947,6 +956,8 @@ in memory.
       version". Clearing on change is what we do instead — the version travels
       on the job and its result, which covers the same case without a cache
       holding several generations of the same page.
+      *Renamed in F10-1* to `invalidate(scope)`, which is what lets a metadata
+      edit leave the rendered pages alone.
 - [x] The large-PDF benchmark shows no regression (this step is on the hot path):
       GS262, 540 pages — open 1.89 s, first page 0.165 s, jump 0.42 s,
       peak RSS 408 MB
@@ -956,21 +967,62 @@ in memory.
 Why: MuPDF is not thread-safe, so each worker needs its own `Document`. The only
 correct way to share state between them is a byte snapshot pinned to a version.
 
-## F10-1 Edit framework — [ ]
+## F10-1 Edit framework — [x]
 
-- [ ] An `Edit` type carrying *intent* (`RotatePages { pages, delta }`), not
-      before/after values
-- [ ] Edits run on a copy of the document; the result is adopted only on success,
-      so a failed edit cannot be half-applied
-- [ ] Undo/redo stacks with a human label per step and a fixed depth
-- [ ] Scope-based invalidation: an edit declares what it can change (metadata,
+- [x] An `Edit` type carrying *intent* (`RotatePages { pages, delta }`), not
+      before/after values — `src/pdfar/edits.py`: `Edit` is an ABC with `label`,
+      `scope` and `apply(doc)`; a concrete edit is a frozen dataclass holding
+      only its arguments (`SetMetadata` is the first)
+- [x] Edits run on a copy of the document; the result is adopted only on success,
+      so a failed edit cannot be half-applied (`session.apply()` works on
+      `fitz.open(stream=doc.tobytes())` and only `_adopt()`s a clone whose
+      `apply()` returned; any exception becomes an `EditError` and the live
+      document keeps its identity, version and `generation`)
+- [x] Undo/redo stacks with a human label per step and a fixed depth
+      (`EditHistory`, bounded by *both* `max_steps=50` and `max_bytes=256 MB`
+      because the snapshots are whole documents; the Edit menu names the step it
+      would take — `Undo Add text "…"`)
+- [x] Scope-based invalidation: an edit declares what it can change (metadata,
       annotations, page content…) and only those caches are rebuilt
-- [ ] A dirty flag driving `setWindowModified(True)` and the tab indicator
-- [ ] Confirm before discarding: closing a tab or the window with unsaved changes
-- [ ] A document `generation` so stale UI references are rejected rather than
-      applied to the wrong object
-- [ ] Tests: apply, undo, redo, dirty state after each, and a failing edit leaving
-      the document byte-identical
+      (`Scope` IntFlag; `PDFView.invalidate(scope)` grades the pixel caches, the
+      word/hit-test caches and the page geometry separately, and restarts reflow
+      only when `STRUCTURE | CONTENT` is set. `Sidebar.invalidate_thumbnails()`
+      rebuilds the model only on `STRUCTURE`)
+- [x] A dirty flag driving `setWindowModified(True)` and the tab indicator
+      (`session.dirty` is `version != saved_version`; the title carries `[*]`,
+      the tab gains a `•` prefix)
+- [x] Confirm before discarding: closing a tab or the window with unsaved changes
+      (`_confirm_close` offers Save / Discard / Cancel — Save means Save As until
+      F10-2 lands; `closeEvent` asks about every dirty tab before anything is
+      torn down)
+- [x] A document `generation` so stale UI references are rejected rather than
+      applied to the wrong object (bumped by `_adopt()` only — an in-place change
+      keeps the same `Document` object, so it must not look like a new one)
+- [x] Tests: apply, undo, redo, dirty state after each, and a failing edit leaving
+      the document byte-identical (`tests/test_edits.py` 21,
+      `tests/test_edits_ui.py` 12)
+      *Design note:* "byte-identical" is asserted as object identity + page text
+      + the bytes on disk, because `doc.tobytes()` is **not** deterministic —
+      MuPDF regenerates the second `/ID` element on every serialization, so two
+      writes of an untouched document differ.
+
+Why this shape: keeping the *intent* rather than the before/after values is what
+lets an edit be replayed, refused, or applied to a copy — and it is what gives
+the user a label in the Edit menu. Holding whole-document snapshots instead of
+deltas costs memory but is the only undo that cannot corrupt a PDF, and the byte
+bound is what keeps that cost finite.
+
+### Consequences F10-2 must handle (found here, fixed there)
+
+- After the first adoption the document is stream-backed, so
+  `doc.can_save_incrementally()` is False; `save_to_pdf()`'s incremental path in
+  `Highlights` therefore returns False from that point on (harmless today, and
+  F10-3 routes annotations through the framework anyway).
+- `tobytes()` on an authenticated encrypted document yields **decrypted** bytes,
+  so the session copy of an encrypted PDF is unencrypted in memory after the
+  first edit — saving it would silently strip the password.
+- Save As retargets `session.path`, but `viewState/<path>` and `bookmarks/<path>`
+  in QSettings are keyed by the old path and are not migrated yet.
 
 ## F10-2 Save, Save As, Revert — [ ]
 
@@ -985,6 +1037,9 @@ correct way to share state between them is a byte snapshot pinned to a version.
       page count and a render
 - [ ] Refuse, with an actionable message: read-only file, insufficient
       permissions, signed document that would need a rewrite, missing space
+- [ ] Re-apply the original encryption on save: after the first edit the session
+      copy holds **decrypted** bytes (`tobytes()` of an authenticated document),
+      so saving without `encrypt` would silently remove the user's password
 - [ ] Revert to saved
 - [ ] Per-document state migration on Save As (`viewState/<path>` and
       `bookmarks/<path>` are keyed by path today and would silently orphan)
@@ -1103,7 +1158,7 @@ The current sprint must focus exclusively on the editing foundation:
 F10-0 — done
 Document session (`version`, workers off the disk)
 
-F10-1
+F10-1 — done
 Edit framework (copy-and-adopt, undo, dirty state)
 
 F10-2
@@ -1726,6 +1781,78 @@ untouched document still renders straight from the file.
 snapshot lifecycle, version-pinned renders, dropped stale jobs and results,
 in-memory visibility for render/search/reflow, the off-thread serialization
 guard, and that the file on disk never changes.
+
+---
+
+### F10-1 Edit Framework — [x] Implemented
+
+**Completed**: 2026-10-27
+**Commits**: `4c8e7b5` (framework), plus the dirty-state UI
+
+**What landed**: the whole phase turns on one rule — *an edit never touches the
+document the user is looking at*. `Edit` carries intent (`label`, `scope`,
+`apply(doc)`); `DocumentSession.apply()` runs it against a throwaway clone made
+from `doc.tobytes()`, and only a clone whose `apply()` returned replaces the live
+document. A failed edit therefore cannot be half-applied, cannot be observed
+halfway by a render worker, and leaves no history entry.
+
+**Files changed**:
+
+- `src/pdfar/edits.py` (new) — `Edit`, `EditError`, `Scope` (IntFlag:
+  `METADATA / STRUCTURE / CONTENT / COMMENTS / LINKS / FORM`), `SetMetadata` as
+  the reference edit, and `EditHistory` with `_Step(label, scope, before)`.
+- `src/pdfar/session.py` — `apply()`, `undo()`, `redo()`, `_adopt()`, `dirty`,
+  `mark_saved()`, `generation`; `close()` releases the byte snapshots.
+- `src/pdfar/viewer.py` — `invalidate_content()` became `invalidate(scope)`,
+  `apply_edit()` / `undo_edit()` / `redo_edit()`, `_refresh_page_geometry()`,
+  `content_changed(int, int)` now carries the scope, and the `doc` property is
+  documented as "read it through the session, never store it".
+- `src/pdfar/sidebar.py` / `annotations.py` / `bookmarks.py` / `tabs.py` — every
+  holder of a `fitz.Document` now holds the session, because `_adopt()`
+  invalidates a stored handle.
+- `src/pdfar/main.py` — Edit menu `Undo <step>` / `Redo <step>` with the standard
+  shortcuts, `[*]` title + `setWindowModified()`, the `•` tab marker, and
+  Save / Discard / Cancel before any tab or window closes.
+
+**Undo is bytes, not deltas.** Each step stores the complete document as it was
+*before* the edit, so undo is "open these bytes and adopt them" — the one undo
+that cannot corrupt a PDF, since it never has to invert an operation. Whole
+documents are large, so `EditHistory` is bounded twice over: `max_steps=50` and
+`max_bytes=256 MB`, oldest evicted first, and the redo branch shares the byte
+budget so a deep undo cannot double the cost.
+
+**Two counters, because they answer different questions.** `version` says *which
+content* — every accepted change bumps it once, and readers are turned away by
+it. `generation` says *which object* — only `_adopt()` bumps it, so an in-place
+annotation change keeps the identity its holders still rely on. UI code holding a
+`Document` from an older generation is looking at a closed handle.
+
+**Measured**: the open path is untouched — `tobytes()` first runs when an edit is
+accepted, not when a document is read. GS262 (540 pages), two rounds against the
+F10-0 baseline on a busy machine: F10-1 open 2.48 / 2.14 s, first page 0.24 /
+0.25 s, distant jump 0.81 / 0.58 s, scroll 2.34 / 3.37 s, peak RSS 449 / 494 MB;
+F10-0 3.30 / 2.10, 0.34 / 0.41, 0.74 / 0.56, 3.77 / 3.36, 495 / 513 MB. No
+regression.
+
+**Verified by eye** (headless, on a copy of `demo.pdf`): applying an `AddText`
+edit paints the new text on the page *and* in the sidebar thumbnail, the tab
+gains `•`, `isWindowModified()` is True, and the Edit menu reads
+`Undo Add text "F10-1"`; undoing it repaints the original page while the dirty
+mark stays (the content still differs from the file), `Redo` takes over the name
+and `Undo` greys out; a failing edit leaves the page, the version, the generation
+and the history exactly as they were; and closing the dirty tab asks
+"…has changes that are not in the file" instead of discarding. The copy on disk
+was byte-identical throughout.
+
+**Tests**: 416 passed (was 383) — `tests/test_edits.py` (21) for the framework
+and `tests/test_edits_ui.py` (12) for the title, tab marker, menu labels and the
+close dialog.
+
+**Found here, deferred to F10-2**: `tobytes()` is not deterministic (MuPDF
+regenerates the second `/ID` element, so "unchanged" cannot be proven by bytes),
+an edited encrypted document is decrypted in memory, the first adoption makes
+`can_save_incrementally()` False, and Save As orphans the path-keyed
+`viewState/` and `bookmarks/` settings.
 
 ---
 
