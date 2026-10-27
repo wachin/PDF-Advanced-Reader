@@ -1011,34 +1011,37 @@ class Sidebar(QWidget):
         for name, hex_color in HIGHLIGHT_COLORS:
             color_act = act_color.addAction(name)
             color_act.triggered.connect(lambda checked, a=ann_id, c=hex_color: self._change_annotation_color(a, c))
+        # Only a highlight has a color PDFAR can change; offering it on a note
+        # would be a menu item that quietly does nothing.
+        act_color.menuAction().setVisible(ann_type == "highlight")
 
         menu.exec(self.annotations_tree.viewport().mapToGlobal(pos))
 
     def _edit_note(self, annotation_id: str) -> None:
-        """Edit a note for a highlight."""
+        """Edit the text an annotation carries."""
         if not self.annotation_manager:
             return
-        ann = self.annotation_manager.get_highlight(annotation_id)
+        ann = self.annotation_manager.get_annotation(annotation_id)
         if ann is None:
             return
 
         current_note = ann.get_note()
         new_note, ok = QInputDialog.getMultiLineText(
             self, "Edit Note",
-            f"Note for highlight on page {ann.page + 1}:",
+            f"Note on page {ann.page + 1}:",
             current_note
         )
         if ok:
             if new_note.strip():
-                self.annotation_manager.add_note_to_highlight(annotation_id, new_note.strip())
+                self.annotation_manager.set_note(annotation_id, new_note.strip())
             else:
                 # Empty note = remove it
-                self.annotation_manager.remove_note_from_highlight(annotation_id)
+                self.annotation_manager.remove_note(annotation_id)
 
     def _remove_note(self, annotation_id: str) -> None:
-        """Remove the note from a highlight."""
+        """Remove the note from an annotation."""
         if self.annotation_manager:
-            self.annotation_manager.remove_note_from_highlight(annotation_id)
+            self.annotation_manager.remove_note(annotation_id)
 
     def _delete_annotation(self, annotation_id: str) -> None:
         """Delete an annotation."""

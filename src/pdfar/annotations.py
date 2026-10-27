@@ -1,11 +1,12 @@
 """Annotation system for PDFAR.
 
 The document holds the annotations (F10-3): a highlight is a PDF ``/Highlight``
-annotation, and every change to it is a :class:`pdfar.edits.Edit`.  That is what
-makes a highlight undoable, what makes it mark the document dirty, and what makes
-a background reader see it without a save in between.  ``AnnotationManager`` is a
-*view* of the document: it re-reads the list after a change rather than keeping a
-pending one that Save would have to push in.
+annotation, a sticky note is a ``/Text`` one, and every change to either is a
+:class:`pdfar.edits.Edit`.  That is what makes a highlight undoable, what makes it
+mark the document dirty, and what makes a background reader see it without a save
+in between.  ``AnnotationManager`` is a *view* of the document: it re-reads the
+list after a change rather than keeping a pending one that Save would have to
+push in.
 
 An annotation's id is its ``/NM`` name, so a sidebar row, a model key and a PDF
 object all mean the same thing across an undo, a save and a reopen.
@@ -32,6 +33,9 @@ from .session import DocumentSession
 #: How solid a highlight paints.  Stored as the annotation's ``/CA``, so a model
 #: read back out of a file reports what was written into it.
 HIGHLIGHT_OPACITY = 0.4
+
+#: How big MuPDF makes a note icon.  Used only to keep an icon inside the page.
+NOTE_ICON_SIZE = 16.0
 
 #: What a damaged annotation can raise while the list is being read.  MuPDF
 #: signals its failures through these; asking for less than ``Exception`` means a
@@ -62,6 +66,19 @@ class Annotation:
     modified: str = field(default_factory=lambda: datetime.now().isoformat())
     content: str = ""                      # For notes: the text content
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def has_note(self) -> bool:
+        """Whether this annotation carries text of its own.
+
+        On the base class because both kinds do: a note is a ``/Text``
+        annotation's whole point, and a note on a highlight is that highlight's
+        ``/Contents``.
+        """
+        return bool(self.content.strip())
+
+    def get_note(self) -> str:
+        """The annotation's text, which is ``""`` when it has none."""
+        return self.content
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -105,20 +122,14 @@ class HighlightAnnotation(Annotation):
     """
     type: AnnotationType = AnnotationType.HIGHLIGHT
 
-    def has_note(self) -> bool:
-        """Check if this highlight has an associated note."""
-        return bool(self.content.strip())
-
-    def get_note(self) -> str:
-        """Get the note text for this highlight."""
-        return self.content
-
 
 @dataclass
 class NoteAnnotation(Annotation):
-    """Standalone note annotation (not associated with a highlight).
+    """A standalone sticky note: a PDF ``/Text`` annotation.
 
-    Anchored to a specific position on a page.
+    Anchored to a point rather than to a selection — ``position`` is where its
+    icon sits, and the icon is the only part of it a reader paints (the text
+    opens in a popup, which is why an empty note is still a note).
     """
     type: AnnotationType = AnnotationType.NOTE
     # position: (x, y) in PDF points where the note icon appears
@@ -169,7 +180,7 @@ def _name(doc: fitz.Document, annot: fitz.Annot, ann_id: str) -> None:
     doc.xref_set_key(annot.xref, "NM", f"({ann_id})")
 
 
-def _find_highlight(page: fitz.Page, ann_id: str) -> fitz.Annot:
+def _find_annotation(page: fitz.Page, ann_id: str) -> fitz.Annot:
     """The annotation *ann_id* names on *page*, or an edit that refuses.
 
     Matching by name rather than by position matters: an undo can leave the page
@@ -214,6 +225,28 @@ def _highlight_model(annot: fitz.Annot, page_idx: int) -> HighlightAnnotation:
         rects=_quad_rects(annot),
         color=_rgb_to_hex(annot.colors.get("stroke") or (1.0, 1.0, 0.0)),
         opacity=HIGHLIGHT_OPACITY if opacity is None else opacity,
+        author=info.get("title") or "",
+        created=info.get("creationDate") or "",
+        modified=info.get("modDate") or "",
+        content=info.get("content") or "",
+    )
+
+
+def _note_model(annot: fitz.Annot, page_idx: int) -> NoteAnnotation:
+    """Read one document annotation into the note model.
+
+    The icon's rectangle is the whole geometry a note has: ``position`` is where
+    the user clicked, and the rectangle is what the view has to repaint and what
+    a click has to hit.
+    """
+    info = annot.info
+    rect = annot.rect
+    return NoteAnnotation(
+        id=annot_key(annot),
+        page=page_idx,
+        rects=[(rect.x0, rect.y0, rect.x1, rect.y1)],
+        position=(rect.x0, rect.y0),
+        color=_rgb_to_hex(annot.colors.get("stroke") or (1.0, 1.0, 0.0)),
         author=info.get("title") or "",
         created=info.get("creationDate") or "",
         modified=info.get("modDate") or "",
@@ -271,7 +304,44 @@ class AddHighlight(Edit):
 
 
 @dataclass(frozen=True)
-class RemoveHighlight(Edit):
+class AddNote(Edit):
+    """Put a sticky note at *position* — a PDF ``/Text`` annotation.
+
+    The point is the icon's top-left.  It is pulled inside the page if the user
+    clicked near the bottom or right edge, because an icon that hangs off the
+    page is one no reader lets them click.
+    """
+
+    ann_id: str
+    page: int
+    position: tuple
+    note: str = ""
+    author: str = ""
+
+    scope = Scope.COMMENTS
+
+    @property
+    def label(self) -> str:
+        return "Add note"
+
+    def apply(self, doc: fitz.Document) -> None:
+        page = doc.load_page(self.page)
+        box = page.rect
+        x = max(box.x0, min(float(self.position[0]), box.x1 - NOTE_ICON_SIZE))
+        y = max(box.y0, min(float(self.position[1]), box.y1 - NOTE_ICON_SIZE))
+        # ``add_text_annot`` writes the text as the annotation's /Contents, which
+        # is the same key a note on a highlight uses; an empty one is allowed,
+        # since the icon is what the user asked for and the popup is where the
+        # text will go.
+        annot = page.add_text_annot(fitz.Point(x, y), self.note)
+        if self.author:
+            annot.set_info(title=self.author)
+        annot.update()
+        _name(doc, annot, self.ann_id)
+
+
+@dataclass(frozen=True)
+class RemoveAnnotation(Edit):
     """Delete the annotation *ann_id* names."""
 
     ann_id: str
@@ -285,7 +355,7 @@ class RemoveHighlight(Edit):
 
     def apply(self, doc: fitz.Document) -> None:
         page = doc.load_page(self.page)
-        page.delete_annot(_find_highlight(page, self.ann_id))
+        page.delete_annot(_find_annotation(page, self.ann_id))
 
 
 @dataclass(frozen=True)
@@ -305,7 +375,7 @@ class SetHighlightColor(Edit):
 
     def apply(self, doc: fitz.Document) -> None:
         page = doc.load_page(self.page)
-        annot = _find_highlight(page, self.ann_id)
+        annot = _find_annotation(page, self.ann_id)
         annot.set_colors(stroke=_hex_to_rgb(self.color))
         annot.set_opacity(self.opacity)
         # The color is baked into the appearance stream, so without a new
@@ -314,13 +384,17 @@ class SetHighlightColor(Edit):
 
 
 @dataclass(frozen=True)
-class SetHighlightNote(Edit):
-    """Set or clear the note on a highlight."""
+class SetAnnotationNote(Edit):
+    """Set or clear the text an annotation carries.
+
+    The same step for both kinds: a standalone note's text and a note on a
+    highlight live in the same ``/Contents`` key.
+    """
 
     ann_id: str
     page: int
     note: str
-    #: Whether the highlight already had a note when the user asked.  Only the
+    #: Whether the annotation already had text when the user asked.  Only the
     #: manager knows that, and it decides which of these three steps is called.
     had_note: bool = False
 
@@ -337,7 +411,7 @@ class SetHighlightNote(Edit):
         # moment its ``Page`` is garbage, and writing to a handle in that state
         # raises "annotation not bound to any page".
         page = doc.load_page(self.page)
-        annot = _find_highlight(page, self.ann_id)
+        annot = _find_annotation(page, self.ann_id)
         if self.note:
             annot.set_info(content=self.note)
             return
@@ -391,9 +465,16 @@ class AnnotationManager(QObject):
             page = doc.load_page(page_idx)
             try:
                 for annot in page.annots():
-                    if annot.type[0] != fitz.PDF_ANNOT_HIGHLIGHT:
+                    kind = annot.type[0]
+                    if kind == fitz.PDF_ANNOT_HIGHLIGHT:
+                        model = _highlight_model(annot, page_idx)
+                    elif kind == fitz.PDF_ANNOT_TEXT:
+                        model = _note_model(annot, page_idx)
+                    else:
+                        # A shape, stamp or free-text annotation PDFAR cannot
+                        # edit yet: listing it would offer an action on something
+                        # the user brought in from another program.
                         continue
-                    model = _highlight_model(annot, page_idx)
                     found[model.id] = model
             except ANNOT_READ_ERRORS:
                 # Annotations are a linked chain, so one that the file cannot
@@ -461,12 +542,23 @@ class AnnotationManager(QObject):
         made = self.add_highlights({page: rects}, color, author, note)
         return made[0] if made else None
 
+    def add_note(self, page: int, position: tuple, note: str = "",
+                 author: str = "") -> Optional[NoteAnnotation]:
+        """Put a standalone note at *position*.  ``None`` if the edit was refused."""
+        ann_id = str(uuid.uuid4())
+        if not self._run(AddNote(ann_id=ann_id, page=int(page),
+                                position=tuple(position), note=note,
+                                author=author)):
+            return None
+        made = self.get_annotation(ann_id)
+        return made if isinstance(made, NoteAnnotation) else None
+
     def remove_annotation(self, annotation_id: str) -> bool:
         """Remove an annotation by ID."""
         ann = self._annotations.get(annotation_id)
         if ann is None:
             return False
-        return self._run(RemoveHighlight(ann_id=annotation_id, page=ann.page))
+        return self._run(RemoveAnnotation(ann_id=annotation_id, page=ann.page))
 
     def set_highlight_color(self, annotation_id: str, color: str) -> bool:
         """Recolor a highlight, keeping how solid it paints."""
@@ -477,23 +569,23 @@ class AnnotationManager(QObject):
                                            page=highlight.page, color=color,
                                            opacity=highlight.opacity))
 
-    def add_note_to_highlight(self, highlight_id: str,
-                              note_text: str) -> Optional[HighlightAnnotation]:
-        """Add or update a note on an existing highlight."""
-        if not self._set_note(highlight_id, note_text):
+    def set_note(self, annotation_id: str, note_text: str) -> Optional[Annotation]:
+        """Add or update the text of an annotation, of either kind."""
+        if not self._set_note(annotation_id, note_text):
             return None
-        return self.get_highlight(highlight_id)
+        return self.get_annotation(annotation_id)
 
-    def remove_note_from_highlight(self, highlight_id: str) -> bool:
-        """Remove the note from a highlight (keeps the highlight)."""
-        return self._set_note(highlight_id, "")
+    def remove_note(self, annotation_id: str) -> bool:
+        """Empty an annotation's text, keeping the annotation itself."""
+        return self._set_note(annotation_id, "")
 
-    def _set_note(self, highlight_id: str, note: str) -> bool:
-        highlight = self.get_highlight(highlight_id)
-        if highlight is None:
+    def _set_note(self, annotation_id: str, note: str) -> bool:
+        ann = self.get_annotation(annotation_id)
+        if ann is None:
             return False
-        return self._run(SetHighlightNote(ann_id=highlight_id, page=highlight.page,
-                                          note=note, had_note=highlight.has_note()))
+        return self._run(SetAnnotationNote(ann_id=annotation_id, page=ann.page,
+                                          note=note,
+                                          had_note=ann.has_note()))
 
     # ------------------------------------------------------------------- reads
     def get_annotation(self, annotation_id: str) -> Optional[Annotation]:
@@ -531,10 +623,10 @@ class AnnotationManager(QObject):
         return [a for a in self.get_annotations(page=page, ann_type=AnnotationType.NOTE)
                 if isinstance(a, NoteAnnotation)]
 
-    def get_note_for_highlight(self, highlight_id: str) -> Optional[str]:
-        """Get the note text for a highlight."""
-        highlight = self.get_highlight(highlight_id)
-        return highlight.get_note() if highlight is not None else None
+    def get_note(self, annotation_id: str) -> Optional[str]:
+        """The text an annotation carries, or ``None`` if there is no such annotation."""
+        ann = self._annotations.get(annotation_id)
+        return ann.content if ann is not None else None
 
 
 # Standard highlight colors (Okular-style)

@@ -62,24 +62,24 @@ def test_highlight_annotation_note_methods(tmp_path):
     assert hl.get_note() == ""
 
     # Add note
-    mgr.add_note_to_highlight(hl.id, "This is a test note")
+    mgr.set_note(hl.id, "This is a test note")
     noted = mgr.get_highlight(hl.id)
     assert noted.has_note()
     assert noted.get_note() == "This is a test note"
     assert noted is not hl, "the handle taken before the edit is the read before it"
 
     # Update note
-    mgr.add_note_to_highlight(hl.id, "Updated note")
-    assert mgr.get_note_for_highlight(hl.id) == "Updated note"
+    mgr.set_note(hl.id, "Updated note")
+    assert mgr.get_note(hl.id) == "Updated note"
 
     # Clear note
-    assert mgr.remove_note_from_highlight(hl.id) is True
+    assert mgr.remove_note(hl.id) is True
     assert not mgr.get_highlight(hl.id).has_note()
 
     session.close()
 
 
-def test_annotation_manager_add_note_to_highlight(tmp_path):
+def test_annotation_manager_sets_a_note_on_a_highlight(tmp_path):
     """Test adding notes to highlights via AnnotationManager."""
 
     p = build_sample_pdf(tmp_path / "test.pdf", pages=3)
@@ -90,18 +90,18 @@ def test_annotation_manager_add_note_to_highlight(tmp_path):
     ann_id = hl.id
 
     # Add note via manager
-    result = mgr.add_note_to_highlight(ann_id, "Note from manager")
+    result = mgr.set_note(ann_id, "Note from manager")
     assert result is not None
     assert result.id == ann_id
     assert result.get_note() == "Note from manager"
 
     # Get note
-    note = mgr.get_note_for_highlight(ann_id)
+    note = mgr.get_note(ann_id)
     assert note == "Note from manager"
 
     # Remove note
-    assert mgr.remove_note_from_highlight(ann_id) is True
-    assert mgr.get_note_for_highlight(ann_id) == ""
+    assert mgr.remove_note(ann_id) is True
+    assert mgr.get_note(ann_id) == ""
 
     session.close()
 
@@ -114,7 +114,7 @@ def test_note_persistence_in_pdf(tmp_path):
     mgr = AnnotationManager(session)
 
     hl = mgr.add_highlight(0, [(10.0, 10.0, 50.0, 20.0)], color="#FFFF00")
-    mgr.add_note_to_highlight(hl.id, "Persistent note")
+    mgr.set_note(hl.id, "Persistent note")
 
     # Save to PDF
     assert mgr.save_to_pdf() is True
@@ -148,7 +148,7 @@ def test_sidebar_shows_notes(win, tmp_path):
     hls = win.view.annotation_manager.get_highlights_for_page(0)
     assert len(hls) >= 1
     hl = hls[0]
-    win.view.annotation_manager.add_note_to_highlight(hl.id, "Sidebar test note")
+    win.view.annotation_manager.set_note(hl.id, "Sidebar test note")
 
     # Check tree shows note indicator
     # The tree should have an item with the note indicator
@@ -183,7 +183,7 @@ def test_main_window_edit_note_via_sidebar(win, tmp_path, monkeypatch):
     # Check note was added.  The highlight is in the document now, so the answer
     # comes from a fresh read, not from the handle held before the edit.
     manager = win.view.annotation_manager
-    assert manager.get_note_for_highlight(hl.id) == "Edited via sidebar"
+    assert manager.get_note(hl.id) == "Edited via sidebar"
     assert manager.get_highlight(hl.id).has_note()
 
 
@@ -198,15 +198,15 @@ def test_remove_note_via_sidebar(win, tmp_path):
     hls = win.view.annotation_manager.get_highlights_for_page(0)
     hl = hls[0]
     manager = win.view.annotation_manager
-    manager.add_note_to_highlight(hl.id, "Note to remove")
-    assert manager.get_note_for_highlight(hl.id) == "Note to remove"
+    manager.set_note(hl.id, "Note to remove")
+    assert manager.get_note(hl.id) == "Note to remove"
 
     # Remove note via sidebar
     win.sidebar._remove_note(hl.id)
 
     # Check note was removed
     assert not manager.get_highlight(hl.id).has_note()
-    assert manager.get_note_for_highlight(hl.id) == ""
+    assert manager.get_note(hl.id) == ""
 
 
 def test_note_in_annotations_tree(win, tmp_path):
@@ -218,7 +218,7 @@ def test_note_in_annotations_tree(win, tmp_path):
     win.view.create_highlight_from_selection("#FFFF00")
     hls = win.view.annotation_manager.get_highlights_for_page(0)
     hl = hls[0]
-    win.view.annotation_manager.add_note_to_highlight(hl.id, "Tree visible note")
+    win.view.annotation_manager.set_note(hl.id, "Tree visible note")
 
     sidebar = win.sidebar
 
@@ -262,11 +262,11 @@ def test_multiple_highlights_different_notes(win, tmp_path):
     hl1 = hls_p1[0]
 
     manager = win.view.annotation_manager
-    manager.add_note_to_highlight(hl0.id, "Note on page 1")
-    manager.add_note_to_highlight(hl1.id, "Note on page 2")
+    manager.set_note(hl0.id, "Note on page 1")
+    manager.set_note(hl1.id, "Note on page 2")
 
-    assert manager.get_note_for_highlight(hl0.id) == "Note on page 1"
-    assert manager.get_note_for_highlight(hl1.id) == "Note on page 2"
+    assert manager.get_note(hl0.id) == "Note on page 1"
+    assert manager.get_note(hl1.id) == "Note on page 2"
 
 
 def test_note_saved_with_highlight_color(win, tmp_path):
@@ -279,7 +279,7 @@ def test_note_saved_with_highlight_color(win, tmp_path):
     win.view.create_highlight_from_selection("#FF6B6B")  # Red
     hls = win.view.annotation_manager.get_highlights_for_page(0)
     hl = hls[0]
-    win.view.annotation_manager.add_note_to_highlight(hl.id, "Red highlight note")
+    win.view.annotation_manager.set_note(hl.id, "Red highlight note")
 
     # Save
     win.view.save_annotations()

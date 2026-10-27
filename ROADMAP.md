@@ -905,8 +905,8 @@ PDFAR must be local-first and privacy-first.
 
 Phase status: **[~] Under way.** F10-0 (document session), F10-1 (edit
 framework) and F10-2 (save, save as, revert) are implemented; **F10-3** is under
-way, with annotations as edits (F10-3a), the save-cost fix (F10-3b) and revision
-files for undo (F10-3c) done.
+way, with annotations as edits (F10-3a), the save-cost fix (F10-3b), revision
+files for undo (F10-3c) and standalone `/Text` notes (F10-3d) done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1153,9 +1153,20 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       before the oldest steps fall off. Undoing by inverse intent is off the
       table — reopening a file is already cheaper than reasoning about what an
       edit undid.)
-- [ ] Notes persisted as real `/Text` annotations, not only in memory
-      (a note *on* a highlight is that annotation's own `/Contents` and is done;
-      a standalone sticky note is not)
+- [x] Notes persisted as real `/Text` annotations, not only in memory
+      (**F10-3d.** A note *on* a highlight was already that annotation's own
+      `/Contents` (F10-3a); a standalone sticky note did not exist at all —
+      `NoteAnnotation` was a dataclass nothing constructed and
+      `get_notes_for_page()` always answered `[]`. `AddNote` now writes a `/Text`
+      annotation through the session, named by `/NM` like any other, the manager's
+      list dispatches on the annotation subtype, and the note-editing steps stopped
+      being highlight-specific (`RemoveAnnotation`, `SetAnnotationNote`,
+      `set_note()` / `remove_note()` / `get_note()`) because both kinds keep their
+      text in the same key. An empty note is still a note — the icon is what the
+      user asked for and the popup is where the text goes — and MuPDF gives it an
+      appearance stream, so it paints without PDFAR writing one. What is left for
+      the *interface* half is the tool to place one and a popup to type into; the
+      document side is finished.)
 - [ ] Comments panel listing annotations and jumping to them
 - [ ] Freehand, shapes, stamps, measurement
 - [ ] Appearance streams, so other readers show the same thing without
@@ -1270,8 +1281,9 @@ F10-3 — under way
 Finish the annotation system. Done: annotation changes are routed through F10-1,
 so they undo and mark dirty (F10-3a); a save stopped compacting the object table
 (F10-3b); undo is a revision file in a scratch copy, so a highlight costs 55 ms
-instead of 2.1 s and no buffer (F10-3c). Next: standalone `/Text` notes and the
-comments panel.
+instead of 2.1 s and no buffer (F10-3c); a sticky note is a real `/Text`
+annotation in the document (F10-3d). Next: the tool to place a note and the popup
+to type into, then the comments panel.
 
 Goal:
 
@@ -2073,7 +2085,9 @@ records nothing and changes no content version.
   `AnnotationManager` rebuilt around `session.apply()` and
   `reload_from_document()`; `sync_to_document()`, the `_pending` / `_materialized`
   cache and `update_annotation()` deleted; the model's own `set_note()` gone,
-  because a note is now an edit rather than a field.
+  because a note is now an edit rather than a field. *(The last two names became
+  `RemoveAnnotation` and `SetAnnotationNote` in F10-3d, once a standalone note
+  needed them too.)*
 - `src/pdfar/viewer.py` — the highlight overlay painting is deleted (the renderer
   draws annotations, so the overlay double-painted the band); the manager's
   `annotations_edited` / `annotation_edit_failed` signals drive
@@ -2227,6 +2241,62 @@ half-applied edit leaving directory, content, version and history exactly as the
 were, readers taking the file with no buffer published, trimming releasing files,
 the byte budget counting revisions, close removing the directory, revert and
 re-seeding, and both fallback routes. Three consecutive full runs.
+
+---
+
+### F10-3d A sticky note is a /Text annotation — [x] Implemented
+
+**Completed**: 2026-10-27
+
+**What landed**: the second annotation kind. `AddNote` writes a PDF `/Text`
+annotation at a point, names it with `/NM` like everything else, and goes through
+the session, so it undoes, marks the document dirty and reaches the render pool as
+a new content version. `AnnotationManager.reload_from_document()` now dispatches
+on the annotation subtype instead of skipping everything that was not a highlight,
+so a document's notes appear as `NoteAnnotation`s with a `position` — the class
+that had existed, unused, since before F10-3.
+
+**The names had to follow the model.** A note's text and a highlight's note are
+the same `/Contents` key, so `SetHighlightNote` became `SetAnnotationNote`,
+`RemoveHighlight` became `RemoveAnnotation` (its label was already "Delete
+annotation"), `_find_highlight` became `_find_annotation`, and the manager's
+`add_note_to_highlight` / `remove_note_from_highlight` / `get_note_for_highlight`
+became `set_note` / `remove_note` / `get_note` — one pair of methods serving both
+kinds rather than a highlight-named one that would have lied. `has_note()` and
+`get_note()` moved to the base model for the same reason: the sidebar asks either
+annotation the same question.
+
+**What MuPDF does for us** (probed, not assumed): `add_text_annot(point, "")`
+accepts an empty note and still generates an `/AP/N` appearance, so the icon
+paints before there is any text; `update()` keeps both the icon's `/Name` and the
+`/Contents`; PyMuPDF names what it creates (`fitz-A0`), which `_name()` overwrites
+with our UUID; and clearing still needs `xref_set_key(xref, "Contents", "null")`
+because `set_info(content="")` means "unchanged".
+
+**One judgement call**: a note placed within 16 points of the bottom or right edge
+is pulled inside the page. An icon that hangs off the page is one no reader lets
+the user click, and a note they cannot open is not a note.
+
+**Files changed**: `src/pdfar/annotations.py` (the `AddNote` edit, `_note_model`,
+the subtype dispatch, the generalized names), `src/pdfar/sidebar.py` (the three
+renamed calls, and "Change Color" hidden on a row it cannot act on).
+
+**Verified by eye** (headless): a note placed through the running app at (60, 90)
+marks the document dirty at version 1 with "Add note" as the undo label; Ctrl+S
+writes it; a *new* window on the saved file lists it as a note at the same
+position with its text, and the screenshot shows the yellow icon on the page.
+
+**Tests**: 532 passed (was 514) — `tests/test_text_notes.py` (18) covers the
+document holding the note the moment it is made, an empty note existing and
+painting, the edge clamp, the two kinds staying distinguishable in the list, a
+foreign `/Text` note listed under `anon:{xref}` without a `/NM` being written into
+someone else's annotation, a shape being left out of the list entirely, identity
+surviving an edit, "remove note" emptying the text but keeping the icon, the four
+undo labels, every kind of note edit round-tripping through undo and redo, an edit
+whose annotation is gone refusing rather than landing on whatever shares the key,
+a page that is not there refusing, a background reader seeing the note without a
+save, and a save-and-reopen round trip with a highlight in the same document.
+Three consecutive full runs.
 
 ---
 

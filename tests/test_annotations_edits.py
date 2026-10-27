@@ -25,9 +25,9 @@ from conftest import build_sample_pdf, make_session
 from pdfar.annotations import (
     AddHighlight,
     AnnotationManager,
-    RemoveHighlight,
+    RemoveAnnotation,
     SetHighlightColor,
-    SetHighlightNote,
+    SetAnnotationNote,
 )
 from pdfar.edits import EditError, Scope
 from test_edits import AddText
@@ -282,19 +282,19 @@ def test_a_note_is_written_into_the_annotation_and_undoes(tmp_path):
     manager = AnnotationManager(session)
     made = manager.add_highlight(0, [RECT])
 
-    updated = manager.add_note_to_highlight(made.id, "read this again")
+    updated = manager.set_note(made.id, "read this again")
 
     assert updated.id == made.id
     assert updated.has_note() and updated.get_note() == "read this again"
     assert doc_highlights(session.doc, 0)[0]["note"] == "read this again"
 
-    assert manager.remove_note_from_highlight(made.id) is True
+    assert manager.remove_note(made.id) is True
     assert session.history.undo_label == "Remove note"
     assert doc_highlights(session.doc, 0)[0]["note"] == ""
 
     session.undo()
     manager.reload_from_document()
-    assert manager.get_note_for_highlight(made.id) == "read this again"
+    assert manager.get_note(made.id) == "read this again"
     session.close()
 
 
@@ -331,7 +331,7 @@ def test_an_edit_for_a_gone_annotation_refuses_its_own_document(tmp_path):
     before = session.version
 
     with pytest.raises(EditError, match="not in this document"):
-        session.apply(SetHighlightNote(ann_id=made.id, page=0, note="orphan"))
+        session.apply(SetAnnotationNote(ann_id=made.id, page=0, note="orphan"))
 
     assert len(session.history) == 0, "a refused edit records nothing"
     assert session.version == before, "a refused edit changes no content"
@@ -357,16 +357,16 @@ def test_a_highlight_on_a_page_that_is_not_there_says_so(tmp_path):
 # ------------------------------------------------------------------ edit intent
 def test_each_edit_names_the_scope_it_can_reach():
     assert AddHighlight(specs=()).scope is Scope.COMMENTS
-    assert RemoveHighlight(ann_id="x", page=0).scope is Scope.COMMENTS
+    assert RemoveAnnotation(ann_id="x", page=0).scope is Scope.COMMENTS
     assert SetHighlightColor(ann_id="x", page=0, color="#FFFF00").scope is Scope.COMMENTS
-    assert SetHighlightNote(ann_id="x", page=0, note="n").scope is Scope.COMMENTS
+    assert SetAnnotationNote(ann_id="x", page=0, note="n").scope is Scope.COMMENTS
 
 
 def test_the_note_edit_is_named_for_what_it_does():
-    assert SetHighlightNote(ann_id="x", page=0, note="first").label == "Add note"
-    assert SetHighlightNote(ann_id="x", page=0, note="more",
+    assert SetAnnotationNote(ann_id="x", page=0, note="first").label == "Add note"
+    assert SetAnnotationNote(ann_id="x", page=0, note="more",
                             had_note=True).label == "Edit note"
-    assert SetHighlightNote(ann_id="x", page=0, note="  ").label == "Remove note"
+    assert SetAnnotationNote(ann_id="x", page=0, note="  ").label == "Remove note"
     assert AddHighlight(specs=()).label == "Highlight"
 
 
