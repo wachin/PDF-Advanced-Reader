@@ -663,38 +663,6 @@ class MainWindow(QMainWindow):
         # Navigation
         tb.addAction(self.act_prev)
         tb.addAction(self.act_next)
-
-        # Mouse tools
-        tb.addAction(self.act_explore)
-        self.tool_split = QToolButton(tb)
-        self.tool_split.setPopupMode(
-            QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        self.tool_split.setToolButtonStyle(
-            Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self.tool_split.setAutoRaise(True)
-        self.tool_split.setToolTip("Selection Tools")
-        select_menu = QMenu(self.tool_split)
-        select_menu.addAction(self.act_sel_text)
-        select_menu.addAction(self.act_sel_area)
-        select_menu.addAction(self.act_sel_table)
-        self.tool_split.setMenu(select_menu)
-        self.tool_split.setDefaultAction(self.act_sel_text)
-        tb.addWidget(self.tool_split)
-
-        # Page view mode menu button (icon reflects the active mode)
-        self.view_mode_button = QToolButton(tb)
-        self.view_mode_button.setPopupMode(
-            QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.view_mode_button.setToolButtonStyle(
-            Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self.view_mode_button.setAutoRaise(True)
-        self.view_mode_button.setToolTip("Page View: Continuous")
-        page_view_menu = QMenu(self.view_mode_button)
-        for mode in ("single", "facing", "facing_centered", "overview",
-                     "continuous"):
-            page_view_menu.addAction(self._view_actions[mode])
-        self.view_mode_button.setMenu(page_view_menu)
-        tb.addWidget(self.view_mode_button)
         tb.addSeparator()
 
         # Page navigation
@@ -758,9 +726,40 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_rotr)
         tb.addSeparator()
 
-        # Reflow mode
+        # Viewing modes: reflow, mouse tools and page layout
         tb.addAction(self.act_reflow)
-        tb.addSeparator()
+
+        # Mouse tools
+        tb.addAction(self.act_explore)
+        self.tool_split = QToolButton(tb)
+        self.tool_split.setPopupMode(
+            QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.tool_split.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.tool_split.setAutoRaise(True)
+        self.tool_split.setToolTip("Selection Tools")
+        select_menu = QMenu(self.tool_split)
+        select_menu.addAction(self.act_sel_text)
+        select_menu.addAction(self.act_sel_area)
+        select_menu.addAction(self.act_sel_table)
+        self.tool_split.setMenu(select_menu)
+        self.tool_split.setDefaultAction(self.act_sel_text)
+        tb.addWidget(self.tool_split)
+
+        # Page view mode menu button (icon reflects the active mode)
+        self.view_mode_button = QToolButton(tb)
+        self.view_mode_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.view_mode_button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.view_mode_button.setAutoRaise(True)
+        self.view_mode_button.setToolTip("Page View: Continuous")
+        page_view_menu = QMenu(self.view_mode_button)
+        for mode in ("single", "facing", "facing_centered", "overview",
+                     "continuous"):
+            page_view_menu.addAction(self._view_actions[mode])
+        self.view_mode_button.setMenu(page_view_menu)
+        tb.addWidget(self.view_mode_button)
 
         self._set_compact_toolbar_buttons()
         self._update_zoom_actions(False)

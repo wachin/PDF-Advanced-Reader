@@ -689,6 +689,31 @@ def test_settings_dialog_controls_maximized_startup(qapp):
 
 
 # ------------------------------------------------------ selection tools
+def test_toolbar_groups_mode_buttons_right_of_reflow(qapp):
+    """Reflow, Explore, the selection split and the page-view menu form one
+    contiguous group, placed after the navigation and zoom controls."""
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        actions = win.toolbar.actions()
+
+        def at(item):
+            """Index of an action, or of the container action of a widget."""
+            for i, action in enumerate(actions):
+                if action is item or win.toolbar.widgetForAction(action) is item:
+                    return i
+            raise AssertionError(f"{item!r} is not in the toolbar")
+
+        assert at(win.act_explore) == at(win.act_reflow) + 1
+        assert at(win.tool_split) == at(win.act_explore) + 1
+        assert at(win.view_mode_button) == at(win.tool_split) + 1
+        assert at(win.act_reflow) > at(win.act_zin)
+    finally:
+        win.close()
+        win.deleteLater()
+
+
 def test_toolbar_has_explore_and_split_button(qapp):
     win = MainWindow()
     win.show()
