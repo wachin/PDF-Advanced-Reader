@@ -50,6 +50,7 @@ The current structure includes:
 src/pdfar/
 main.py
 viewer.py
+session.py
 render.py
 cache.py
 tiles.py
@@ -902,7 +903,8 @@ PDFAR must be local-first and privacy-first.
 
 # F10 — PDF EDITING (MASTER PLAN)
 
-Phase status: **[ ] Not started.** The next task is **F10-0**.
+Phase status: **[~] Under way.** F10-0 (document session) is implemented; the
+next task is **F10-1**.
 
 This is the umbrella for every capability that changes a document. F6 (page
 manipulation), F7-3 (true redaction) and F8-1 (content editing) are now
@@ -916,24 +918,40 @@ particular, nothing in this phase is safe to build before F10-0 and F10-1 exist,
 because today PDFAR has no way to know that a document changed, no undo, and no
 save path that cannot lose the user's work.
 
-## F10-0 Document session — the prerequisite — [ ]
+## F10-0 Document session — the prerequisite — [x]
 
 Nothing may read the document from disk any more while an edited version exists
 in memory.
 
-- [ ] One authoritative `Document`, owned by the GUI thread (`viewer.py:150`)
-- [ ] A `content_version` counter that every accepted edit bumps exactly once
-- [ ] Render workers open a byte snapshot (`fitz.open(stream=…)`) instead of the
-      path (`render.py:232`)
-- [ ] Search worker: same (`search.py:235`)
-- [ ] Reflow worker: same (`reflow.py:824`)
-- [ ] Document Properties reads the live snapshot (`main.py:1515`)
-- [ ] The snapshot is produced once per version and reused, never per job
-- [ ] `PageCache` key gains the content version (`cache.py:40`)
-- [ ] Tile and thumbnail caches invalidated by version, not by clearing manually
-- [ ] The large-PDF benchmark shows no regression (this step is on the hot path)
-- [ ] Tests: an in-memory change is visible to render, search and reflow without
-      the file on disk changing at all
+- [x] One authoritative `Document`, owned by the GUI thread (`viewer.py:150`),
+      wrapped in `src/pdfar/session.py::DocumentSession`
+- [x] A `version` counter that every accepted change bumps exactly once
+      (`session.content_changed()`); `version == 0` means "the file on disk *is*
+      the document", so an untouched document never pays for a snapshot
+- [x] Render workers read `session.open_copy(version)` — the path while
+      untouched, `fitz.open(stream=snapshot)` afterwards
+- [x] Search worker: same (`SearchWorker(session, params)`)
+- [x] Reflow worker: same (`ReflowWorker(session, width)`)
+- [x] Document Properties reads the live copy (`main.py`, `_show_properties`)
+- [x] The snapshot is produced once per version and reused, never per job
+- [x] Only the owning thread may serialize: `read_version()` publishes from the
+      GUI thread, and a worker that asks for unpublished content gets
+      `SnapshotNotPublished` instead of a MuPDF data race
+- [x] Stale results are dropped, not cached: every `RenderResult` carries the
+      version it was rendered from, and `PDFView._on_result` /
+      `Sidebar._on_render` ignore anything that is not current
+- [x] `PDFView.invalidate_content()` bumps the version and drops everything
+      derived from the previous content (page cache, words, tiles, hit rects,
+      thumbnails, reflow layouts), then re-requests the viewport.
+      *Design note:* the roadmap first said "the `PageCache` key gains the
+      version". Clearing on change is what we do instead — the version travels
+      on the job and its result, which covers the same case without a cache
+      holding several generations of the same page.
+- [x] The large-PDF benchmark shows no regression (this step is on the hot path):
+      GS262, 540 pages — open 1.89 s, first page 0.165 s, jump 0.42 s,
+      peak RSS 408 MB
+- [x] Tests: an in-memory change is visible to render, search and reflow without
+      the file on disk changing at all (`tests/test_session.py`, 15 tests)
 
 Why: MuPDF is not thread-safe, so each worker needs its own `Document`. The only
 correct way to share state between them is a byte snapshot pinned to a version.
@@ -1082,8 +1100,8 @@ keeps one open item, tracked as F10-3.
 
 The current sprint must focus exclusively on the editing foundation:
 
-F10-0
-Document session (`content_version`, workers off the disk)
+F10-0 — done
+Document session (`version`, workers off the disk)
 
 F10-1
 Edit framework (copy-and-adopt, undo, dirty state)
@@ -1186,6 +1204,7 @@ Before modifying:
 
 render.py
 viewer.py
+session.py
 cache.py
 geometry.py
 
@@ -1662,6 +1681,51 @@ adopt the `[x] / [~] / [ ]` status convention throughout.
    base F10-5 builds its proof step on.
 
 **Tests**: unchanged — this milestone adds no runtime code.
+
+---
+
+### F10-0 Document Session — [x] Implemented
+
+**Completed**: 2026-10-26
+
+**Scope**: Make one in-memory document authoritative, so a change that has not
+been saved to disk is what every reader — pixels, words, search, reflow,
+properties — sees.
+
+**Status**: DONE
+
+**Files changed**:
+
+- `src/pdfar/session.py` (new) — `DocumentSession(doc, path, password)`:
+  `version`, `content_changed()`, `snapshot()`, `read_version()`,
+  `open_copy(version)`, `close()`. `version == 0` keeps the file on disk as the
+  authority (no snapshot is ever built); the first accepted change publishes
+  bytes that every worker then reads.
+- `src/pdfar/render.py` — `RenderPool(session)`, jobs and results carry the
+  content version, the in-flight key includes it, and a queued job whose content
+  changed produces no result at all.
+- `src/pdfar/search.py`, `src/pdfar/reflow.py` — workers take the session; the
+  GUI-thread submission publishes the bytes their thread will read.
+- `src/pdfar/viewer.py` — owns the session, adds `invalidate_content()` and the
+  `content_changed(int)` signal, and drops stale render results.
+- `src/pdfar/sidebar.py` — drops stale thumbnails and rebuilds them on
+  `invalidate_thumbnails()`.
+- `src/pdfar/main.py` — search and Document Properties read through the session;
+  the view's `content_changed` is wired to the sidebar.
+
+**The rule that keeps this safe**: only the thread that created the session may
+serialize it (`read_version()` on the GUI thread). A worker that asks for
+unpublished content gets `SnapshotNotPublished` rather than a MuPDF data race,
+because `fz_document` allows one caller at a time.
+
+**Measured**: GS262 (540 pages) — open 1.89 s, first page 0.165 s, distant jump
+0.42 s, peak RSS 408 MB; unchanged from the pre-F10 baseline, since the
+untouched document still renders straight from the file.
+
+**Tests**: 383 passed (was 368) — `tests/test_session.py` adds 15, covering the
+snapshot lifecycle, version-pinned renders, dropped stale jobs and results,
+in-memory visibility for render/search/reflow, the off-thread serialization
+guard, and that the file on disk never changes.
 
 ---
 

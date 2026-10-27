@@ -79,38 +79,35 @@ def test_highlight_spans_handles_phrase_regex_and_overlaps():
         text, SearchParams("[invalid", mode="REGEX")) == []
 
 
-def _run_worker(sample_pdf, params):
+def _run_worker(session, params):
     hits = []
-    worker = SearchWorker(sample_pdf, params)
+    worker = SearchWorker(session, params)
     worker.done.connect(hits.extend)
     worker.run()
     return hits
 
 
-def test_worker_finds_pages(sample_pdf):
-    hits = _run_worker(sample_pdf, SearchParams("alpha beta", mode="AND"))
+def test_worker_finds_pages(session):
+    hits = _run_worker(session, SearchParams("alpha beta", mode="AND"))
     # "alpha beta gamma" is on pages 2..3 of the sample
     assert [h.page for h in hits] == [1, 2]
     assert all(isinstance(h, SearchHit) for h in hits)
     assert all(h.rects for h in hits), "every hit should carry highlight rects"
 
 
-def test_worker_phrase_mode(sample_pdf):
-    hits = _run_worker(sample_pdf, SearchParams("BOTTOMRIGHT", mode="PHRASE"))
+def test_worker_phrase_mode(session):
+    hits = _run_worker(session, SearchParams("BOTTOMRIGHT", mode="PHRASE"))
     assert [h.page for h in hits] == [0]
     assert hits[0].rects
 
 
-def test_worker_no_match(sample_pdf):
-    assert _run_worker(sample_pdf, SearchParams("zzz-not-there")) == []
+def test_worker_no_match(session):
+    assert _run_worker(session, SearchParams("zzz-not-there")) == []
 
 
-def test_worker_rects_are_page_bounded(sample_pdf):
-    import pymupdf as fitz
-    doc = fitz.open(sample_pdf)
-    size = doc.load_page(0).rect
-    doc.close()
-    hits = _run_worker(sample_pdf, SearchParams("Hello"))
+def test_worker_rects_are_page_bounded(session):
+    size = session.doc.load_page(0).rect
+    hits = _run_worker(session, SearchParams("Hello"))
     for x0, y0, x1, y1 in hits[0].rects:
         assert 0 <= x0 <= x1 <= size.width + 1
         assert 0 <= y0 <= y1 <= size.height + 1
@@ -142,11 +139,11 @@ def test_compile_regex_rejects_invalid_pattern():
         compile_regex(SearchParams(r"[invalid", mode="REGEX"))
 
 
-def test_regex_worker(sample_pdf):
+def test_regex_worker(session):
     """Test regex search worker."""
     hits = []
     params = SearchParams(r"alpha.*gamma", mode="REGEX", case_sensitive=False)
-    worker = SearchWorker(sample_pdf, params)
+    worker = SearchWorker(session, params)
     
     def on_done(hits_list):
         hits.extend(hits_list)
@@ -169,8 +166,8 @@ def test_regex_worker(sample_pdf):
     assert all(isinstance(h, SearchHit) for h in hits)
 
 
-def test_worker_cancel_discards_results(sample_pdf):
-    worker = SearchWorker(sample_pdf, SearchParams("alpha beta", mode="AND"))
+def test_worker_cancel_discards_results(session):
+    worker = SearchWorker(session, SearchParams("alpha beta", mode="AND"))
     hits, progress = [], []
 
     def on_progress(done, total):
@@ -185,8 +182,8 @@ def test_worker_cancel_discards_results(sample_pdf):
     assert hits == [], "a cancelled search must not publish partial results"
 
 
-def test_worker_invalid_regex_reports_failure(sample_pdf):
-    worker = SearchWorker(sample_pdf, SearchParams(r"[invalid", mode="REGEX"))
+def test_worker_invalid_regex_reports_failure(session):
+    worker = SearchWorker(session, SearchParams(r"[invalid", mode="REGEX"))
     errors, hits = [], []
     worker.failed.connect(errors.append)
     worker.done.connect(hits.extend)
@@ -196,11 +193,11 @@ def test_worker_invalid_regex_reports_failure(sample_pdf):
     assert hits == []
 
 
-def test_regex_timeout_reports_failure(monkeypatch, sample_pdf):
+def test_regex_timeout_reports_failure(monkeypatch, session):
     ticks = iter(range(0, 1000))
     monkeypatch.setattr("pdfar.search._now", lambda: float(next(ticks)))
     worker = SearchWorker(
-        sample_pdf, SearchParams("alpha", mode="REGEX", regex_timeout_ms=1))
+        session, SearchParams("alpha", mode="REGEX", regex_timeout_ms=1))
     errors, hits = [], []
     worker.failed.connect(errors.append)
     worker.done.connect(hits.extend)

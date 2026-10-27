@@ -8,11 +8,9 @@ import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
-try:
-    import pymupdf as fitz  # PyMuPDF >= 1.24
-except ImportError:  # pragma: no cover - older PyMuPDF
-    import fitz
 from PyQt6.QtCore import QObject, pyqtSignal
+
+from .session import DocumentSession
 
 Rect = Tuple[float, float, float, float]
 Span = Tuple[int, int]
@@ -161,11 +159,14 @@ class SearchWorker(QObject):
     done = pyqtSignal(object)  # List[SearchHit]
     failed = pyqtSignal(str)
 
-    def __init__(self, doc_path: str, params: SearchParams):
+    def __init__(self, session: DocumentSession, params: SearchParams):
         super().__init__()
-        self.doc_path = doc_path
+        self.session = session
         self.params = params
         self._cancel = threading.Event()
+        # Constructed on the GUI thread: publish the bytes the worker thread is
+        # about to read, so it never touches the document the GUI is using.
+        self.version = session.read_version()
 
     def cancel(self) -> None:
         """Ask the running search to stop at the next page or match."""
@@ -232,7 +233,7 @@ class SearchWorker(QObject):
                 return
 
         try:
-            doc = fitz.open(self.doc_path)
+            doc = self.session.open_copy(self.version)
         except Exception:
             self.done.emit([])
             return

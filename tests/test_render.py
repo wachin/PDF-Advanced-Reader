@@ -3,6 +3,9 @@
 The critical regression test here: results must reach the GUI thread even
 though workers are plain Python threads (the 1.x code used QTimer.singleShot
 from such threads and silently never delivered anything).
+
+The pool renders through a :class:`~pdfar.session.DocumentSession`, so these
+tests build one over the fixture PDF (``conftest.make_session``).
 """
 
 import os
@@ -13,6 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pymupdf as fitz
 from PyQt6.QtCore import QObject
 
+from conftest import make_session
 from pdfar.render import RenderPool, RenderResult
 
 
@@ -37,8 +41,8 @@ def wait_until(app, predicate, timeout=10.0):
     return False
 
 
-def test_results_are_delivered_to_gui_thread(qapp, sample_pdf):
-    pool = RenderPool(sample_pdf, workers=2)
+def test_results_are_delivered_to_gui_thread(qapp, session):
+    pool = RenderPool(session, workers=2)
     collector = Collector()
     pool.result_ready.connect(collector.on_result)   # QObject slot => queued
     try:
@@ -54,11 +58,11 @@ def test_results_are_delivered_to_gui_thread(qapp, sample_pdf):
         pool.shutdown(wait=True)
 
 
-def test_worker_threads_have_no_qt_event_loop_but_still_work(qapp, sample_pdf):
+def test_worker_threads_have_no_qt_event_loop_but_still_work(qapp, session):
     """Regression: the 1.x delivery mechanism was QTimer.singleShot(0) from a
     ThreadPoolExecutor callback.  Worker threads have no event loop, so the
     timer never fired and no page was ever shown."""
-    pool = RenderPool(sample_pdf, workers=3)
+    pool = RenderPool(session, workers=3)
     collector = Collector()
     pool.result_ready.connect(collector.on_result)
     try:
@@ -70,8 +74,8 @@ def test_worker_threads_have_no_qt_event_loop_but_still_work(qapp, sample_pdf):
         pool.shutdown(wait=True)
 
 
-def test_duplicate_requests_are_dropped(qapp, sample_pdf):
-    pool = RenderPool(sample_pdf, workers=1)
+def test_duplicate_requests_are_dropped(qapp, session):
+    pool = RenderPool(session, workers=1)
     collector = Collector()
     pool.result_ready.connect(collector.on_result)
     try:
@@ -83,8 +87,8 @@ def test_duplicate_requests_are_dropped(qapp, sample_pdf):
         pool.shutdown(wait=True)
 
 
-def test_priority_order_prefers_low_priority_number(qapp, sample_pdf):
-    pool = RenderPool(sample_pdf, workers=1)
+def test_priority_order_prefers_low_priority_number(qapp, session):
+    pool = RenderPool(session, workers=1)
     collector = Collector()
     pool.result_ready.connect(collector.on_result)
     try:
@@ -99,12 +103,12 @@ def test_priority_order_prefers_low_priority_number(qapp, sample_pdf):
         pool.shutdown(wait=True)
 
 
-def test_large_document_many_pages(qapp, big_pdf):
-    pool = RenderPool(big_pdf, workers=4)
+def test_large_document_many_pages(qapp, big_session):
+    pool = RenderPool(big_session, workers=4)
     collector = Collector()
     pool.result_ready.connect(collector.on_result)
     try:
-        n = fitz.open(big_pdf).page_count
+        n = big_session.doc.page_count
         for i in range(n):
             pool.request(i, 0.5, priority=3)
         assert wait_until(qapp, lambda: len(collector.results) >= n, timeout=30)
@@ -113,8 +117,8 @@ def test_large_document_many_pages(qapp, big_pdf):
         pool.shutdown(wait=True)
 
 
-def test_rotation_is_applied(qapp, sample_pdf):
-    pool = RenderPool(sample_pdf, workers=1)
+def test_rotation_is_applied(qapp, session):
+    pool = RenderPool(session, workers=1)
     collector = Collector()
     pool.result_ready.connect(collector.on_result)
     try:
@@ -136,7 +140,8 @@ def test_clip_renders_subregion(qapp, tmp_path):
     doc.save(path)
     doc.close()
 
-    pool = RenderPool(path, workers=1)
+    session = make_session(path)
+    pool = RenderPool(session, workers=1)
     collector = Collector()
     pool.result_ready.connect(collector.on_result)
     try:
@@ -152,6 +157,7 @@ def test_clip_renders_subregion(qapp, tmp_path):
         assert clipped.clip == (0, 0, 200, 200)
     finally:
         pool.shutdown(wait=True)
+        session.close()
 
 
 def test_clip_with_different_zoom_has_distinct_key(qapp, tmp_path):
@@ -161,7 +167,8 @@ def test_clip_with_different_zoom_has_distinct_key(qapp, tmp_path):
     doc.save(path)
     doc.close()
 
-    pool = RenderPool(path, workers=1)
+    session = make_session(path)
+    pool = RenderPool(session, workers=1)
     collector = Collector()
     pool.result_ready.connect(collector.on_result)
     try:
@@ -171,12 +178,13 @@ def test_clip_with_different_zoom_has_distinct_key(qapp, tmp_path):
         assert wait_until(qapp, lambda: len(collector.results) >= 2)
     finally:
         pool.shutdown(wait=True)
+        session.close()
 
 
-def test_request_words_delivers_text(qapp, sample_pdf):
+def test_request_words_delivers_text(qapp, session):
     """request_words extracts the page's words on a worker thread and delivers
     them in RenderResult.words with tag='text' (no pixmap)."""
-    pool = RenderPool(sample_pdf, workers=1)
+    pool = RenderPool(session, workers=1)
     collector = Collector()
     pool.result_ready.connect(collector.on_result)
     try:
@@ -194,9 +202,9 @@ def test_request_words_delivers_text(qapp, sample_pdf):
         pool.shutdown(wait=True)
 
 
-def test_request_words_deduplicated(qapp, sample_pdf):
+def test_request_words_deduplicated(qapp, session):
     """Two request_words for the same page collapse into one in-flight job."""
-    pool = RenderPool(sample_pdf, workers=1)
+    pool = RenderPool(session, workers=1)
     collector = Collector()
     pool.result_ready.connect(collector.on_result)
     try:
@@ -220,7 +228,8 @@ def test_cancel_if_marks_queued_jobs(qapp, tmp_path):
     barrier = threading.Event()
 
     # A single worker thread: jobs stay queued until the worker is free.
-    pool = RenderPool(path, workers=1)
+    session = make_session(path)
+    pool = RenderPool(session, workers=1)
 
     class SlowCollector(Collector):
         def __init__(self, event):
@@ -254,3 +263,4 @@ def test_cancel_if_marks_queued_jobs(qapp, tmp_path):
         assert delivered == {0, 2}, f"unexpected delivered pages: {delivered}"
     finally:
         pool.shutdown(wait=True)
+        session.close()

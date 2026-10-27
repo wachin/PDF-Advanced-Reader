@@ -15,6 +15,8 @@ import pymupdf as fitz  # noqa: E402
 from PyQt6.QtCore import QSettings  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
+from pdfar.session import DocumentSession  # noqa: E402
+
 
 @pytest.fixture(scope="session")
 def qapp(tmp_path_factory):
@@ -53,6 +55,32 @@ def build_sample_pdf(path, pages=3, width=200, height=100):
 @pytest.fixture
 def sample_pdf(tmp_path):
     return build_sample_pdf(tmp_path / "sample.pdf")
+
+
+def make_session(path, password=""):
+    """A read-only session over *path*; the caller must ``session.close()``."""
+    doc = fitz.open(str(path))
+    if password and doc.needs_pass:
+        doc.authenticate(password)
+    return DocumentSession(doc, str(path), password)
+
+
+@pytest.fixture
+def session(sample_pdf):
+    handle = make_session(sample_pdf)
+    try:
+        yield handle
+    finally:
+        handle.close()
+
+
+@pytest.fixture
+def big_session(big_pdf):
+    handle = make_session(big_pdf)
+    try:
+        yield handle
+    finally:
+        handle.close()
 
 
 @pytest.fixture

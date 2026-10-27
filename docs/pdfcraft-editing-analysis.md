@@ -56,27 +56,37 @@ Content`) and the refresh only rebuilds what that scope can have changed;
 `Scope::Content` skips re-inspecting the page tree, annotations, fields, outline
 and fonts entirely.
 
-**PDFAR equivalent — this is our biggest structural gap.** Today the authoritative
-document is `PDFView.doc` (`src/pdfar/viewer.py:150`), but four workers re-open
-the file **from disk** in their own threads:
+**PDFAR equivalent — this was our biggest structural gap, closed by F10-0.**
+Before F10-0 the authoritative document was `PDFView.doc`
+(`src/pdfar/viewer.py:150`), but four readers re-opened the file **from disk** in
+their own threads:
 
-| Worker | Opens |
+| Worker | Used to open |
 |---|---|
-| `RenderPool` (`src/pdfar/render.py:232`) | `fitz.open(self.doc_path)` |
-| `SearchWorker` (`src/pdfar/search.py:235`) | `fitz.open(self.doc_path)` |
-| `ReflowWorker` (`src/pdfar/reflow.py:824`) | `fitz.open(self.doc_path)` |
-| Document Properties (`src/pdfar/main.py:1515`) | `fitz.open(path)` |
+| `RenderPool` (`src/pdfar/render.py`) | `fitz.open(self.doc_path)` |
+| `SearchWorker` (`src/pdfar/search.py`) | `fitz.open(self.doc_path)` |
+| `ReflowWorker` (`src/pdfar/reflow.py`) | `fitz.open(self.doc_path)` |
+| Document Properties (`src/pdfar/main.py`) | `fitz.open(path)` |
 
-That is correct today (the app barely mutates the document) and would be
+That was correct only while the app barely mutates the document and would be
 **wrong the moment editing exists**: the page would render the saved file, not
 the edited one. It is also unavoidable in principle — MuPDF is not thread-safe,
 so one `Document` cannot be shared across threads. The pattern that resolves
-both: the GUI thread owns the document, and on each accepted edit publishes a
-**byte snapshot** (`doc.tobytes(deflate=True)`) plus a `content_version` counter;
-workers open `fitz.open(stream=snapshot)` and pin the version they rendered.
-The page cache key must gain that dimension — it is currently
-`(page, round(zoom,4), rot%360, tag)` (`src/pdfar/cache.py:40`), which has no way
-to express "same page, newer content".
+both is implemented in **`src/pdfar/session.py`**: the GUI thread owns the
+document and, per accepted change, a `version` counter; background readers get
+`session.open_copy(version)` — the file on disk while `version == 0`, an
+in-memory `doc.tobytes()` snapshot afterwards. The snapshot is serialized on the
+owning thread only (`read_version()`); a worker that asks for unpublished
+content gets `SnapshotNotPublished` instead of a data race. Render jobs and
+results are stamped with the version, so a pre-edit result cannot be cached
+after the edit.
+
+The page cache key deliberately did **not** gain a version dimension
+(it stays `(page, round(zoom,4), rot%360, tag)`, `src/pdfar/cache.py:40`):
+`PDFView.invalidate_content()` drops everything derived from the previous
+content instead. Keeping several generations of the same page in a
+byte-budgeted cache would trade a clear-on-change cost for pages the user will
+never look at again.
 
 ---
 
@@ -369,7 +379,7 @@ Recommended order, each step independently shippable:
 
 | # | Increment | Reuses | New risk |
 |---|---|---|---|
-| 0 | **Document session**: GUI thread owns the doc; publish `doc.tobytes()` + `content_version`; workers open from the buffer; cache key gains the version | `render.py`, `search.py`, `reflow.py`, `cache.py` | none user-visible — but everything after depends on it |
+| 0 | ✅ **Done (F10-0) — Document session**: GUI thread owns the doc; `DocumentSession` publishes `doc.tobytes()` + a `version`; workers open from the buffer; stale render results are dropped and `invalidate_content()` clears the derived caches | `session.py`, `render.py`, `search.py`, `reflow.py`, `viewer.py` | none user-visible — but everything after depends on it |
 | 1 | **Edit framework**: `Edit` dataclasses + `apply(edit)` on a cloned doc, undo/redo as document snapshots, `Scope`-style invalidation, dirty flag + `setWindowModified`, atomic staging write, reopen-and-verify before replacing | step 0 | low |
 | 2 | **Save/Save As/Revert** UI with the confirm-on-close flow, incremental when `can_save_incrementally()`, full otherwise | step 1 | low |
 | 3 | **Annotation editing** (note, highlight/underline/strike, ink, shapes, free text, stamps): PyMuPDF annot APIs; regenerate `/AP` or keep painting in the view and flatten on save; delete/reply/lock/properties | steps 0-2 | medium (appearances) |
@@ -408,3 +418,4 @@ OpenType shaping, JIS line-breaking and a 240-glyph Type 3 generator to make ste
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-26 | created | Study of `external/pdfcraft/` (Rust, MIT OR Apache-2.0) before that reference copy is deleted: COS overlay model, snapshot undo, incremental save, content-stream splicing, font ladder, redaction verification, and an 8-step path to editing in PDFAR |
+| 2026-10-26 | step 0 built | F10-0 landed: `src/pdfar/session.py` (`DocumentSession`, `version`, `snapshot()`, `open_copy()`) plus version-stamped render jobs/results and `PDFView.invalidate_content()`. §2 updated from "the gap" to "how it is closed", including why the cache key stayed version-free |

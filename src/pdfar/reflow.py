@@ -40,6 +40,8 @@ except ImportError:  # pragma: no cover - older PyMuPDF
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics
 
+from .session import DocumentSession
+
 # ---------------------------------------------------------------- geometry
 REFLOW_MAX_WIDTH = 760      # comfortable reading measure (px)
 REFLOW_MIN_WIDTH = 240
@@ -810,20 +812,20 @@ class ReflowWorker(QThread):
     progress = pyqtSignal(int, int)   # (done, total)
     failed = pyqtSignal(str)
 
-    def __init__(self, doc_path: str, width: int, password: str = "",
+    def __init__(self, session: DocumentSession, width: int,
                  font_scale: float = 1.0, parent=None):
         super().__init__(parent)
-        self.doc_path = doc_path
+        self.session = session
         self.width = int(width)
-        self.password = password
         self.font_scale = clamp_font_scale(font_scale)
+        # Built on the GUI thread: publish the bytes run() reads in the
+        # background thread, which must not touch the GUI's document.
+        self.version = session.read_version()
 
     def run(self) -> None:  # noqa: D401 - QThread entry point
         doc = None
         try:
-            doc = fitz.open(self.doc_path)
-            if doc.needs_pass and self.password:
-                doc.authenticate(self.password)
+            doc = self.session.open_copy(self.version)
             total = doc.page_count
             step = max(1, total // 50)
             for i in range(total):

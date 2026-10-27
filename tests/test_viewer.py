@@ -11,6 +11,7 @@ from PyQt6.QtCore import QPoint, QPointF, Qt
 from PyQt6.QtGui import QColor, QWheelEvent
 from PyQt6.QtTest import QTest
 
+from conftest import make_session
 from pdfar.geometry import map_rect
 from pdfar.search import SearchParams, SearchWorker
 from pdfar.viewer import PDFView
@@ -345,11 +346,15 @@ def test_plain_click_clears_selection(qapp, sample_pdf):
 
 
 # ----------------------------------------------------------------- search
-def _search(view_path, params):
+def _search(doc_path, params):
     hits = []
-    worker = SearchWorker(view_path, params)
-    worker.done.connect(hits.extend)
-    worker.run()
+    session = make_session(doc_path)
+    try:
+        worker = SearchWorker(session, params)
+        worker.done.connect(hits.extend)
+        worker.run()
+    finally:
+        session.close()
     return hits
 
 

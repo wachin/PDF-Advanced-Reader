@@ -52,6 +52,7 @@ from .reflow import (
 )
 from .render import RenderPool, RenderResult
 from .search import SearchHit
+from .session import DocumentSession
 from .tiles import Tile, TileGrid, TILE_SIZE
 from .annotations import AnnotationManager, HIGHLIGHT_COLORS
 
@@ -142,6 +143,7 @@ class PDFView(QAbstractScrollArea):
     numbering_changed = pyqtSignal(object)  # settings after dragging
     transient_message = pyqtSignal(str)     # short status-bar feedback
     view_mode_changed = pyqtSignal(str)     # page layout mode
+    content_changed = pyqtSignal(int)       # new content version (F10-0)
 
     def __init__(self, doc_path: str, parent=None, password: str = ""):
         super().__init__(parent)
@@ -152,6 +154,7 @@ class PDFView(QAbstractScrollArea):
             if not password or not self.doc.authenticate(password):
                 self.doc.close()
                 raise ValueError("encrypted")
+        self.session = DocumentSession(self.doc, doc_path, password)
 
         self.page_count = self.doc.page_count
         self.page_sizes: List[Tuple[float, float]] = []
@@ -200,8 +203,8 @@ class PDFView(QAbstractScrollArea):
         self._vbar_policy_before_reflow = self.verticalScrollBarPolicy()
 
         self.cache = PageCache()
-        self.pool = RenderPool(doc_path, workers=min(4, max(2, (QThread.idealThreadCount() or 2))),
-                               password=password)
+        self.pool = RenderPool(self.session,
+                               workers=min(4, max(2, (QThread.idealThreadCount() or 2))))
         self.pool.result_ready.connect(self._on_result)
 
         # Tiled rendering (Okular large-page strategy): a page that would be
@@ -281,10 +284,35 @@ class PDFView(QAbstractScrollArea):
         self._reflow_timer.stop()
         self._stop_reflow_worker()
         self.pool.shutdown(wait=True)
-        try:
-            self.doc.close()
-        except Exception:
-            pass
+        self.session.close()
+
+    def invalidate_content(self) -> int:
+        """Announce an accepted content change and drop everything stale.
+
+        Every pixel, word and layout in this view was derived from the previous
+        version of the document, so all of it goes; the pool's queued jobs are
+        cancelled because their results would be dropped anyway.  Background
+        readers pick up the new content from the session's snapshot, not from
+        the file on disk — which is what makes "what is on screen is what will
+        be saved" true (F10-0).
+        """
+        version = self.session.content_changed()
+        self.pool.cancel_if(lambda job: True)
+        self.cache.clear()
+        self._words.clear()
+        self._tiles.clear()
+        self._tile_grids.clear()
+        self._errors.clear()
+        self._hit_rects.clear()
+        self._hit_seq.clear()
+        self._hit_flat.clear()
+        self.content_changed.emit(version)
+        if self.reflow_mode:
+            self._enter_reflow()
+        self._relayout()
+        self._request_visible()
+        self.viewport().update()
+        return version
 
     def _on_annotations_changed(self) -> None:
         """Called when annotations change - trigger repaint."""
@@ -605,8 +633,7 @@ class PDFView(QAbstractScrollArea):
             self.goto_page(self.current_page, center=False)
 
         if self.page_count:
-            worker = ReflowWorker(self.doc_path, self._reflow_width,
-                                  password=self._password,
+            worker = ReflowWorker(self.session, self._reflow_width,
                                   font_scale=self._reflow_font_scale, parent=None)
             worker.page_ready.connect(self._on_reflow_page)
             worker.progress.connect(self._on_reflow_progress)
@@ -1254,6 +1281,8 @@ class PDFView(QAbstractScrollArea):
         """Render result arrives here (queued to the GUI thread)."""
         if not isinstance(result, RenderResult) or result.tag not in ("view", "text"):
             return
+        if result.version != self.session.version:
+            return                      # rendered from content we have left behind
         if result.tag == "text":
             if result.ok and result.words is not None:
                 self._words[result.page] = result.words

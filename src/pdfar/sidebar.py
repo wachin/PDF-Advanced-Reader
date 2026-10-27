@@ -533,6 +533,14 @@ class Sidebar(QWidget):
                 w0 = 595.0
             self._thumb_zoom[i] = self._thumb_settings.width / w0
 
+    def invalidate_thumbnails(self, version: int = -1) -> None:
+        """Drop every thumbnail: they were drawn from older content."""
+        for i in range(self.thumbs.count()):
+            item = self.thumbs.item(i)
+            if item is not None:
+                item.setIcon(QIcon())
+        self._request_visible_thumbs()
+
     def apply_thumbnail_settings(self, settings: ThumbnailSettings) -> None:
         previous_width = self._thumb_settings.width
         self._thumb_settings = settings
@@ -543,11 +551,7 @@ class Sidebar(QWidget):
             scale = settings.width / previous_width
             for page in self._thumb_zoom:
                 self._thumb_zoom[page] *= scale
-            for i in range(self.thumbs.count()):
-                item = self.thumbs.item(i)
-                if item is not None:
-                    item.setIcon(QIcon())
-            self._request_visible_thumbs()
+            self.invalidate_thumbnails()
 
     def _build_outline(self) -> None:
         try:
@@ -578,6 +582,8 @@ class Sidebar(QWidget):
     # ------------------------------------------------------------------
     def _on_render(self, result: object) -> None:
         if not isinstance(result, RenderResult) or result.tag != "thumb":
+            return
+        if result.version != self.pool.session.version:
             return
         if not result.ok or (result.samples is None and result.png is None):
             return

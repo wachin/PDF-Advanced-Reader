@@ -9,12 +9,15 @@ event loop, so the timer never fired and *no page was ever displayed*.
 This module replaces that with a proper design:
 
 * a small pool of render threads, each holding its own ``fitz.Document``
-  (PyMuPDF documents are not thread-safe and must not be shared);
+  (PyMuPDF documents are not thread-safe and must not be shared), opened from
+  the :class:`~pdfar.session.DocumentSession` so an edited document renders from
+  its in-memory content rather than from the file on disk;
 * a priority queue so visible pages are rendered before prefetch;
 * results are delivered with a Qt signal emitted from the worker thread, which
   Qt queues to the receiver's (GUI) thread automatically.  Emitting a signal
   from a non-Qt thread is safe; ``QTimer.singleShot`` from such a thread is not.
-* duplicate in-flight requests for the same (page, zoom, tag) are dropped.
+* duplicate in-flight requests for the same (page, zoom, tag, version) are
+  dropped.
 """
 
 from __future__ import annotations
@@ -31,6 +34,8 @@ except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtGui import QImage
+
+from .session import DocumentSession
 
 
 @dataclass
@@ -51,10 +56,12 @@ class RenderResult:
     samples: Optional[bytes] = None
     stride: int = 0
     alpha: bool = False
+    version: int = 0
 
     @property
     def key(self):
-        return (self.page, round(self.zoom, 4), self.rotation, self.tag, self.clip)
+        return (self.page, round(self.zoom, 4), self.rotation, self.tag,
+                self.clip, self.version)
 
     def to_qimage(self) -> QImage:
         """Convert result to a QImage. Zero-copy buffer conversion when raw samples are available."""
@@ -79,6 +86,12 @@ class _Job:
     rotation: int = field(default=0, compare=False)
     clip: Optional[Tuple[float, float, float, float]] = field(default=None, compare=False)
     cancelled: bool = field(default=False, compare=False)
+    version: int = field(default=0, compare=False)
+
+    @property
+    def key(self):
+        return (self.page, round(self.zoom, 4), self.rotation, self.tag,
+                self.clip, self.version)
 
 
 class RenderPool(QObject):
@@ -86,19 +99,20 @@ class RenderPool(QObject):
 
     Parameters
     ----------
-    doc_path:
-        Path of the PDF to render.  Every worker thread opens its own handle.
+    session:
+        The document being rendered.  Every worker thread opens its own handle
+        from the session's current content (file on disk until something is
+        edited, in-memory bytes afterwards).
     workers:
         Number of render threads (defaults to min(4, cpu_count)).
     """
 
     result_ready = pyqtSignal(object)  # RenderResult
 
-    def __init__(self, doc_path: str, workers: int = 4, parent: Optional[QObject] = None,
-                 password: str = ""):
+    def __init__(self, session: DocumentSession, workers: int = 4,
+                 parent: Optional[QObject] = None):
         super().__init__(parent)
-        self.doc_path = doc_path
-        self.password = password
+        self.session = session
         self._workers = max(1, int(workers))
         self._cv = threading.Condition()
         self._heap: list[_Job] = []
@@ -120,16 +134,21 @@ class RenderPool(QObject):
         ``clip`` optionally restricts rendering to ``(x0, y0, x1, y1)`` in page
         points — used for viewport tiling of large pages.  The job key
         includes the clip, so duplicate tile requests are dropped.
+
+        The job is pinned to the document session's current content version, so
+        a request made after an edit can never be satisfied by a pre-edit render.
         """
         rotation = int(rotation or 0) % 360
-        key = (page, round(zoom, 4), rotation, tag, clip)
+        version = self.session.read_version()
+        key = (page, round(zoom, 4), rotation, tag, clip, version)
         with self._cv:
             if self._closed:
                 return False
             if key in self._inflight:
                 return False
             self._inflight.add(key)
-            heapq.heappush(self._heap, _Job(priority, next(self._seq), page, float(zoom), tag, alpha, rotation, clip))
+            heapq.heappush(self._heap, _Job(priority, next(self._seq), page, float(zoom),
+                                            tag, alpha, rotation, clip, False, version))
             self._cv.notify()
         return True
 
@@ -202,7 +221,7 @@ class RenderPool(QObject):
                 continue
             result = self._run_job(tls, job)
             self._finish_key(job)
-            if job.cancelled:
+            if result is None or job.cancelled:
                 continue
             with self._cv:
                 closed = self._closed
@@ -218,22 +237,22 @@ class RenderPool(QObject):
 
     def _finish_key(self, job: _Job) -> None:
         with self._cv:
-            self._inflight.discard((job.page, round(job.zoom, 4), job.rotation, job.tag, job.clip))
+            self._inflight.discard(job.key)
 
-    def _run_job(self, tls, job: _Job) -> RenderResult:
+    def _run_job(self, tls, job: _Job) -> Optional[RenderResult]:
         try:
+            if job.version != self.session.version:
+                return None          # content moved on; this render is pointless
             doc = getattr(tls, "doc", None)
-            if doc is None or getattr(tls, "path", None) != self.doc_path:
+            if doc is None or getattr(tls, "version", None) != job.version:
                 if doc is not None:
                     try:
                         doc.close()
                     except Exception:
                         pass
-                doc = fitz.open(self.doc_path)
-                if self.password:
-                    doc.authenticate(self.password)
+                doc = self.session.open_copy(job.version)
                 tls.doc = doc
-                tls.path = self.doc_path
+                tls.version = job.version
             page = doc.load_page(job.page)
             if job.tag == "text":
                 # text extraction: no pixmap, just the word rectangles
@@ -249,6 +268,7 @@ class RenderPool(QObject):
                     rotation=0,
                     clip=None,
                     words=[(w[0], w[1], w[2], w[3], w[4]) for w in raw],
+                    version=job.version,
                 )
             mat = fitz.Matrix(job.zoom, job.zoom)
             if job.rotation:
@@ -275,6 +295,9 @@ class RenderPool(QObject):
                 samples=samples,
                 stride=pix.stride,
                 alpha=pix.alpha,
+                version=job.version,
             )
         except Exception as exc:  # pragma: no cover - defensive
-            return RenderResult(job.page, job.zoom, job.tag, None, 0, 0, False, str(exc), job.rotation, None)
+            return RenderResult(page=job.page, zoom=job.zoom, tag=job.tag,
+                                ok=False, error=str(exc), rotation=job.rotation,
+                                version=job.version)

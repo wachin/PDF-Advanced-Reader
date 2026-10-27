@@ -1512,7 +1512,9 @@ class MainWindow(QMainWindow):
             return
         path = self.view.doc_path
         try:
-            with fitz.open(path) as doc:
+            # Read through the session: while nothing is edited this is the file
+            # on disk, afterwards it is the in-memory content being shown.
+            with self.view.session.open_copy() as doc:
                 meta = doc.metadata or {}
                 page_count = doc.page_count
                 page_size = doc[0].rect if page_count else fitz.Rect()
@@ -1990,6 +1992,7 @@ class MainWindow(QMainWindow):
         tab.view.numbering_changed.connect(self._on_numbering_dragged)
         tab.view.transient_message.connect(self._show_transient_message)
         tab.view.view_mode_changed.connect(self._on_view_mode_changed)
+        tab.view.content_changed.connect(tab.sidebar.invalidate_thumbnails)
         tab.sidebar.goto_page_requested.connect(self._goto)
         tab.sidebar.thumbnail_size_changed.connect(self._on_thumbnail_size_changed)
         # Connect annotation manager to sidebar
@@ -2008,6 +2011,7 @@ class MainWindow(QMainWindow):
             tab.view.numbering_changed.disconnect(self._on_numbering_dragged)
             tab.view.transient_message.disconnect(self._show_transient_message)
             tab.view.view_mode_changed.disconnect(self._on_view_mode_changed)
+            tab.view.content_changed.disconnect(tab.sidebar.invalidate_thumbnails)
             tab.sidebar.goto_page_requested.disconnect(self._goto)
             tab.sidebar.thumbnail_size_changed.disconnect(self._on_thumbnail_size_changed)
         except TypeError:
@@ -2474,7 +2478,7 @@ class MainWindow(QMainWindow):
         self.search_progress.setRange(0, 0)
 
         self.search_thread = QThread(self)
-        self.search_worker = SearchWorker(self.doc_path, params)
+        self.search_worker = SearchWorker(self.view.session, params)
         self.search_worker.moveToThread(self.search_thread)
         self.search_thread.started.connect(self.search_worker.run)
         self.search_worker.progress.connect(
