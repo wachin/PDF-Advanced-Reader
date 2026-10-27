@@ -133,19 +133,24 @@ def test_a_note_is_listed_as_a_note_and_not_as_a_highlight(manager):
 
 
 def test_other_annotation_kinds_are_left_out_of_the_list(manager):
-    """Only what PDFAR can edit is claimed; a foreign shape is not a note.
+    """Only what PDFAR can edit is claimed; a shape is not a note, and a stamp
+    is not listed at all.
 
-    Listing it would offer the user an action on it that rewrites a document they
-    did not ask to change.
+    Since F10-3l a square *is* editable, so it appears as a shape.  A stamp is
+    still only read, and listing it would offer the user an action on it that
+    rewrites a document they did not ask to change.
     """
     page = manager.doc.load_page(0)
     square = page.add_rect_annot(fitz.Rect(10, 70, 40, 95))
     square.set_colors(stroke=(1.0, 0.0, 0.0))
     square.update()
+    stamp = page.add_stamp_annot(fitz.Rect(10, 20, 40, 50))
+    stamp.update()
 
     listed = AnnotationManager(manager.session)      # read from the top
 
-    assert listed.get_annotations() == []
+    assert [ann.type for ann in listed.get_annotations()] == [AnnotationType.SHAPE]
+    assert listed.get_notes_for_page(0) == []
 
 
 def test_a_foreign_note_is_listed_without_the_file_being_rewritten(manager):

@@ -1237,10 +1237,20 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       `/C` and `/BS` only when a stroke is committed. The preview paints from
       the same two attributes, so a style picked mid-drag recolours the line
       under the pointer.)
-- [ ] Shapes: rectangle, ellipse, line, arrow, polygon (`/Square`, `/Circle`,
-      `/Line`, `/Polygon`) (**F10-3l, next**). The tool modes and page-space
-      capture F10-3j built are half of it; the edits and their geometry are
-      the other half.
+- [x] Shapes as real annotations: rectangle, ellipse, line, arrow, polygon
+      (`/Square`, `/Circle`, `/Line`, `/Polygon`) (**F10-3l.** `AddShape`
+      writes the geometry the user gives in page space; an arrow is a `/Line`
+      whose `/LE` end carries a closed arrowhead, which is how PDF draws one.
+      Corners arrive in any order and are normalised; a shape with no area is
+      refused before MuPDF sees it, because a zero-height `/Square` is an
+      annotation nobody can select. The manager reads the four subtypes back
+      into `ShapeAnnotation` and distinguishes `"arrow"` from `"line"` by
+      `line_ends`, so undo, redo, save/reopen, the comment list, notes and
+      delete all reach shapes through the code the earlier kinds left generic.)
+- [ ] The shape tool: drag a rectangle, ellipse, line, arrow or polygon on the
+      page and see it while dragging (**F10-3m, next**). F10-3j's page-space
+      capture and F10-3k's styling are reusable; the new part is the geometry
+      a drag means for each kind.
 - [ ] Stamps, including the standard pre-defined rubber-stamp images
 - [ ] Measurement annotations (`/Projection`), with the scale they are drawn in
 - [ ] Appearance streams, so other readers show the same thing without
@@ -1362,9 +1372,10 @@ highlight lands on its words whatever the view rotation (F10-3g), the
 annotation list re-reads only the pages an edit wrote to (F10-3h), a
 freehand drawing is a real `/Ink` annotation in the document (F10-3i), the pen
 tool draws one where the pointer is, under any rotation (F10-3j), and the pen's
-colour and thickness come from pickers beside the tool (F10-3k).
-Next, in order: shapes (F10-3l), stamps, measurement, appearance streams so
-other readers show what PDFAR wrote, and XFDF import/export.
+colour and thickness come from pickers beside the tool (F10-3k); shapes are real
+`/Square`, `/Circle`, `/Line` and `/Polygon` annotations (F10-3l).
+Next, in order: the shape tool (F10-3m), stamps, measurement, appearance streams
+so other readers show what PDFAR wrote, and XFDF import/export.
 
 Goal:
 
@@ -2810,6 +2821,69 @@ colour and width do not change what the edit does.
 **What is not here**: a pen style that survives a restart. Each document opens
 with black at 2 pt; the tab state `QSettings` stores does not include the pen
 yet.
+
+---
+
+### F10-3l Shapes are real `/Square`, `/Circle`, `/Line` and `/Polygon` — [x] Implemented
+
+**Completed**: 2026-10-27
+
+**What landed**: `AddShape` writes one of five shapes — rectangle, ellipse,
+line, arrow, polygon — as the subtype a viewer knows how to select and resize:
+`add_rect_annot` (`/Square`), `add_circle_annot` (`/Circle`),
+`add_line_annot` (`/Line`, also used for arrows) and `add_polygon_annot`
+(`/Polygon`). Box shapes carry a `rect`; lines, arrows and polygons carry
+page-space `points`. `ShapeAnnotation` reads them back with `kind`, `points`
+and `width`, and `AnnotationManager.add_shape()` makes each shape one edit —
+one Ctrl+Z, one row in the comment list.
+
+**An arrow is a line that says so.** PDF has no arrow subtype. An arrow is a
+`/Line` whose `/LE` array ends in `CLOSED_ARROW`, set with
+`set_line_ends(PDF_ANNOT_LE_NONE, PDF_ANNOT_LE_CLOSED_ARROW)`. The reader checks
+`line_ends` and reports `"arrow"` rather than `"line"`, so the model says what
+the user drew while the file stays a shape every other reader understands.
+
+**Geometry rules.** Corners may arrive in any order — the user can drag up and
+to the left — and are put in page order before MuPDF sees them. A shape with no
+extent is refused: a zero-height `/Square` is a line MuPDF stores as a
+degenerate box that nobody can select, and a polygon needs at least three
+points. The refusal is the edit's (`_clean_shape`), so every caller is covered,
+and it leaves the page, history and dirty flag untouched.
+
+**Files changed**: `src/pdfar/annotations.py` (`SHAPE_LABELS`,
+`ShapeAnnotation`, `_shape_model`, `_clean_shape`, `AddShape`, the `_read_page`
+dispatch, `AnnotationManager.add_shape`), `tests/test_shapes.py`, and the
+`tests/test_text_notes.py` case that used to call every foreign shape
+unlistable.
+
+**Verified by eye** (headless): one of each kind written into the document reads
+back as `Square`, `Circle`, `Line`, `Line` with ends `(0, 5)`, `Polygon`; 8.6 %
+of the rectangle's box is red on the rendered page; after saving and reopening
+in a fresh window the page paints 220 red pixels and the models come back as
+`rect, ellipse, line, arrow, polygon`. Screenshots `/tmp/f103l_ui.png`,
+`/tmp/f103l_reopened.png`.
+
+**Tests**: 674 passed (was 630) — `tests/test_shapes.py` (44): each kind is a
+`ShapeAnnotation` in the document with the right subtype, colour and width; an
+arrow is a line whose `/LE` carries the head and a plain line is not; every
+kind reaches the pixels; the box covers the geometry; reversed corners are
+normalised; line and polygon points round-trip in page space; degenerate boxes,
+wrong point counts and unknown kinds are refused without history, version or
+dirty; `AddShape.apply` raises `EditError` on its own; one undo takes the shape
+off and redo puts the same id back; each kind's undo step is named for it; all
+five survive save and reopen; a shape re-reads one page; shapes list with the
+other kinds, take a note and delete; and a shape another program drew is listed
+under `anon:{xref}` without being renamed. Three consecutive full runs.
+
+**Performance on the 540-page book**: adding a shape is 53–65 ms — the same
+edit machinery as the F10-3j ink (54 ms for a 40-point stroke), most of it the
+revision-file copy F10-3c made cheap. Undo plus re-read is 14.2–14.7 ms, and a
+second re-read with nothing pending is 0.00 ms because the edit's own re-read
+already refreshed the page.
+
+**What is not here**: the tool. Nothing in the interface draws a shape yet — the
+same document-first split as F10-3d/F10-3e and F10-3i/F10-3j. The drag, the
+live preview and the kind picker are F10-3m.
 
 ---
 

@@ -61,6 +61,16 @@ INK_COLORS = [
 #: The thicknesses the pen offers, in PDF points.
 INK_WIDTHS = (1.0, 2.0, 4.0, 8.0)
 
+#: The shapes PDFAR writes, and the undo labels they use.  ``arrow`` is a
+#: ``/Line`` with a closed arrowhead rather than a subtype of its own.
+SHAPE_LABELS = {
+    "rect": "Rectangle",
+    "ellipse": "Ellipse",
+    "line": "Line",
+    "arrow": "Arrow",
+    "polygon": "Polygon",
+}
+
 #: What a damaged annotation can raise while the list is being read.  MuPDF
 #: signals its failures through these; asking for less than ``Exception`` means a
 #: mistake in :func:`_highlight_model` still surfaces instead of quietly
@@ -171,6 +181,21 @@ class InkAnnotation(Annotation):
     """
     type: AnnotationType = AnnotationType.FREEHAND
     paths: List[List[tuple]] = field(default_factory=list)
+    width: float = INK_WIDTH
+
+
+@dataclass
+class ShapeAnnotation(Annotation):
+    """A geometric mark: a PDF ``/Square``, ``/Circle``, ``/Line`` or ``/Polygon``.
+
+    ``kind`` names which, because the subtypes answer different questions: a
+    rectangle or ellipse lives in ``rects``, while a line, arrow and polygon
+    carry their vertices in ``points`` (page space) and use ``rects[0]`` only as
+    the box a click or a jump needs.  An arrow is a line whose ``/LE`` says so.
+    """
+    type: AnnotationType = AnnotationType.SHAPE
+    kind: str = "rect"
+    points: List[tuple] = field(default_factory=list)
     width: float = INK_WIDTH
 
 
@@ -317,6 +342,40 @@ def _ink_model(annot: fitz.Annot, page_idx: int) -> InkAnnotation:
         modified=info.get("modDate") or "",
         content=info.get("content") or "",
         paths=paths,
+        width=INK_WIDTH if width is None else float(width),
+    )
+
+
+def _shape_model(annot: fitz.Annot, page_idx: int,
+                 kind: str) -> ShapeAnnotation:
+    """Read one document shape into the model.
+
+    A ``/Line`` becomes ``"arrow"`` when an ``/LE`` end is an arrowhead, so the
+    model says what the user drew and not which PDF subtype stores it.
+    ``vertices`` hands back a line's two points and a polygon's corners in page
+    space; a box shape keeps its geometry in ``rects`` like every other model.
+    """
+    info = annot.info
+    rect = annot.rect
+    opacity = annot.opacity
+    width = (annot.border or {}).get("width")
+    points = ([(float(x), float(y)) for x, y in annot.vertices]
+              if kind in ("line", "polygon") else [])
+    if kind == "line" and any(annot.line_ends):
+        kind = "arrow"
+    return ShapeAnnotation(
+        id=annot_key(annot),
+        page=page_idx,
+        rects=[(rect.x0, rect.y0, rect.x1, rect.y1)],
+        color=_rgb_to_hex(annot.colors.get("stroke") or (0.0, 0.0, 0.0)),
+        # A shape with no /CA paints solid, and -1 is how MuPDF reports "unset".
+        opacity=1.0 if opacity is None or opacity < 0 else opacity,
+        author=info.get("title") or "",
+        created=info.get("creationDate") or "",
+        modified=info.get("modDate") or "",
+        content=info.get("content") or "",
+        kind=kind,
+        points=points,
         width=INK_WIDTH if width is None else float(width),
     )
 
@@ -479,6 +538,90 @@ class AddInk(SinglePageEdit):
             annot.set_info(content=self.note)
         # MuPDF writes the appearance stream here, which is what makes other
         # readers show the stroke without PDFAR drawing it a second time.
+        annot.update()
+        _name(doc, annot, self.ann_id)
+
+
+def _clean_shape(kind: str, rect, points) -> tuple:
+    """The geometry to hand MuPDF, or an edit that refuses.
+
+    A shape with no extent is not an invisible annotation: a zero-height
+    ``/Square`` is a line, and MuPDF stores a degenerate box that no reader can
+    select or the panel can ring.  The corners may arrive in any order, because
+    the user may drag up and to the left; they are put back in page order here.
+    """
+    if kind not in SHAPE_LABELS:
+        raise EditError(f"“{kind}” is not a shape")
+    if kind in ("rect", "ellipse"):
+        if rect is None or len(rect) != 4:
+            raise EditError("A shape needs a box")
+        x0, y0, x1, y1 = (float(v) for v in rect)
+        left, right = sorted((x0, x1))
+        top, bottom = sorted((y0, y1))
+        if right - left < 0.01 or bottom - top < 0.01:
+            raise EditError("A shape needs a box with area")
+        return (left, top, right, bottom)
+    cleaned = [(float(x), float(y)) for x, y in points]
+    if kind in ("line", "arrow"):
+        if len(cleaned) != 2:
+            raise EditError("A line needs two points")
+        (ax, ay), (bx, by) = cleaned
+        if abs(ax - bx) < 0.01 and abs(ay - by) < 0.01:
+            raise EditError("A line needs two different points")
+        return tuple(cleaned)
+    if len(cleaned) < 3:
+        raise EditError("A polygon needs at least three points")
+    return tuple(cleaned)
+
+
+@dataclass(frozen=True)
+class AddShape(SinglePageEdit):
+    """Draw one shape on a page — a PDF ``/Square``, ``/Circle``, ``/Line`` or
+    ``/Polygon``.
+
+    ``kind`` picks the subtype: ``rect`` and ``ellipse`` use ``rect``, while
+    ``line``, ``arrow`` and ``polygon`` use ``points``.  An arrow is a ``/Line``
+    whose end carries a closed arrowhead, because that is how PDF draws one.
+    """
+
+    ann_id: str
+    page: int
+    kind: str
+    rect: Optional[Tuple[float, float, float, float]] = None
+    points: Tuple[tuple, ...] = ()
+    color: str = INK_COLOR
+    width: float = INK_WIDTH
+    author: str = ""
+    note: str = ""
+
+    scope = Scope.COMMENTS
+
+    @property
+    def label(self) -> str:
+        return SHAPE_LABELS.get(self.kind, "Shape")
+
+    def apply(self, doc: fitz.Document) -> None:
+        geometry = _clean_shape(self.kind, self.rect, self.points)
+        page = doc.load_page(self.page)
+        if self.kind == "rect":
+            annot = page.add_rect_annot(fitz.Rect(*geometry))
+        elif self.kind == "ellipse":
+            annot = page.add_circle_annot(fitz.Rect(*geometry))
+        elif self.kind in ("line", "arrow"):
+            annot = page.add_line_annot(*geometry)
+            if self.kind == "arrow":
+                annot.set_line_ends(fitz.PDF_ANNOT_LE_NONE,
+                                    fitz.PDF_ANNOT_LE_CLOSED_ARROW)
+        else:
+            annot = page.add_polygon_annot(list(geometry))
+        annot.set_colors(stroke=_hex_to_rgb(self.color))
+        annot.set_border(width=float(self.width))
+        if self.author:
+            annot.set_info(title=self.author)
+        if self.note:
+            annot.set_info(content=self.note)
+        # MuPDF writes the appearance stream here, so the shape shows in other
+        # readers even though PDFAR only stores its geometry.
         annot.update()
         _name(doc, annot, self.ann_id)
 
@@ -655,10 +798,18 @@ class AnnotationManager(QObject):
                     model = _note_model(annot, page_idx)
                 elif kind == fitz.PDF_ANNOT_INK:
                     model = _ink_model(annot, page_idx)
+                elif kind == fitz.PDF_ANNOT_SQUARE:
+                    model = _shape_model(annot, page_idx, "rect")
+                elif kind == fitz.PDF_ANNOT_CIRCLE:
+                    model = _shape_model(annot, page_idx, "ellipse")
+                elif kind == fitz.PDF_ANNOT_LINE:
+                    model = _shape_model(annot, page_idx, "line")
+                elif kind == fitz.PDF_ANNOT_POLYGON:
+                    model = _shape_model(annot, page_idx, "polygon")
                 else:
-                    # A shape, stamp or free-text annotation PDFAR cannot
-                    # edit yet: listing it would offer an action on something
-                    # the user brought in from another program.
+                    # A stamp or free-text annotation PDFAR cannot edit yet:
+                    # listing it would offer an action on something the user
+                    # brought in from another program.
                     continue
                 found[model.id] = model
         except ANNOT_READ_ERRORS:
@@ -754,6 +905,30 @@ class AnnotationManager(QObject):
             return None
         made = self.get_annotation(ann_id)
         return made if isinstance(made, InkAnnotation) else None
+
+    def add_shape(self, page: int, kind: str, *,
+                  rect: Optional[Sequence[float]] = None,
+                  points: Sequence[tuple] = (),
+                  color: str = INK_COLOR, width: float = INK_WIDTH,
+                  author: str = "",
+                  note: str = "") -> Optional[ShapeAnnotation]:
+        """Draw one shape on *page*.  ``None`` if the edit was refused.
+
+        ``rect`` is the box for a rectangle or ellipse; ``points`` are the
+        vertices of a line, arrow or polygon, in page space.  One shape is one
+        edit, so one Ctrl+Z takes it back.
+        """
+        ann_id = str(uuid.uuid4())
+        box = tuple(float(v) for v in rect) if rect is not None else None
+        if not self._run(AddShape(ann_id=ann_id, page=int(page), kind=kind,
+                                  rect=box,
+                                  points=tuple((float(x), float(y))
+                                               for x, y in points),
+                                  color=color, width=width, author=author,
+                                  note=note)):
+            return None
+        made = self.get_annotation(ann_id)
+        return made if isinstance(made, ShapeAnnotation) else None
 
     def remove_annotation(self, annotation_id: str) -> bool:
         """Remove an annotation by ID."""
