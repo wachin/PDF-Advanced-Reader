@@ -192,13 +192,13 @@ with a limit proportional to RAM, evicting the farthest pages first.
 PDFAR's five page view modes are an original Python/PyQt6 reimplementation of
 Okular's `PageView` layout. The mapping is:
 
-| PDFAR mode | Okular equivalent | Rows | Notes |
-|---|---|---|---|
-| Continuous | `Single` + `ViewContinuous=true` | one page | PDFAR's original layout |
-| Single Page | `Single` | one page | one screen at a time |
-| Facing Pages | `Facing` | `[0,1] [2,3] …` | page 1 on the left, odd last page alone |
-| Facing Pages (Center First Page) | `FacingFirstCentered` | `[0]`, then pairs | last page centered when the count is even |
-| Overview | `Summary` | 3 pages per row | `ViewColumns` default is 3 |
+| PDFAR mode | Okular equivalent | Rows | Scrolling | Notes |
+|---|---|---|---|---|
+| Continuous | `Single` + `ViewContinuous=true` | one page | vertical | PDFAR's original layout |
+| Single Page | `Single` + `ViewContinuous=false` | one page | none | one screen at a time |
+| Facing Pages | `Facing` + `ViewContinuous=true` | `[0,1] [2,3] …` | vertical | page 1 on the left, odd last page alone |
+| Facing Pages (Center First Page) | `FacingFirstCentered` + `ViewContinuous=true` | `[0]`, then pairs | vertical | last page centered when the count is even |
+| Overview | `Summary` + `ViewContinuous=true` | 3 pages per row | vertical | `ViewColumns` default is 3 |
 
 Behavior studied and reimplemented:
 
@@ -209,10 +209,15 @@ Behavior studied and reimplemented:
   pages; page 0 is centered alone, then pages pair from index 1.
   `centerLastPage = centerFirstPage && pageCount % 2 == 0`
   (`part/pageview.cpp:4748-4755`).
-- With continuous scrolling off, only the current row (`pageRowIdx`) is laid
-  out and it is centered vertically (`part/pageview.cpp:4802-4858`). Okular
-  centers a short last row's pages inside their own grid columns; PDFAR
-  instead centers the short row as a group.
+- Okular's `ViewContinuous` defaults to `true` (`conf/okular.kcfg`), so
+  Facing/FacingFirstCentered/Summary stack every row top-to-bottom and scroll
+  vertically through them. PDFAR does the same: each row is horizontally
+  centered in the content area and the vertical scrollbar moves through the
+  spreads/grid (`part/pageview.cpp:4802-4858`). Okular centers a short last
+  row's pages inside their own grid columns; PDFAR instead centers the short
+  row as a group.
+- PDFAR's Single Page is the non-scrolling variant: only the current page is
+  laid out, centered in the viewport, and the scrollbars stay at zero.
 - In Facing layouts the two page edges touch the viewport centre (the gutter),
   rather than each page being centered in an arbitrary cell
   (`part/pageview.cpp:4836-4843`).

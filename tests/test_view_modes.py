@@ -106,20 +106,20 @@ def test_facing_pairs_pages(view_factory, five_pdf, qapp):
     view.set_view_mode("facing")
     qapp.processEvents()
     assert view._rows == [[0, 1], [2, 3], [4]]
+    assert all(rect is not None for rect in view._page_rects)
 
     left = view._page_rects[0]
     right = view._page_rects[1]
-    assert left is not None and right is not None
     assert left[0] + left[2] + 12 == right[0]
     assert abs(left[1] - right[1]) <= 1
+    # Every spread is stacked below the previous one.
+    assert view._page_rects[2][1] > view._page_rects[0][1]
+    assert view._page_rects[4][1] > view._page_rects[2][1]
+    assert view._content_h > view._page_rects[4][1]
 
-    view.goto_page(4)
-    qapp.processEvents()
     lone = view._page_rects[4]
-    assert lone is not None
     # The odd last page sits in the left column, right edge at the gutter.
     assert abs((lone[0] + lone[2]) - (view._content_w / 2 - 6)) <= 1
-    assert view._page_rects[2] is None
 
 
 def test_facing_centered_first_and_last(view_factory, six_pdf, five_pdf,
@@ -128,14 +128,14 @@ def test_facing_centered_first_and_last(view_factory, six_pdf, five_pdf,
     view.set_view_mode("facing_centered")
     qapp.processEvents()
     assert view._rows == [[0], [1, 2], [3, 4], [5]]
+    assert all(rect is not None for rect in view._page_rects)
     first = view._page_rects[0]
     assert abs(first[0] - (view.viewport().width() - first[2]) / 2) <= 1
+    assert view._page_rects[3][1] > view._page_rects[1][1]
 
-    view.goto_page(5)
-    qapp.processEvents()
     last = view._page_rects[5]
-    assert last is not None
     assert abs(last[0] - (view.viewport().width() - last[2]) / 2) <= 1
+    assert last[1] > view._page_rects[3][1]
 
     view2 = view_factory(five_pdf)
     view2.set_view_mode("facing_centered")
@@ -149,16 +149,15 @@ def test_overview_three_column_grid(view_factory, tmp_path, qapp):
     view.set_view_mode("overview")
     qapp.processEvents()
     assert view._rows == [[0, 1, 2], [3, 4, 5], [6]]
+    assert all(rect is not None for rect in view._page_rects)
 
     rects = [view._page_rects[i] for i in range(3)]
-    assert all(rect is not None for rect in rects)
     assert rects[0][0] < rects[1][0] < rects[2][0]
-    assert view._page_rects[6] is None
+    assert view._page_rects[3][1] > rects[0][1]
+    assert view._page_rects[6][1] > view._page_rects[3][1]
 
-    view.goto_page(6)
-    qapp.processEvents()
+    # The short last row is centered as a group.
     lone = view._page_rects[6]
-    assert lone is not None
     assert abs(lone[0] - (view._content_w - lone[2]) / 2) <= 1
 
 
@@ -198,41 +197,98 @@ def test_fit_width_and_page_use_the_spread(view_factory, sample_pdf, qapp):
                                       rel=1e-6)
 
 
-def test_page_step_advances_rows(view_factory, tmp_path, sample_pdf, qapp):
-    single = view_factory(sample_pdf)
+def test_page_step_scrolls_grid_modes(view_factory, five_pdf, qapp):
+    single = view_factory(five_pdf)
     single.set_view_mode("single")
     single.page_step(+1)
-    assert single.current_page == 1
+    assert single.current_page == 1      # Single advances one page
 
-    facing = view_factory(sample_pdf)
+    facing = view_factory(five_pdf)
     facing.set_view_mode("facing")
+    facing.set_zoom(2.0)
+    qapp.processEvents()
+    vbar = facing.verticalScrollBar()
+    assert vbar.maximum() > 0
     facing.page_step(+1)
-    assert facing.current_page == 2      # next spread starts at page 3
-    facing.page_step(-1)
-    assert facing.current_page == 0
-
-    overview = view_factory(_make_pdf(tmp_path / "seven.pdf", 7))
-    overview.set_view_mode("overview")
-    overview.page_step(+1)
-    assert overview.current_page == 3
-    overview.page_step(+1)
-    assert overview.current_page == 6
-    overview.page_step(+1)
-    assert overview.current_page == 6    # clamped to the last row
+    qapp.processEvents()
+    assert vbar.value() == min(vbar.maximum(),
+                               facing.viewport().height() - 60)
+    assert facing.current_page == 2      # next spread is [2, 3]
 
 
-def test_view_mode_state_round_trip(view_factory, sample_pdf, qapp):
-    view = view_factory(sample_pdf)
+def test_facing_scrolls_through_spreads(view_factory, five_pdf, qapp):
+    view = view_factory(five_pdf)
     view.set_view_mode("facing")
-    view.goto_page(1)
+    view.set_zoom(2.0)
+    qapp.processEvents()
+    vbar = view.verticalScrollBar()
+    assert vbar.maximum() > 0
+
+    vbar.setValue(vbar.maximum())
+    qapp.processEvents()
+    first, last = view.visible_range()
+    assert first <= 2 <= last
+    assert last == 4                     # lone last page is reachable
+    assert view.current_page == 2        # the [2, 3] spread
+    lone = view._page_rects[4]
+    assert lone is not None
+    assert lone[1] + lone[3] <= view._content_h
+
+
+def test_facing_centered_rows_stack_and_scroll(view_factory, six_pdf, qapp):
+    view = view_factory(six_pdf)
+    view.set_view_mode("facing_centered")
+    view.set_zoom(2.0)
+    qapp.processEvents()
+    assert all(rect is not None for rect in view._page_rects)
+    assert view._page_rects[1][1] > view._page_rects[0][1]
+    assert view._page_rects[3][1] > view._page_rects[1][1]
+    assert view._page_rects[5][1] > view._page_rects[3][1]
+
+    last = view._page_rects[5]
+    assert abs(last[0] - (view._content_w - last[2]) / 2) <= 1
+
+    vbar = view.verticalScrollBar()
+    assert vbar.maximum() > 0
+    vbar.setValue(vbar.maximum())
+    qapp.processEvents()
+    _, last_page = view.visible_range()
+    assert last_page == 5
+
+
+def test_overview_all_rows_scroll(view_factory, tmp_path, qapp):
+    path = _make_pdf(tmp_path / "seven.pdf", 7)
+    view = view_factory(path)
+    view.set_view_mode("overview")
+    view.set_zoom(2.0)
+    qapp.processEvents()
+    assert all(rect is not None for rect in view._page_rects)
+    short = view._page_rects[6]
+    assert abs(short[0] - (view._content_w - short[2]) / 2) <= 1
+
+    vbar = view.verticalScrollBar()
+    assert vbar.maximum() > 0
+    vbar.setValue(vbar.maximum())
+    qapp.processEvents()
+    _, last = view.visible_range()
+    assert last == 6
+
+
+def test_view_mode_state_round_trip(view_factory, five_pdf, qapp):
+    view = view_factory(five_pdf)
+    view.set_view_mode("facing")
+    view.set_zoom(2.0)
+    view.goto_page(2)
     state = view.get_state()
     assert state["view_mode"] == "facing"
+    assert state["vscroll"] > 0
 
     view.set_view_mode("continuous")
     view.restore_state(state)
     qapp.processEvents()
     assert view.view_mode == "facing"
-    assert view.current_page == 1
+    assert view.current_page == 2
+    assert view.verticalScrollBar().value() == state["vscroll"]
     assert view._page_rects[0] is not None
     assert view._page_rects[1] is not None
 
@@ -260,11 +316,17 @@ def test_reflow_ignores_view_mode_and_restores_it(view_factory, sample_pdf,
     assert view._page_rects[1] is not None
 
 
-def test_non_continuous_modes_have_no_scrollbars(view_factory, sample_pdf,
-                                                 qapp):
-    view = view_factory(sample_pdf)
-    for mode in ("single", "facing"):
-        view.set_view_mode(mode)
-        qapp.processEvents()
-        assert view.verticalScrollBar().maximum() == 0
-        assert view.horizontalScrollBar().maximum() == 0
+def test_single_has_no_scrollbars_but_facing_scrolls(view_factory, five_pdf,
+                                                     qapp):
+    view = view_factory(five_pdf)
+    view.set_view_mode("single")
+    qapp.processEvents()
+    assert view.verticalScrollBar().maximum() == 0
+    assert view.horizontalScrollBar().maximum() == 0
+
+    view.set_view_mode("facing")
+    qapp.processEvents()
+    assert view.verticalScrollBar().maximum() == 0   # stack fits
+    view.set_zoom(2.0)
+    qapp.processEvents()
+    assert view.verticalScrollBar().maximum() > 0   # stack overflows

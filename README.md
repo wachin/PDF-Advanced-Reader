@@ -506,11 +506,11 @@ solved this — thank you to the Okular developers.
 The **page view modes** (Single Page, Facing Pages, Facing Pages — Center First
 Page, Overview and Continuous) also follow the layout model of Okular's
 `PageView` (`part/pageview.cpp`, `conf/okular.kcfg`). Page pairing, the
-centered first and last pages, the three-column Overview, fit-to-spread and
-row navigation were studied there and re-implemented from scratch in
-Python/PyQt6. No Okular source code was copied, compiled or linked; only the
-behaviour and ideas were reused, which is compatible with both projects' GPL
-licenses.
+centered first and last pages, the three-column Overview, the vertically
+scrollable spreads and overview grid, fit-to-spread and row navigation were
+studied there and re-implemented from scratch in Python/PyQt6. No Okular
+source code was copied, compiled or linked; only the behaviour and ideas were
+reused, which is compatible with both projects' GPL licenses.
 
 ---
 

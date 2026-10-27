@@ -63,7 +63,9 @@ MAX_ZOOM = 10.0
 # Page layouts reimplemented from Okular's PageView (part/pageview.cpp and
 # conf/okular.kcfg, GPL-2.0+/GPL-3.0+).  PDFAR exposes Okular's four view
 # modes plus an explicit continuous single-column mode; the layout, pairing
-# and centering rules are original Python/PyQt6 code.
+# and centering rules are original Python/PyQt6 code.  Facing/Overview stack
+# every row and scroll vertically (Okular's ViewContinuous default); only
+# Single Page shows one screen at a time.
 VIEW_MODES = ("continuous", "single", "facing", "facing_centered", "overview")
 VIEW_MODE_LABELS = {
     "continuous": "Continuous",
@@ -914,43 +916,67 @@ class PDFView(QAbstractScrollArea):
             self._update_scrollbars()
             return
 
-        row = next((r for r in self._rows if self.current_page in r),
-                   self._rows[0])
         cols = max((len(r) for r in self._rows), default=1)
         col_widths = self._column_widths(self._rows, cols)
         gap = GAP * z          # gutters scale with the pages
-        row_w = sum(col_widths) + gap * (cols - 1)
-        row_h = max(self._disp_sizes[i][1] for i in row)
-        self._max_w = max(col_widths)
-        self._content_w = max(float(vw), row_w + 2 * PAD)
-        self._content_h = max(float(vh), row_h + 2 * PAD)
-        row_x = (self._content_w - row_w) / 2.0
-        row_y = (self._content_h - row_h) / 2.0
+        full_w = sum(col_widths) + gap * (cols - 1)
 
-        if len(row) < cols and self.view_mode == "overview":
-            # Short last row: center the group instead of leaving empty
-            # cells on the right.
-            short_w = sum(col_widths[:len(row)]) + gap * (len(row) - 1)
-            row_x = (self._content_w - short_w) / 2.0
-
-        for c, index in enumerate(row):
+        if self.view_mode == "single":
+            row = next((r for r in self._rows if self.current_page in r),
+                       self._rows[0])
+            row_h = max(self._disp_sizes[i][1] for i in row)
+            self._max_w = max(col_widths)
+            self._content_w = max(float(vw), full_w + 2 * PAD)
+            self._content_h = max(float(vh), row_h + 2 * PAD)
+            row_x = (self._content_w - full_w) / 2.0
+            row_y = (self._content_h - row_h) / 2.0
+            index = row[0]
             dw, dh = self._disp_sizes[index]
-            if len(row) == 1 and cols > 1:
-                if self.view_mode == "facing":
-                    x = row_x + col_widths[0] - dw
-                else:
-                    x = (self._content_w - dw) / 2.0
-            elif self.view_mode in ("facing", "facing_centered"):
-                if c == 0:
-                    x = row_x + col_widths[0] - dw
-                else:
-                    x = row_x + col_widths[0] + gap
+            self._page_rects[index] = (
+                (self._content_w - dw) / 2.0,
+                row_y + (row_h - dh) / 2.0, dw, dh)
+            self._page_tops[index] = row_y
+            self._update_scrollbars()
+            return
+
+        # Facing/Overview: stack every row so the view scrolls through them,
+        # like Okular with ViewContinuous (its default).
+        row_heights = [max(self._disp_sizes[i][1] for i in row)
+                       for row in self._rows]
+        self._max_w = max(col_widths)
+        self._content_w = max(float(vw), full_w + 2 * PAD)
+        self._content_h = (2 * PAD + sum(row_heights)
+                           + gap * (len(self._rows) - 1))
+        top = float(PAD)
+        for row, row_h in zip(self._rows, row_heights):
+            if len(row) < cols and self.view_mode == "overview":
+                # Short last row: center the group instead of leaving empty
+                # cells on the right.
+                row_w = sum(col_widths[:len(row)]) + gap * (len(row) - 1)
             else:
-                x = (row_x + sum(col_widths[:c]) + gap * c
-                     + (col_widths[c] - dw) / 2.0)
-            y = row_y + (row_h - dh) / 2.0
-            self._page_rects[index] = (x, y, dw, dh)
-            self._page_tops[index] = y
+                row_w = full_w
+            row_x = (self._content_w - row_w) / 2.0
+            for c, index in enumerate(row):
+                dw, dh = self._disp_sizes[index]
+                if len(row) == 1 and cols > 1:
+                    if self.view_mode == "facing":
+                        x = row_x + col_widths[0] - dw
+                    else:
+                        x = (self._content_w - dw) / 2.0
+                elif self.view_mode in ("facing", "facing_centered"):
+                    if c == 0:
+                        x = row_x + col_widths[0] - dw
+                    else:
+                        x = row_x + col_widths[0] + gap
+                else:
+                    x = (row_x + sum(col_widths[:c]) + gap * c
+                         + (col_widths[c] - dw) / 2.0)
+                y = top + (row_h - dh) / 2.0
+                self._page_rects[index] = (x, y, dw, dh)
+                self._page_tops[index] = top
+            self._row_tops.append(top)
+            self._row_heights.append(row_h)
+            top += row_h + gap
         self._update_scrollbars()
 
     def set_view_mode(self, mode: str) -> None:
@@ -969,6 +995,8 @@ class PDFView(QAbstractScrollArea):
                 # Re-fit the new layout (a spread or a three-column overview
                 # has a different unit width than a single page).
                 self.apply_fit()
+            elif self._grid_scroll_mode():
+                self._center_page(self.current_page)
             self._request_visible()
             self.viewport().update()
         self.view_mode_changed.emit(mode)
@@ -984,6 +1012,39 @@ class PDFView(QAbstractScrollArea):
         hbar.setRange(0, max(0, int(self._content_w - vw)))
         hbar.setPageStep(vw)
         hbar.setSingleStep(40)
+
+    def _grid_scroll_mode(self) -> bool:
+        """True for stacked grid layouts that scroll vertically."""
+        return self.view_mode in ("facing", "facing_centered", "overview")
+
+    def _row_at_y(self, content_y: float) -> int:
+        """Index of the grid row containing a content-space y (clamped)."""
+        if not self._row_tops:
+            return 0
+        lo, hi = 0, len(self._row_tops) - 1
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self._row_tops[mid] <= content_y:
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo
+
+    def _center_page(self, index: int) -> None:
+        """Scroll so a page's row is centred, horizontally when needed."""
+        if not self.page_count or index >= len(self._disp_sizes):
+            return
+        px, py = self._page_origin(index)
+        dw, dh = self._disp_sizes[index]
+        vbar = self.verticalScrollBar()
+        hbar = self.horizontalScrollBar()
+        vbar.setValue(int(max(0, min(
+            py + dh / 2.0 - self.viewport().height() / 2.0,
+            vbar.maximum()))))
+        hbar.setValue(int(max(0, min(
+            px + dw / 2.0 - self.viewport().width() / 2.0,
+            hbar.maximum()))))
+        self.current_page = index
 
     def _x_offset(self) -> float:
         """Content-space x origin of page area (centres pages in wide views)."""
@@ -1050,12 +1111,24 @@ class PDFView(QAbstractScrollArea):
         """First and last (inclusive) page index intersecting the viewport."""
         if not self.page_count:
             return (0, -1)
-        if not self.reflow_mode and self.view_mode != "continuous":
+        if not self.reflow_mode and self.view_mode == "single":
             pages = [i for i, rect in enumerate(self._page_rects)
                      if rect is not None]
             if not pages:
                 return (self.current_page, self.current_page)
             return (pages[0], pages[-1])
+        if not self.reflow_mode and self._grid_scroll_mode():
+            if not self._row_tops or not self._rows:
+                return (self.current_page, self.current_page)
+            y0 = max(0.0, float(self.verticalScrollBar().value()) - 200)
+            y1 = float(self.verticalScrollBar().value())
+            y1 += self.viewport().height()
+            first_row = self._row_at_y(y0)
+            last_row = first_row
+            while (last_row + 1 < len(self._row_tops)
+                   and self._row_tops[last_row + 1] <= y1):
+                last_row += 1
+            return (self._rows[first_row][0], self._rows[last_row][-1])
         y0 = float(self.verticalScrollBar().value())
         y1 = y0 + self.viewport().height()
         first = self._page_at_y(max(0.0, y0 - 200))
@@ -1705,6 +1778,11 @@ class PDFView(QAbstractScrollArea):
             bottom = float(max(content_rect.top(), content_rect.bottom()))
             first = self._page_at_y(top)
             last = self._page_at_y(bottom)
+        elif self._grid_scroll_mode() and self._rows:
+            top = float(min(content_rect.top(), content_rect.bottom()))
+            bottom = float(max(content_rect.top(), content_rect.bottom()))
+            first = self._rows[self._row_at_y(top)][0]
+            last = self._rows[self._row_at_y(bottom)][-1]
         else:
             first, last = 0, self.page_count - 1
         clips = []
@@ -1863,8 +1941,8 @@ class PDFView(QAbstractScrollArea):
             # Reflow has no page-space geometry; jump to the page section.
             self.goto_page(page, center=True)
             return
-        if self.view_mode != "continuous":
-            # Show the row that contains the hit; the row is already centred.
+        if self.view_mode == "single":
+            # Show the page alone, centered in the viewport.
             self.current_page = page
             self._relayout()
             self.page_changed.emit(page)
@@ -1912,8 +1990,11 @@ class PDFView(QAbstractScrollArea):
         else:
             # Preserve current page position: calculate new scroll position
             # to keep the same page content at the same relative position.
-            if self.view_mode != "continuous":
-                new_vscroll = 0      # grid modes are centred, not scrolled
+            if self.view_mode == "single":
+                new_vscroll = 0
+            elif self._grid_scroll_mode():
+                self._center_page(self.current_page)
+                new_vscroll = self.verticalScrollBar().value()
             elif self.page_count > 0 and self.current_page < self.page_count:
                 page_top = self._page_origin(self.current_page)[1]
                 new_vscroll = int(page_top * zoom - self.viewport().height() / 2.0)
@@ -1926,7 +2007,7 @@ class PDFView(QAbstractScrollArea):
             vbar.blockSignals(True)
             vbar.setValue(new_vscroll)
             vbar.blockSignals(False)
-            if self.view_mode != "continuous":
+            if self.view_mode == "single":
                 self.horizontalScrollBar().setValue(0)
 
         self.zoom_changed.emit(self.zoom)
@@ -1998,13 +2079,15 @@ class PDFView(QAbstractScrollArea):
             self._tiles.clear()
             self._tile_grids.clear()
             self._relayout()
-            if self.view_mode == "continuous":
+            if self.view_mode == "single":
+                vbar.setValue(0)
+                hbar.setValue(0)
+            elif self.view_mode == "continuous":
                 page_top = self._page_origin(self.current_page)[1]
                 new_vscroll = int(page_top - self.viewport().height() / 2.0)
                 vbar.setValue(max(0, min(new_vscroll, vbar.maximum())))
             else:
-                vbar.setValue(0)
-                hbar.setValue(0)
+                self._center_page(self.current_page)
             self._request_visible()
             self.viewport().update()
         finally:
@@ -2092,24 +2175,23 @@ class PDFView(QAbstractScrollArea):
                 self.apply_fit()
             page = state.get("page", 0)
             page = max(0, min(page, self.page_count - 1)) if self.page_count else 0
-            if self.view_mode == "continuous":
-                # Keep the legacy order: restore the scroll offset, then set
-                # the page last so scrolling cannot overwrite it.
+            if self.view_mode == "single":
+                # Single Page is one screen per page; it has no scroll state.
+                vbar.setValue(0)
+                hbar.setValue(0)
+                self.current_page = page
+                self._relayout()
+            else:
+                # Continuous and stacked grids restore their scroll offset.
+                # Set the page last: scrolling would otherwise overwrite it.
+                self._relayout()
                 vscroll = state.get("vscroll", 0)
                 hscroll = state.get("hscroll", 0)
                 if vscroll:
                     vbar.setValue(vscroll)
                 if hscroll:
                     hbar.setValue(hscroll)
-                self._relayout()
                 self.current_page = page
-            else:
-                # Grid modes materialize only the row of the current page and
-                # have no meaningful scroll offset.
-                vbar.setValue(0)
-                hbar.setValue(0)
-                self.current_page = page
-                self._relayout()
             # Emit page_changed after all state is restored
             self.page_changed.emit(page)
             self._request_visible()
@@ -2139,9 +2221,15 @@ class PDFView(QAbstractScrollArea):
             self.page_changed.emit(index)
             self.viewport().update()
             return
-        if self.view_mode != "continuous":
+        if self.view_mode == "single":
             self.current_page = index
             self._relayout()
+            self.page_changed.emit(index)
+            self._request_visible()
+            self.viewport().update()
+            return
+        if self._grid_scroll_mode():
+            self._center_page(index)
             self.page_changed.emit(index)
             self._request_visible()
             self.viewport().update()
@@ -2156,28 +2244,26 @@ class PDFView(QAbstractScrollArea):
     def _update_current_page(self) -> None:
         if not self.page_count:
             return
-        if self.view_mode != "continuous" and not self.reflow_mode:
-            return          # grid modes: navigation sets the current page
+        if self.view_mode == "single" and not self.reflow_mode:
+            return          # Single Page sets the page explicitly
         y = self.verticalScrollBar().value() + 2
-        idx = self._page_at_y(y)
+        if not self.reflow_mode and self._grid_scroll_mode() and self._rows:
+            # Row tops are shared by all pages of a spread, so map the
+            # scroll position to the first page of the row.
+            idx = self._rows[self._row_at_y(y)][0]
+        else:
+            idx = self._page_at_y(y)
         if idx != self.current_page:
             self.current_page = idx
             self.page_changed.emit(idx)
 
     def page_step(self, direction: int) -> None:
-        if self.view_mode == "continuous" or self.reflow_mode:
-            bar = self.verticalScrollBar()
-            bar.setValue(bar.value() + direction
-                         * max(1, self.viewport().height() - 60))
-            return
-        if self.view_mode == "single":
+        if not self.reflow_mode and self.view_mode == "single":
             self.goto_page(self.current_page + direction)
             return
-        rows = self._rows_for_mode()
-        row_idx = next((k for k, row in enumerate(rows)
-                        if self.current_page in row), 0)
-        target = max(0, min(row_idx + direction, len(rows) - 1))
-        self.goto_page(rows[target][0])
+        bar = self.verticalScrollBar()
+        bar.setValue(bar.value() + direction
+                     * max(1, self.viewport().height() - 60))
 
     # ------------------------------------------------------------- events
     def scrollContentsBy(self, dx: int, dy: int) -> None:  # noqa: N802
