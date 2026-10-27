@@ -60,9 +60,10 @@ def sample_pdf(tmp_path):
 def make_session(path, password=""):
     """A read-only session over *path*; the caller must ``session.close()``."""
     doc = fitz.open(str(path))
+    authenticated = 0
     if password and doc.needs_pass:
-        doc.authenticate(password)
-    return DocumentSession(doc, str(path), password)
+        authenticated = doc.authenticate(password)
+    return DocumentSession(doc, str(path), password, authenticated)
 
 
 @pytest.fixture

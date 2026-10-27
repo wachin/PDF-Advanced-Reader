@@ -228,6 +228,9 @@ class Sidebar(QWidget):
 
     goto_page_requested = pyqtSignal(int)
     thumbnail_size_changed = pyqtSignal(int)
+    # The window owns saving: it is the one place that can explain a refusal, and
+    # a second opinion from here would only be able to say "failed".
+    save_requested = pyqtSignal()
 
     def __init__(self, session: DocumentSession, pool: RenderPool, parent=None):
         super().__init__(parent)
@@ -1061,10 +1064,5 @@ class Sidebar(QWidget):
             self.view.set_highlight_color(hex_color)
 
     def _on_save_annotations(self) -> None:
-        """Save annotations to PDF."""
-        if self.annotation_manager:
-            success = self.annotation_manager.save_to_pdf()
-            if success:
-                QMessageBox.information(self, "Save Annotations", "Annotations saved to PDF.")
-            else:
-                QMessageBox.warning(self, "Save Annotations", "Failed to save annotations.")
+        """Ask the window to save; it reports, because only it can explain why."""
+        self.save_requested.emit()

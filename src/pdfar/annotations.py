@@ -18,6 +18,7 @@ except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from .save import SaveError, save_document
 from .session import DocumentSession
 
 
@@ -137,7 +138,19 @@ class AnnotationManager(QObject):
         super().__init__(parent)
         self.session = session
         self._annotations: Dict[str, Annotation] = {}
+        # Which document the model was last materialized into, and whether the
+        # model has moved since.  Both are needed: without the generation, an
+        # undo that hands back a different document would silently save without
+        # the highlights; without the flag, a second Ctrl+S would rewrite a
+        # document whose highlights are already in it.
+        self._materialized = session.generation
+        self._pending = False
         self._load_from_pdf()
+
+    def _touch_model(self) -> None:
+        """The model no longer matches whatever document it was last written to."""
+        self._pending = True
+        self.annotations_changed.emit()
 
     @property
     def doc(self) -> fitz.Document:
@@ -193,45 +206,75 @@ class AnnotationManager(QObject):
         except Exception:
             pass  # Silently ignore load errors
 
+    def reload_from_document(self) -> None:
+        """Rebuild the model from the live document, dropping what is not in it.
+
+        Revert needs this: once the file is the truth again, a highlight that was
+        never saved must not go on living in the sidebar list.
+        """
+        self._annotations.clear()
+        self._load_from_pdf()
+        self._pending = False
+        self._materialized = self.session.generation
+        self.annotations_changed.emit()
+
+    def sync_to_document(self) -> bool:
+        """Materialize the highlights into the live document.
+
+        Returns whether the document changed, and bumps the session version when
+        it did — the change is made in place, and a reader that is not turned
+        away by a new version would paint the old content back over it.  A model
+        that has not moved and already describes this document writes nothing, so
+        saving twice costs one write.
+        """
+        if not self._pending and self._materialized == self.session.generation:
+            return False
+        changed = False
+        for page_idx in range(self.doc.page_count):
+            page = self.doc.load_page(page_idx)
+            for annot in list(page.annots() or []):
+                if annot.type[0] == fitz.PDF_ANNOT_HIGHLIGHT:
+                    page.delete_annot(annot)
+                    changed = True
+
+        for ann in self._annotations.values():
+            if ann.type == AnnotationType.HIGHLIGHT and ann.rects:
+                page = self.doc.load_page(ann.page)
+                for rect in ann.rects:
+                    x0, y0, x1, y1 = rect
+                    highlight = page.add_highlight_annot(fitz.Rect(x0, y0, x1, y1))
+                    if highlight:
+                        # Parse color
+                        color_hex = ann.color.lstrip("#")
+                        r = int(color_hex[0:2], 16) / 255.0
+                        g = int(color_hex[2:4], 16) / 255.0
+                        b = int(color_hex[4:6], 16) / 255.0
+                        highlight.set_colors(stroke=(r, g, b))
+                        highlight.set_opacity(ann.opacity)
+                        if ann.author:
+                            highlight.set_info(title=ann.author)
+                        if ann.content:
+                            highlight.set_info(content=ann.content)
+                        highlight.update()
+                        changed = True
+
+        self._pending = False
+        self._materialized = self.session.generation
+        if changed:
+            self.session.content_changed()
+        return changed
+
     def save_to_pdf(self) -> bool:
         """Save all annotations to the PDF file.
 
-        Uses incremental save to preserve the original file structure.
-        Returns True on success.
+        The write itself is F10-2's: staged, verified, incremental while the
+        document is still the file handle it came from.  A refusal is reported
+        as ``False`` here; the main window's Save command surfaces the reason.
         """
         try:
-            # Remove existing highlights first
-            for page_idx in range(self.doc.page_count):
-                page = self.doc.load_page(page_idx)
-                annots = page.annots() or []
-                for annot in annots:
-                    if annot.type[0] == fitz.PDF_ANNOT_HIGHLIGHT:
-                        page.delete_annot(annot)
-
-            # Add current highlights
-            for ann in self._annotations.values():
-                if ann.type == AnnotationType.HIGHLIGHT and ann.rects:
-                    page = self.doc.load_page(ann.page)
-                    for rect in ann.rects:
-                        x0, y0, x1, y1 = rect
-                        highlight = page.add_highlight_annot(fitz.Rect(x0, y0, x1, y1))
-                        if highlight:
-                            # Parse color
-                            color_hex = ann.color.lstrip("#")
-                            r = int(color_hex[0:2], 16) / 255.0
-                            g = int(color_hex[2:4], 16) / 255.0
-                            b = int(color_hex[4:6], 16) / 255.0
-                            highlight.set_colors(stroke=(r, g, b))
-                            highlight.set_opacity(ann.opacity)
-                            if ann.author:
-                                highlight.set_info(title=ann.author)
-                            if ann.content:
-                                highlight.set_info(content=ann.content)
-                            highlight.update()
-
-            self.doc.save(self.doc_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
-            return True
-        except Exception:
+            self.sync_to_document()
+            return save_document(self.session) is not None
+        except SaveError:
             return False
 
     def add_highlight(self, page: int, rects: List[tuple], color: str = "#FFFF00",
@@ -240,7 +283,7 @@ class AnnotationManager(QObject):
         highlight = HighlightAnnotation.from_selection(page, rects, color, author)
         self._annotations[highlight.id] = highlight
         self.annotation_added.emit(highlight)
-        self.annotations_changed.emit()
+        self._touch_model()
         return highlight
 
     def remove_annotation(self, annotation_id: str) -> bool:
@@ -248,7 +291,7 @@ class AnnotationManager(QObject):
         if annotation_id in self._annotations:
             del self._annotations[annotation_id]
             self.annotation_removed.emit(annotation_id)
-            self.annotations_changed.emit()
+            self._touch_model()
             return True
         return False
 
@@ -261,7 +304,7 @@ class AnnotationManager(QObject):
                     setattr(ann, key, value)
             ann.modified = datetime.now().isoformat()
             self.annotation_modified.emit(ann)
-            self.annotations_changed.emit()
+            self._touch_model()
             return ann
         return None
 
@@ -298,7 +341,7 @@ class AnnotationManager(QObject):
             if ann.type == AnnotationType.HIGHLIGHT:
                 ann.set_note(note_text)
                 self.annotation_modified.emit(ann)
-                self.annotations_changed.emit()
+                self._touch_model()
                 return ann
         return None
 
@@ -317,7 +360,7 @@ class AnnotationManager(QObject):
             if ann.type == AnnotationType.HIGHLIGHT:
                 ann.set_note("")
                 self.annotation_modified.emit(ann)
-                self.annotations_changed.emit()
+                self._touch_model()
                 return True
         return False
 
@@ -328,7 +371,7 @@ class AnnotationManager(QObject):
             del self._annotations[aid]
             self.annotation_removed.emit(aid)
         if ids_to_remove:
-            self.annotations_changed.emit()
+            self._touch_model()
         return len(ids_to_remove)
 
 

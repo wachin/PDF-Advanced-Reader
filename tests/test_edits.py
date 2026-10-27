@@ -64,6 +64,22 @@ class AppendPage(Edit):
 
 
 @dataclass(frozen=True)
+class DropPage(Edit):
+    """Remove a page — the structure edit F10-2 checks a rewrite really deletes."""
+
+    page: int
+
+    scope = Scope.STRUCTURE
+
+    @property
+    def label(self) -> str:
+        return f"Delete page {self.page + 1}"
+
+    def apply(self, doc: fitz.Document) -> None:
+        doc.delete_page(self.page)
+
+
+@dataclass(frozen=True)
 class HalfDoneThenFail(Edit):
     """Mutates the document it is given, then refuses to finish."""
 

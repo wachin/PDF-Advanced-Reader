@@ -20,6 +20,16 @@ from PyQt6.QtCore import QSettings
 from .session import DocumentSession
 
 
+def settings_key_for(path: str) -> str:
+    """The QSettings key holding the user bookmarks of the document at *path*.
+
+    Exposed because Save As moves a document to a new path and the bookmarks
+    have to move with it (F10-2); the key format is not something the caller
+    should have to guess.
+    """
+    return f"bookmarks/{os.path.abspath(path)}"
+
+
 @dataclass
 class Bookmark:
     """A single bookmark entry."""
@@ -80,7 +90,7 @@ class BookmarkManager:
     # ------------------------------------------------------------------ user bookmarks (persisted)
     def _settings_key(self) -> str:
         """Unique key for this document's user bookmarks."""
-        return f"bookmarks/{os.path.abspath(self.doc_path)}"
+        return settings_key_for(self.doc_path)
 
     def _load_user_bookmarks(self) -> None:
         data = self.settings.value(self._settings_key(), [])

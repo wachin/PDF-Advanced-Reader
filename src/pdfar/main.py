@@ -29,12 +29,14 @@ from PyQt6.QtWidgets import (
 )
 
 from . import APP_NAME, __version__
+from .bookmarks import settings_key_for
 from .i18n import I18n
 from .icons import asset_path as _asset_path, tinted_icon
 from .page_numbers import (
     EraseSettings, PageNumbersPanel, PageNumberSettings, erase_copy,
     erased_copy_path, numbered_copy_path, stamp_copy,
 )
+from .save import ProtectionError, SaveError, SaveReport, save_document
 from .search import (
     SearchParams, SearchWorker, compile_regex, highlight_spans, normalize_space,
 )
@@ -50,6 +52,17 @@ ZOOM_STEP_PRESETS = (0.025, 0.05, 0.075, 0.10, 0.125,
 DEFAULT_ZOOM_STEP = 0.10
 
 HIGHLIGHT_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+
+
+def view_state_key(path: str) -> str:
+    """The QSettings key under which *path*'s reading position lives.
+
+    Canonicalized because Save As has to move the entry: without one agreed
+    function, the key written at close and the key looked up at migration could
+    name the same file differently and the state would be left behind.
+    """
+    return f"viewState/{os.path.abspath(path)}"
+
 
 SEARCH_MODE_DESCRIPTIONS = (
     "AND — every word must appear on the same page.\n\n"
@@ -347,12 +360,18 @@ class MainWindow(QMainWindow):
 
         self.act_save = QAction("&Save", self)
         self.act_save.setShortcut(QKeySequence.StandardKey.Save)
-        self.act_save.setToolTip("Save document (annotations, bookmarks, etc.)")
+        self.act_save.setToolTip("Write the document back to its file")
+        self.act_save.setEnabled(False)
         self.act_save.triggered.connect(self._save_document)
 
         self.act_save_as = QAction("Save &As…", self)
         self.act_save_as.setShortcut(QKeySequence.StandardKey.SaveAs)
         self.act_save_as.triggered.connect(self._save_document_as)
+
+        self.act_revert = QAction("Revert to &Saved", self)
+        self.act_revert.setToolTip("Discard every change and reopen the file")
+        self.act_revert.setEnabled(False)
+        self.act_revert.triggered.connect(self._revert_document)
 
         self.act_print = QAction("&Print…", self)
         self.act_print.setShortcut(QKeySequence.StandardKey.Print)
@@ -553,7 +572,7 @@ class MainWindow(QMainWindow):
         self.act_next_highlight_color.triggered.connect(self._cycle_highlight_color)
 
         self.act_save_annotations = QAction("Save Annotations", self)
-        self.act_save_annotations.setToolTip("Save annotations to PDF (Ctrl+S)")
+        self.act_save_annotations.setToolTip("The same write as File ▸ Save")
         self.act_save_annotations.triggered.connect(self._save_annotations)
 
         self.act_properties = QAction("Properties", self)
@@ -603,6 +622,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.act_save)
         file_menu.addAction(self.act_save_as)
+        file_menu.addAction(self.act_revert)
         file_menu.addSeparator()
         file_menu.addAction(self.act_print)
         file_menu.addSeparator()
@@ -1080,22 +1100,81 @@ class MainWindow(QMainWindow):
                         break
 
     def _save_annotations(self) -> None:
-        """Save all annotations to the PDF file."""
-        if self.view:
-            success = self.view.save_annotations()
-            if success:
-                self.status_left.setText("Annotations saved to PDF")
-            else:
-                self.status_left.setText("Failed to save annotations")
+        """Save the highlights to the PDF file — the same write as Save."""
+        tab = self._active_tab()
+        if tab is not None and self._save_tab(tab):
+            self.status_left.setText("Annotations saved to PDF")
 
     def _save_document(self) -> None:
-        """Save the document (annotations, bookmarks, etc.)"""
-        if self.view:
-            success = self.view.save_annotations()
-            if success:
-                self.status_left.setText("Document saved")
-            else:
-                self.status_left.setText("Failed to save document")
+        """Ctrl+S: write the document back to the file it came from."""
+        tab = self._active_tab()
+        if tab is not None:
+            self._save_tab(tab)
+
+    def _save_tab(self, tab: DocumentTab) -> bool:
+        """Write *tab*'s document back to its own file."""
+        return self._write_tab(tab)
+
+    def _write_tab(self, tab: DocumentTab, path: Optional[str] = None, *,
+                   full: bool = False, before: str = "") -> bool:
+        """The one place a document reaches the disk.
+
+        Highlights are materialized into the document first: Ctrl+S has always
+        meant "save my highlights", and the writer only saves what the document
+        itself holds.
+        """
+        session = tab.view.session
+        tab.view.annotation_manager.sync_to_document()
+        title = "Save" if path is None else "Save As"
+        try:
+            report = save_document(session, path, full=full)
+        except ProtectionError as exc:
+            return self._save_with_new_owner_password(tab, str(exc), path, full, before)
+        except SaveError as exc:
+            QMessageBox.critical(self, title, str(exc))
+            self._on_document_changed(tab)
+            return False
+        return self._finish_save(tab, report, before)
+
+    def _save_with_new_owner_password(self, tab: DocumentTab, reason: str,
+                                      path: Optional[str], full: bool,
+                                      before: str) -> bool:
+        """Ask before writing a copy whose protection is weaker than the original.
+
+        PDFAR never saw the password that guards changes to this file, so it
+        cannot rebuild one; replacing it with a fresh random secret is the user's
+        decision, not this function's.
+        """
+        answer = QMessageBox.question(
+            self, "Protected document",
+            f"{reason}\n\nSave it with a new owner password?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Save:
+            return False
+        try:
+            report = save_document(tab.view.session, path, full=full,
+                                   allow_weakened=True)
+        except SaveError as exc:
+            QMessageBox.critical(self, "Save", str(exc))
+            self._on_document_changed(tab)
+            return False
+        return self._finish_save(tab, report, before)
+
+    def _finish_save(self, tab: DocumentTab, report: Optional[SaveReport],
+                     before: str = "") -> bool:
+        """One place decides what a completed save says and what it clears."""
+        if report is not None and before:
+            self._migrate_document_state(before, report.path)
+        self._on_document_changed(tab)
+        if report is None:
+            self.status_left.setText("Nothing to save")
+            return True
+        size = report.size / 1024
+        how = "appended to" if report.incremental else "written"
+        self.status_left.setText(
+            f"{os.path.basename(report.path)} {how} — {size:.0f} KB")
+        return True
 
     def _save_document_as(self) -> None:
         """Save the document to a new location."""
@@ -1104,24 +1183,70 @@ class MainWindow(QMainWindow):
             self._save_tab_as(tab)
 
     def _save_tab_as(self, tab: DocumentTab) -> bool:
-        """Write *tab*'s document to a file the user picks.
+        """Write *tab*'s document to a file the user picks, and move its state.
 
-        F10-2 replaces the bare ``doc.save`` here with the atomic, verified
-        write.  The answer matters now: it decides whether the unsaved-changes
-        mark may be cleared.
+        Save As is always a full rewrite: a copy that still carried the previous
+        revision in an appended trailer would keep deleted content in a file the
+        user believes they have cleaned.  ``before`` is the path as it was on
+        entry, because the write retargets the session and the state keys have to
+        be moved from the name the document used to have.
         """
         path, _ = QFileDialog.getSaveFileName(self, "Save Document As", tab.doc_path,
                                               "PDF Files (*.pdf)")
         if not path:
             return False
-        try:
-            tab.view.doc.save(path)
-        except Exception as exc:
-            QMessageBox.critical(self, "Save As", f"Could not save document:\n{exc}")
+        return self._write_tab(tab, path, full=True, before=tab.doc_path)
+
+    def _migrate_document_state(self, old_path: str, new_path: str) -> None:
+        """Carry the per-document settings over a rename.
+
+        Both the saved view state and the user bookmarks are keyed by path, so
+        without this the document silently loses its reading position and its
+        bookmarks the first time it is saved under a new name.
+        """
+        if not old_path:
+            return
+        pairs = [(view_state_key(old_path), view_state_key(new_path)),
+                 (settings_key_for(old_path), settings_key_for(new_path))]
+        for old_key, new_key in pairs:
+            if old_key == new_key or not self.settings.contains(old_key):
+                continue
+            self.settings.setValue(new_key, self.settings.value(old_key))
+            self.settings.remove(old_key)
+
+    def _revert_document(self) -> None:
+        """Revert the current document to the file on disk."""
+        tab = self._active_tab()
+        if tab is not None:
+            self._revert_tab(tab)
+
+    def _revert_tab(self, tab: DocumentTab) -> bool:
+        """Discard every unsaved change and read the file again."""
+        session = tab.view.session
+        if not tab.dirty:
+            self.status_left.setText("There are no unsaved changes to revert")
+            return True
+        lost = len(session.history)
+        answer = QMessageBox.question(
+            self, "Revert document",
+            f"Discard the changes in “{tab.title}” and reopen the file as it is "
+            f"on disk?\n{lost} change{'s' if lost != 1 else ''} will be lost.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
             return False
-        tab.view.session.mark_saved(path)
+        try:
+            _version, scope = session.revert()
+        except SaveError as exc:
+            QMessageBox.critical(self, "Revert", str(exc))
+            return False
+        tab.view.invalidate(scope)
+        # The file is the authority now, so the highlights the user never saved
+        # go away with it; leaving them in the list would put them back on the
+        # next Save and revert would have undone nothing.
+        tab.view.annotation_manager.reload_from_document()
         self._on_document_changed(tab)
-        self.status_left.setText(f"Document saved to {path}")
+        self.status_left.setText(f"Reverted to the file on disk: {session.path}")
         return True
 
     def _show_page_numbers(self) -> None:
@@ -2026,6 +2151,7 @@ class MainWindow(QMainWindow):
         tab.view.content_changed.connect(tab.sidebar.invalidate_thumbnails)
         tab.sidebar.goto_page_requested.connect(self._goto)
         tab.sidebar.thumbnail_size_changed.connect(self._on_thumbnail_size_changed)
+        tab.sidebar.save_requested.connect(self._save_annotations)
         # Connect annotation manager to sidebar
         tab.sidebar.set_annotation_manager(tab.view.annotation_manager)
         self._connected_tab = tab
@@ -2045,6 +2171,7 @@ class MainWindow(QMainWindow):
             tab.view.content_changed.disconnect(tab.sidebar.invalidate_thumbnails)
             tab.sidebar.goto_page_requested.disconnect(self._goto)
             tab.sidebar.thumbnail_size_changed.disconnect(self._on_thumbnail_size_changed)
+            tab.sidebar.save_requested.disconnect(self._save_annotations)
         except TypeError:
             pass
         tab.view.clear_numbering_preview()
@@ -2119,7 +2246,8 @@ class MainWindow(QMainWindow):
     def _refresh_history_actions(self) -> None:
         """Enable Undo/Redo and name them after the step they would perform."""
         tab = self._active_tab()
-        history = tab.view.session.history if tab is not None else None
+        session = tab.view.session if tab is not None else None
+        history = session.history if session is not None else None
         for action, verb, label in (
             (self.act_undo, "&Undo",
              history.undo_label if history is not None else None),
@@ -2132,6 +2260,13 @@ class MainWindow(QMainWindow):
             action.setEnabled(label is not None)
             # A label is document text: an "&" in it must not become a mnemonic.
             action.setText(f"{verb} {label.replace('&', '&&')}" if label else verb)
+        # Not gated on dirty, unlike Revert: highlights the user just made live in
+        # the annotation manager and only reach the document when Save syncs them,
+        # so "there is nothing to save" is not knowable here until F10-3 routes
+        # annotations through the session.  Save reports it instead.
+        self.act_save.setEnabled(tab is not None)
+        self.act_save_as.setEnabled(tab is not None)
+        self.act_revert.setEnabled(session is not None and session.dirty)
 
     def _undo_edit(self) -> None:
         tab = self._active_tab()
@@ -2146,9 +2281,10 @@ class MainWindow(QMainWindow):
     def _confirm_close(self, tab: DocumentTab) -> bool:
         """Ask before throwing away edits that are not in any file.
 
-        ``Save`` here means Save As: F10-2 is the save framework that makes an
-        in-place save safe, so until it exists a plain "Save" could not write the
-        edited bytes without pretending to.
+        ``Save`` writes to the document's own file, which is what the user is
+        being promised: since F10-2 a close no longer has to divert through a
+        file chooser to be honest about where the bytes go.  A refused save keeps
+        the tab open — losing the work here would be the whole point of asking.
         """
         if not tab.dirty:
             return True
@@ -2163,7 +2299,7 @@ class MainWindow(QMainWindow):
         if answer == QMessageBox.StandardButton.Cancel:
             return False
         if answer == QMessageBox.StandardButton.Save:
-            return self._save_tab_as(tab)
+            return self._save_tab(tab)
         return True
 
     def _confirm_discard_all(self) -> bool:
@@ -2179,8 +2315,7 @@ class MainWindow(QMainWindow):
         if not tab or not tab.view:
             return
         state = tab.view.get_state()
-        key = f"viewState/{tab.doc_path}"
-        self.settings.setValue(key, state)
+        self.settings.setValue(view_state_key(tab.doc_path), state)
 
     def _restore_tab_state(self, view: 'PDFView', doc_path: str, deferred: bool = True) -> None:
         """Restore the view state for a document.
@@ -2191,7 +2326,7 @@ class MainWindow(QMainWindow):
             deferred: If True, defer restoration until after initial layout
                      (use True for initial open, False for tab switching)
         """
-        key = f"viewState/{doc_path}"
+        key = view_state_key(doc_path)
         state = self.settings.value(key)
         if state:
             if deferred:

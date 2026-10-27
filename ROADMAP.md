@@ -903,8 +903,9 @@ PDFAR must be local-first and privacy-first.
 
 # F10 — PDF EDITING (MASTER PLAN)
 
-Phase status: **[~] Under way.** F10-0 (document session) and F10-1 (edit
-framework) are implemented; the next task is **F10-2**.
+Phase status: **[~] Under way.** F10-0 (document session), F10-1 (edit
+framework) and F10-2 (save, save as, revert) are implemented; the next task is
+**F10-3**.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -914,6 +915,12 @@ notably busy machine: F10-1 open 2.48 / 2.14 s, first page 0.24 / 0.25 s, jump
 0.34 / 0.41, 0.74 / 0.56, 3.77 / 3.36, 495 / 513 MB. Every F10-1 figure sits
 inside the F10-0 spread, so the extra `Document` clone and history bookkeeping
 cost nothing measurable.
+
+*Measured on F10-2:* GS262 open 2.12 s, first page 0.25 s, jump 0.70 s, zoom
+sequence 2.81 s, peak RSS 508 MB — the same shape as F10-1, because saving is not
+on the read path. Recording the encryption at open costs two attribute reads
+(`doc.permissions`, `doc.metadata`) and the verification render only happens on a
+full rewrite, which is a command the user asked for.
 
 This is the umbrella for every capability that changes a document. F6 (page
 manipulation), F7-3 (true redaction) and F8-1 (content editing) are now
@@ -992,9 +999,9 @@ correct way to share state between them is a byte snapshot pinned to a version.
       (`session.dirty` is `version != saved_version`; the title carries `[*]`,
       the tab gains a `•` prefix)
 - [x] Confirm before discarding: closing a tab or the window with unsaved changes
-      (`_confirm_close` offers Save / Discard / Cancel — Save means Save As until
-      F10-2 lands; `closeEvent` asks about every dirty tab before anything is
-      torn down)
+      (`_confirm_close` offers Save / Discard / Cancel — Save writes the
+      document's own file since F10-2; `closeEvent` asks about every dirty tab
+      before anything is torn down)
 - [x] A document `generation` so stale UI references are rejected rather than
       applied to the wrong object (bumped by `_adopt()` only — an in-place change
       keeps the same `Document` object, so it must not look like a new one)
@@ -1016,35 +1023,73 @@ bound is what keeps that cost finite.
 
 - After the first adoption the document is stream-backed, so
   `doc.can_save_incrementally()` is False; `save_to_pdf()`'s incremental path in
-  `Highlights` therefore returns False from that point on (harmless today, and
-  F10-3 routes annotations through the framework anyway).
+  `Highlights` therefore returns False from that point on. ✅ Handled: the
+  predicate is `doc.name` + `doc.is_dirty` + `can_save_incrementally()`, and a
+  stream-backed copy takes the verified full rewrite instead.
 - `tobytes()` on an authenticated encrypted document yields **decrypted** bytes,
   so the session copy of an encrypted PDF is unencrypted in memory after the
-  first edit — saving it would silently strip the password.
+  first edit — saving it would silently strip the password. ✅ Handled:
+  `Encryption.capture()` records method, permissions and the typed password at
+  open, and every rewrite re-applies them (`save.py`).
 - Save As retargets `session.path`, but `viewState/<path>` and `bookmarks/<path>`
-  in QSettings are keyed by the old path and are not migrated yet.
+  in QSettings are keyed by the old path and are not migrated yet. ✅ Handled:
+  `_migrate_document_state()` moves both, through the new `view_state_key()` and
+  `settings_key_for()` accessors.
 
-## F10-2 Save, Save As, Revert — [ ]
+## F10-2 Save, Save As, Revert — [x]
 
-- [ ] Atomic write: temp file in the same directory, flush, `fsync`, then
-      `os.replace` (the pattern already exists in `page_numbers.py:525-556`,
-      minus the `fsync`)
-- [ ] Incremental save when `doc.can_save_incrementally()`, so unknown objects
-      and signatures survive
-- [ ] Full rewrite for Save As, so deleted content is not left in an older
-      revision
-- [ ] Verify before replacing the file: reopen the produced bytes and check the
-      page count and a render
-- [ ] Refuse, with an actionable message: read-only file, insufficient
-      permissions, signed document that would need a rewrite, missing space
-- [ ] Re-apply the original encryption on save: after the first edit the session
-      copy holds **decrypted** bytes (`tobytes()` of an authenticated document),
-      so saving without `encrypt` would silently remove the user's password
-- [ ] Revert to saved
-- [ ] Per-document state migration on Save As (`viewState/<path>` and
-      `bookmarks/<path>` are keyed by path today and would silently orphan)
-- [ ] Tests: crash-safety of the staging write, permissions, revert, Save As
-      migration
+- [x] Atomic write: temp file in the same directory, write, `flush`, `os.fsync`,
+      then `os.replace` (`save.staged_write`; the pattern already existed in
+      `page_numbers.py:525-556` without the `fsync`, and it also carries the
+      target's file mode over, which `mkstemp` would otherwise reset to 0600)
+- [x] Incremental save when the document is still the file handle it came from,
+      so unknown objects and signatures survive (`_can_append`; `doc.name` +
+      `doc.is_dirty` + `can_save_incrementally()`, because the last one alone
+      lies for a stream-backed copy)
+- [x] Full rewrite for Save As, so deleted content is not left in an older
+      revision (`full=True`, `garbage=3`: a measured page deletion took the file
+      from 3592 to 3049 bytes and the xref table from 29 to 21 entries)
+- [x] Verify before replacing the file: reopen the produced bytes, check the page
+      count and render page 0 (`verify_bytes` / `verify_file`; MuPDF *repairs*
+      truncated input, so the page count and "is this a PDF at all" are the
+      failures worth testing for)
+- [x] Refuse, with an actionable message: read-only file, directory that cannot
+      be written, a file changed on disk by someone else, and a produced buffer
+      that does not read back (`SaveError`; `os.access(target, W_OK)` is needed
+      explicitly because `os.replace` only needs the *directory* to be writable)
+- [x] Re-apply the original encryption on save, including the case where PDFAR
+      only ever had the owner password: a rewrite cannot rebuild a secret it was
+      never given, so it asks (`ProtectionError`, and `allow_weakened=True`
+      writes a copy with a fresh random owner password and the original
+      permissions instead of silently dropping both)
+- [x] Revert to saved (`DocumentSession.revert()` reopens the file, adopts it and
+      clears the history; `AnnotationManager.reload_from_document()` drops the
+      highlights that never reached the file, which the model alone still held)
+- [x] Per-document state migration on Save As
+- [x] Tests: 33 in `tests/test_save.py` for the disk-facing logic, 19 in
+      `tests/test_save_ui.py` for the commands, the dialogs and the migration
+- [ ] Refuse a **signed** document whose save would break the signature. Not
+      done: nothing in PDFAR reads signatures yet, so the check would be a new
+      per-page annotation scan invented for this one message. `save.py` is the
+      place for it; it belongs with whichever task first cares about signatures.
+
+Why this shape: the two rules a PDF editor cannot bargain with are that a file is
+never half-written and never renamed until the replacement has been read back.
+Everything else is a consequence — incremental saving is the exception to the
+second rule precisely because it does not rename anything.
+
+### Consequences F10-3 must handle (found here)
+
+- Highlights live in `AnnotationManager`'s model and only reach the document when
+  something syncs them, so `session.dirty` is False while the user has unsaved
+  highlights. Save is therefore **not** gated on the dirty mark (it would switch
+  Ctrl+S off on exactly the document the user is working on) and the
+  close-the-tab prompt cannot warn about them. Routing annotation changes through
+  `Edit` removes the whole class of problem.
+- `sync_to_document()` now skips its work while the model matches the document it
+  was last written to, keyed on `session.generation` — otherwise a second Ctrl+S
+  rewrote the whole file, and an undo that handed back a different `Document`
+  would have saved without the highlights.
 
 ## F10-3 Finish the annotation system (P4) — [~]
 
@@ -1161,8 +1206,12 @@ Document session (`version`, workers off the disk)
 F10-1 — done
 Edit framework (copy-and-adopt, undo, dirty state)
 
-F10-2
+F10-2 — done
 Save, Save As, Revert (atomic, verified, incremental when possible)
+
+F10-3
+Finish the annotation system: notes as real annotations, and annotation changes
+routed through F10-1 so they undo and mark dirty
 
 Goal:
 
@@ -1853,6 +1902,80 @@ regenerates the second `/ID` element, so "unchanged" cannot be proven by bytes),
 an edited encrypted document is decrypted in memory, the first adoption makes
 `can_save_incrementally()` False, and Save As orphans the path-keyed
 `viewState/` and `bookmarks/` settings.
+
+### F10-2 Save, Save As, Revert — [x] Implemented
+
+**Completed**: 2026-10-27
+
+**What landed**: a document reaches the disk in exactly one way. `save.py` stages
+the bytes in a temporary file beside the target, `flush` + `os.fsync` them, reads
+them back and proves the page count and a render, and only then `os.replace`s the
+target — so the file the user has is either the old one or the new one, never a
+half of each. Every refusal is a `SaveError` with a sentence the user can act on.
+
+**Files changed**:
+
+- `src/pdfar/save.py` (new) — `staged_write`, `verify_bytes` / `verify_file`,
+  `Encryption` (+ `capture`, `save_kwargs`, `reproducible`, `is_owner_access`),
+  `SaveReport`, `SaveError`, `ProtectionError`, `save_document`.
+- `src/pdfar/session.py` — `encryption` captured at open (the only surviving
+  record of it, since `tobytes()` of an authenticated document is *decrypted*),
+  `revert()`, `require_saved_file_unchanged()`, and a `_disk_stamp` refreshed by
+  `mark_saved()`.
+- `src/pdfar/annotations.py` — `sync_to_document()` (materialize the highlights,
+  skip the work when the model already matches this document) and
+  `reload_from_document()` (what Revert needs).
+- `src/pdfar/bookmarks.py` / `main.py` — `settings_key_for()` and
+  `view_state_key()` so a rename can move what it is keyed by.
+- `src/pdfar/sidebar.py` — the Highlights tab's Save button now emits
+  `save_requested` instead of writing on its own and guessing at the result.
+- `src/pdfar/main.py` — File ▸ Save / Save As… / Revert to Saved, one
+  `_write_tab()` funnel, the protection prompt, the state migration, and the
+  close dialog's Save finally meaning Save.
+- `src/pdfar/viewer.py` — passes the `authenticated` result of the open-time
+  password to the session, which is what decides whether a password can be
+  re-applied later.
+
+**Incremental is the exception, and the predicate has to be honest.** Appending
+touches no inode, so there is nothing to replace and nothing to verify by rename;
+it is chosen only while the document is still the file handle it came from.
+`can_save_incrementally()` alone is not that test — it stays True for a
+stream-backed clone and the save then raises — so `_can_append` also requires
+`doc.name` to be the target and `doc.is_dirty` to be set.
+
+**A password PDFAR never saw cannot be rebuilt.** An owner-only file opens
+without asking (`needs_pass == 0`), so the session holds the *method* and the
+*permissions* but no secret. Rewriting it therefore raises `ProtectionError` and
+the user chooses: don't save, or save a copy with a fresh random owner password
+and the original permissions. Silently dropping the encryption is not offered.
+`owner_pw == user_pw` is also refused on the way in, because MuPDF answers such an
+authentication with 6 and resets the permissions to full.
+
+**Measured**: GS262 (540 pages) open 2.12 s, first page 0.25 s, distant jump
+0.70 s, zoom sequence 2.81 s, peak RSS 508 MB — unchanged from F10-1, since
+saving is not on the read path. A full rewrite with `garbage=3` after deleting a
+page took the file from 3592 to 3049 bytes and the xref table from 29 entries to
+21; the same document saved incrementally kept all 29 and grew.
+
+**Verified by eye** (headless, on a scratch document): the tab shows
+`• f10_visual.pdf` and the title `f10_visual.pdf[*]` with Revert enabled; after
+Ctrl+S the bullet is gone, Revert greys out and the status bar reads
+"f10_visual.pdf written — 3 KB"; a second Ctrl+S answers "Nothing to save" and
+leaves the file's mtime alone; Save As retargets the document, writes the copy,
+leaves the original untouched and moves both `viewState/` and `bookmarks/`
+entries; Revert restores the file's content, empties the undo history and drops
+the highlight that was never saved while keeping the one that was; and a
+read-only target reports "…is read-only. Use Save As to keep a copy" with the
+edit still in memory and still marked dirty.
+
+**Tests**: 468 passed (was 416) — `tests/test_save.py` (33) for the disk-facing
+logic and `tests/test_save_ui.py` (19) for the commands, the dialogs and the
+migration. Three consecutive full runs.
+
+**Found here, left open**: a signed document whose save would break the
+signature is not detected (nothing in PDFAR reads signatures yet), and
+highlights are still invisible to `session.dirty`, which is why Save is not
+gated on it — both are recorded under F10-3.
 
 ---
 

@@ -11,7 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pymupdf as fitz
 import pytest
-from PyQt6.QtWidgets import QFileDialog, QMessageBox
+from PyQt6.QtWidgets import QMessageBox
 
 from conftest import build_sample_pdf
 from pdfar.main import MainWindow
@@ -44,9 +44,13 @@ def _answer(monkeypatch, button):
                         staticmethod(lambda *a, **k: button))
 
 
-def _save_to(monkeypatch, path):
-    monkeypatch.setattr(QFileDialog, "getSaveFileName",
-                        staticmethod(lambda *a, **k: (str(path), "PDF Files (*.pdf)")))
+def _silent(monkeypatch):
+    """Swallow the message boxes a modal test run must never really show."""
+    seen = []
+    for name in ("critical", "warning", "information"):
+        monkeypatch.setattr(QMessageBox, name,
+                            staticmethod(lambda *a, **k: seen.append(a[2])))
+    return seen
 
 
 # ------------------------------------------------------------------ indicators
@@ -147,39 +151,42 @@ def test_discarding_closes_and_the_work_is_gone(qapp, win, open_tab, monkeypatch
         assert "DROP ME" not in on_disk.load_page(0).get_text()
 
 
-def test_the_dialog_offers_to_save_and_a_save_clears_the_mark(qapp, win, open_tab,
-                                                             monkeypatch, tmp_path):
-    target = tmp_path / "kept.pdf"
+def test_the_dialog_saves_in_place_and_a_save_clears_the_mark(qapp, win, open_tab,
+                                                             monkeypatch):
+    """Since F10-2 the dialog's Save means Save: the file it names is the answer."""
     _answer(monkeypatch, QMessageBox.StandardButton.Save)
-    _save_to(monkeypatch, target)
+    _silent(monkeypatch)
+    path = open_tab.doc_path
     open_tab.view.apply_edit(AddText(0, "SAVED"))
     qapp.processEvents()
 
     assert win._close_tab(0) is True               # saving succeeded, so close
     assert win.tabs.count() == 0
-    with fitz.open(str(target)) as saved:
+    with fitz.open(path) as saved:
         assert "SAVED" in saved.load_page(0).get_text()
 
 
 def test_a_refused_save_does_not_close(qapp, win, open_tab, monkeypatch):
-    """Back out of the file chooser and the document stays open, still dirty."""
+    """A write that fails must keep the tab open with its work and its mark."""
     _answer(monkeypatch, QMessageBox.StandardButton.Save)
-    monkeypatch.setattr(QFileDialog, "getSaveFileName",
-                        staticmethod(lambda *a, **k: ("", "")))
+    seen = _silent(monkeypatch)
     open_tab.view.apply_edit(AddText(0, "UNSAVED"))
     qapp.processEvents()
+    os.chmod(open_tab.doc_path, 0o444)
+    try:
+        assert win._close_tab(0) is False
+    finally:
+        os.chmod(open_tab.doc_path, 0o644)
 
-    assert win._close_tab(0) is False
     assert win.tabs.count() == 1
     assert open_tab.dirty is True
+    assert seen, "the user must be told why nothing was saved"
 
 
-def test_saving_through_the_dialog_clears_the_mark(qapp, win, open_tab, monkeypatch,
-                                                  tmp_path):
-    """Save As writes the edited bytes, retargets the session and cleans up."""
-    target = str(tmp_path / "saved.pdf")
+def test_saving_through_the_dialog_clears_the_mark(qapp, win, open_tab, monkeypatch):
+    """The dialog's write retargets nothing: the document keeps its own file."""
     _answer(monkeypatch, QMessageBox.StandardButton.Save)
-    _save_to(monkeypatch, target)
+    _silent(monkeypatch)
     original = open_tab.doc_path
     open_tab.view.apply_edit(AddText(0, "IN THE FILE"))
     qapp.processEvents()
@@ -188,12 +195,10 @@ def test_saving_through_the_dialog_clears_the_mark(qapp, win, open_tab, monkeypa
     assert win._confirm_discard_all() is True
     assert open_tab.dirty is False
     assert win.isWindowModified() is False
-    assert win.tabs.tabText(0) == os.path.basename(target)
-    assert open_tab.doc_path == target
-    with fitz.open(target) as doc:
+    assert win.tabs.tabText(0) == open_tab.title
+    assert open_tab.doc_path == original
+    with fitz.open(original) as doc:
         assert "IN THE FILE" in doc.load_page(0).get_text()
-    with fitz.open(original) as untouched:
-        assert "IN THE FILE" not in untouched.load_page(0).get_text()
 
 
 def test_the_window_refuses_to_close_on_cancel(qapp, win, open_tab, monkeypatch):

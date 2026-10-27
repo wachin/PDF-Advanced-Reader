@@ -149,11 +149,13 @@ class PDFView(QAbstractScrollArea):
     def __init__(self, doc_path: str, parent=None, password: str = ""):
         super().__init__(parent)
         doc = fitz.open(doc_path)
+        authenticated = 0
         if doc.needs_pass:
-            if not password or not doc.authenticate(password):
+            authenticated = doc.authenticate(password) if password else 0
+            if not authenticated:
                 doc.close()
                 raise ValueError("encrypted")
-        self.session = DocumentSession(doc, doc_path, password)
+        self.session = DocumentSession(doc, doc_path, password, authenticated)
         self._invalidated_version = self.session.version
 
         self.page_count = doc.page_count
