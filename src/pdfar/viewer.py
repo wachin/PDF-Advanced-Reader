@@ -722,6 +722,20 @@ class PDFView(QAbstractScrollArea):
         self._apply_tool_cursor()
         self.viewport().update()
 
+    def set_ink_color(self, color: str) -> None:
+        """Choose the colour the pen writes into the annotation's ``/C``.
+
+        The stroke in progress is painted from these two attributes, so a
+        colour chosen mid-drag changes the preview with it.
+        """
+        self.ink_color = color
+        self.viewport().update()
+
+    def set_ink_width(self, width: float) -> None:
+        """Choose the thickness the pen writes into the annotation's ``/BS``."""
+        self.ink_width = float(width)
+        self.viewport().update()
+
     def _apply_tool_cursor(self) -> None:
         """Show the cursor for the active tool unless numbering overrides it."""
         if self._numbering_preview is not None:

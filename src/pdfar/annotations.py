@@ -47,6 +47,20 @@ INK_WIDTH = 2.0
 #: highlight — which sits *under* the text — it starts out opaque and dark.
 INK_COLOR = "#000000"
 
+#: The pen's palette.  These are readable inks rather than the highlight
+#: pastels: a stroke is meant to be looked at, not looked through.
+INK_COLORS = [
+    ("Black", INK_COLOR),
+    ("Red", "#D32F2F"),
+    ("Blue", "#1565C0"),
+    ("Green", "#2E7D32"),
+    ("Orange", "#EF6C00"),
+    ("Purple", "#6A1B9A"),
+]
+
+#: The thicknesses the pen offers, in PDF points.
+INK_WIDTHS = (1.0, 2.0, 4.0, 8.0)
+
 #: What a damaged annotation can raise while the list is being read.  MuPDF
 #: signals its failures through these; asking for less than ``Exception`` means a
 #: mistake in :func:`_highlight_model` still surfaces instead of quietly

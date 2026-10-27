@@ -1227,12 +1227,20 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       unfinished stroke. The pen is a page tool, so reflow disables it with
       Area and Table. Colour and thickness are view attributes with the
       defaults from `annotations.py`, not yet a picker — that is F10-3k.)
-- [ ] Pen colour and thickness: a picker for both, and the stroke previewed in
-      the chosen colour while drawing (**F10-3k, next**). The view already
-      holds `ink_color`/`ink_width` and `AddInk` already writes both; nothing
-      in the interface can set them yet.
+- [x] Pen colour and thickness: a picker for both, and the stroke previewed in
+      the chosen colour while drawing (**F10-3k.** The pen's controls sit in the
+      toolbar beside the tool and appear only while it is active: a pencil
+      swatch that opens the ink palette — Black, Red, Blue, Green, Orange,
+      Purple — plus "Custom…" for a colour dialog, and a 1/2/4/8 pt combo. Both
+      are viewer state on the active tab, so each document keeps its own pen,
+      and neither dirties the file: the choice is written into an annotation's
+      `/C` and `/BS` only when a stroke is committed. The preview paints from
+      the same two attributes, so a style picked mid-drag recolours the line
+      under the pointer.)
 - [ ] Shapes: rectangle, ellipse, line, arrow, polygon (`/Square`, `/Circle`,
-      `/Line`, `/Polygon`)
+      `/Line`, `/Polygon`) (**F10-3l, next**). The tool modes and page-space
+      capture F10-3j built are half of it; the edits and their geometry are
+      the other half.
 - [ ] Stamps, including the standard pre-defined rubber-stamp images
 - [ ] Measurement annotations (`/Projection`), with the scale they are drawn in
 - [ ] Appearance streams, so other readers show the same thing without
@@ -1352,11 +1360,11 @@ annotation in the document (F10-3d), right-clicking a page is how you place one
 (F10-3e), a comment row in the panel jumps to the comment it names (F10-3f), a
 highlight lands on its words whatever the view rotation (F10-3g), the
 annotation list re-reads only the pages an edit wrote to (F10-3h), a
-freehand drawing is a real `/Ink` annotation in the document (F10-3i), and the
-pen tool draws one where the pointer is, under any rotation (F10-3j).
-Next, in order: the pen's colour and thickness pickers (F10-3k), the rest of
-the kinds (shapes, stamps, measurement), appearance streams so other readers
-show what PDFAR wrote, and XFDF import/export.
+freehand drawing is a real `/Ink` annotation in the document (F10-3i), the pen
+tool draws one where the pointer is, under any rotation (F10-3j), and the pen's
+colour and thickness come from pickers beside the tool (F10-3k).
+Next, in order: shapes (F10-3l), stamps, measurement, appearance streams so
+other readers show what PDFAR wrote, and XFDF import/export.
 
 Goal:
 
@@ -2742,6 +2750,66 @@ renderer repainting what the viewport shows.
 `view.ink_width` exist and `AddInk` writes both, but nothing in the interface
 sets them, so the pen draws the document default (black, 2 pt) for now — that
 is F10-3k.
+
+---
+
+### F10-3k The pen's colour and thickness are picked, not fixed — [x] Implemented
+
+**Completed**: 2026-10-27
+
+**What landed**: two controls in the toolbar, visible only while Freehand is the
+active tool. A pencil swatch tinted in the chosen ink opens the palette
+(`INK_COLORS`: black, red, blue, green, orange, purple) and a "Custom…" entry
+for anything else; a 1/2/4/8 pt combo picks the thickness (`INK_WIDTHS`). Both
+set `view.ink_color` / `view.ink_width`, which `_paint_stroke` already read and
+`_commit_stroke` already passed to `AddInk`, so the pickers add no new path
+into the document.
+
+**Per tab, and not an edit.** The controls mirror the active view on every
+`_update_tool_actions` (tab switch, theme change, reflow), so each document
+keeps its own pen. Choosing a style writes two attributes and a repaint
+request: no history step, no version bump, no `dirty`. The annotation gets
+`/C` and `/BS` at commit time, which is what makes the style survive save and
+reopen and show in other readers.
+
+**One UI trap.** Hiding the widget was not enough: `QToolBar` re-shows the
+widgets it owns when it lays out, so the options came back with the text tool.
+The hide belongs on the `QWidgetAction` that owns the widget
+(`pen_action.setVisible(…)`). The controls sit after the page-view button,
+which keeps the reflow/explore/tools/view-mode group the earlier toolbar
+commit established contiguous.
+
+**Files changed**: `src/pdfar/annotations.py` (`INK_COLORS`, `INK_WIDTHS`),
+`src/pdfar/viewer.py` (`set_ink_color`, `set_ink_width`), `src/pdfar/main.py`
+(the options widget, palette menu, custom colour, width combo, sync/show
+logic), `tests/test_pen_options.py`.
+
+**Verified by eye** (headless): the options are absent with the text tool and
+appear with Freehand; Red at 4 pt draws a stroke whose `/C` is `D32F2F` and
+whose `/BS` is 4.0, with 7.0 % of its box red on the page; a custom `#00695C`
+at 1 pt draws a second stroke matching its tooltip and the file; save and
+reopen returns both strokes with their colours and widths. Screenshots
+`/tmp/f103k_ui.png`, `/tmp/f103k_red.png`, `/tmp/f103k_custom.png`.
+
+**Tests**: 630 passed (was 618) — `tests/test_pen_options.py` (12): the
+options hide with the tool and on close and show only with Freehand; the
+palette is the ink palette plus Custom; a preset colour and the width combo set
+the view, with exactly one palette entry checked; the dialog supplies a custom
+colour and a cancelled dialog changes nothing; a Blue 4 pt stroke lands in
+`/C` and `/BS`; the live preview is painted in the chosen colour; a style
+choice is not an edit (version, dirty and history unchanged); the highlight
+colour is untouched; and two tabs keep their own pens. Three consecutive full
+runs.
+
+**Performance on the 540-page book**: 1000 style choices take 28 ms — 0.03 ms
+each, two attribute writes and a coalesced repaint — because there is no
+document work in a picker. A red 8 pt stroke commits in 103 ms against 133 ms
+for the black 2 pt one, the F10-3j `AddInk` cost with run-to-run noise on top;
+colour and width do not change what the edit does.
+
+**What is not here**: a pen style that survives a restart. Each document opens
+with black at 2 pt; the tab state `QSettings` stores does not include the pen
+yet.
 
 ---
 

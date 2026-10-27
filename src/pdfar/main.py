@@ -16,19 +16,22 @@ import time
 
 from PyQt6.QtCore import QEvent, QObject, QPoint, QSettings, QSize, QThread, QTimer, Qt
 from PyQt6.QtGui import (
-    QAction, QActionGroup, QCloseEvent, QDragEnterEvent, QDropEvent, QIcon,
-    QKeySequence, QPainter, QPalette, QPixmap, QShortcut, QTextDocument,
+    QAction, QActionGroup, QCloseEvent, QColor, QDragEnterEvent,
+    QDropEvent, QIcon, QKeySequence, QPainter, QPalette, QPixmap, QShortcut,
+    QTextDocument,
 )
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog,
-    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSpinBox,
-    QStatusBar, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
-    QTabWidget, QToolBar, QToolButton, QToolTip, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QColorDialog, QComboBox, QDockWidget,
+    QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar,
+    QPushButton, QSpinBox, QStatusBar, QStyle, QStyledItemDelegate,
+    QStyleOptionViewItem, QTabWidget, QToolBar, QToolButton, QToolTip,
+    QVBoxLayout, QWidget,
 )
 
 from . import APP_NAME, __version__
+from .annotations import INK_COLORS, INK_WIDTH, INK_WIDTHS
 from .bookmarks import settings_key_for
 from .i18n import I18n
 from .icons import asset_path as _asset_path, tinted_icon
@@ -803,6 +806,8 @@ class MainWindow(QMainWindow):
             page_view_menu.addAction(self._view_actions[mode])
         self.view_mode_button.setMenu(page_view_menu)
         tb.addWidget(self.view_mode_button)
+
+        self._build_pen_options(tb)
 
         self._set_compact_toolbar_buttons()
         self._update_zoom_actions(False)
@@ -2528,6 +2533,7 @@ class MainWindow(QMainWindow):
             self.tool_split.setDefaultAction(action)
         if view is not None:
             view.set_tool_mode(mode)
+        self._sync_pen_options()
 
     def _set_view_mode(self, mode: str) -> None:
         """Apply a page view mode to the active document."""
@@ -2608,6 +2614,7 @@ class MainWindow(QMainWindow):
         if view is not None:
             view.set_tool_mode(self._tool_mode)
         self._tool_action(self._tool_mode).setChecked(True)
+        self._sync_pen_options()
 
     def _show_transient_message(self, message: str) -> None:
         self.statusBar().showMessage(message, 5000)
@@ -2623,6 +2630,94 @@ class MainWindow(QMainWindow):
             button = toolbar.widgetForAction(action)
             if isinstance(button, QToolButton):
                 button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+
+    def _build_pen_options(self, tb: QToolBar) -> None:
+        """The pen's colour and thickness, next to the tool that uses them."""
+        self.pen_options = QWidget(tb)
+        layout = QHBoxLayout(self.pen_options)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self.pen_color_button = QToolButton(self.pen_options)
+        self.pen_color_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.pen_color_button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.pen_color_button.setAutoRaise(True)
+        self.pen_color_menu = QMenu(self.pen_color_button)
+        self._pen_color_actions = []
+        for name, hex_color in INK_COLORS:
+            action = self.pen_color_menu.addAction(name)
+            action.setCheckable(True)
+            action.setData(hex_color)
+            action.triggered.connect(
+                lambda _checked=False, c=hex_color: self._set_ink_color(c))
+            self._pen_color_actions.append(action)
+        self.pen_color_menu.addSeparator()
+        self.pen_custom_color = self.pen_color_menu.addAction("Custom…")
+        self.pen_custom_color.triggered.connect(self._pick_ink_color)
+        self.pen_color_button.setMenu(self.pen_color_menu)
+        layout.addWidget(self.pen_color_button)
+
+        self.pen_width_combo = QComboBox(self.pen_options)
+        for width in INK_WIDTHS:
+            self.pen_width_combo.addItem(f"{width:g} pt", width)
+        self.pen_width_combo.setCurrentIndex(
+            max(0, self.pen_width_combo.findData(INK_WIDTH)))
+        self.pen_width_combo.setFixedWidth(68)
+        self.pen_width_combo.setToolTip("Pen thickness")
+        self.pen_width_combo.currentIndexChanged.connect(
+            self._on_ink_width_changed)
+        layout.addWidget(self.pen_width_combo)
+
+        self.pen_options.hide()
+        self.pen_action = tb.addWidget(self.pen_options)
+
+    def _sync_pen_options(self) -> None:
+        """Show the pen's controls only with the pen, mirroring its view."""
+        pen_action = getattr(self, "pen_action", None)
+        if pen_action is None:
+            return
+        view = self.view
+        # A toolbar re-shows its widgets when it lays out, so the hide is
+        # on the action that owns the widget, not on the widget.
+        pen_action.setVisible(view is not None and self._tool_mode == "draw")
+        if view is None:
+            return
+        color = view.ink_color
+        self.pen_color_button.setIcon(
+            tinted_icon("draw_freehand.svg", color))
+        self.pen_color_button.setToolTip(f"Pen colour: {color}")
+        for action in self._pen_color_actions:
+            action.setChecked(action.data() == color)
+        self.pen_width_combo.blockSignals(True)
+        index = self.pen_width_combo.findData(view.ink_width)
+        if index >= 0:
+            self.pen_width_combo.setCurrentIndex(index)
+        self.pen_width_combo.blockSignals(False)
+
+    def _set_ink_color(self, color: str) -> None:
+        view = self.view
+        if view is None:
+            return
+        view.set_ink_color(color)
+        self._sync_pen_options()
+
+    def _pick_ink_color(self) -> None:
+        """Ask for a colour outside the palette."""
+        view = self.view
+        if view is None:
+            return
+        chosen = QColorDialog.getColor(QColor(view.ink_color), self,
+                                       "Pen Colour")
+        if chosen.isValid():
+            self._set_ink_color(chosen.name().upper())
+
+    def _on_ink_width_changed(self, index: int) -> None:
+        view = self.view
+        width = self.pen_width_combo.itemData(index)
+        if view is not None and width is not None:
+            view.set_ink_width(float(width))
 
     def _update_zoom_actions(self, reflow: bool) -> None:
         """Keep Ctrl +/- labelled for what they actually do in this mode."""
