@@ -940,7 +940,11 @@ class Sidebar(QWidget):
                     if ann.has_note():
                         text += f" 💬 {ann.content[:40]}"
                 else:
-                    text = f"  {ann.type.value}: {ann.content[:50]}"
+                    # A note is named for what it is, not for its subtype string.
+                    kind = ann.type.value.replace("_", " ").title()
+                    text = f"  📝 {kind}"
+                    if ann.has_note():
+                        text += f": {ann.content[:50]}"
 
                 node = QTreeWidgetItem([text])
                 node.setData(0, Qt.ItemDataRole.UserRole, ann.id)
@@ -986,36 +990,43 @@ class Sidebar(QWidget):
         if not ann_id:
             return
 
+        menu = self._annotation_menu(ann_id, ann_type)
+        menu.exec(self.annotations_tree.viewport().mapToGlobal(pos))
+
+    def _annotation_menu(self, ann_id: str, ann_type: str) -> QMenu:
+        """The menu for one annotation row: delete it, note on it, recolor it.
+
+        A note is offered on either kind because a highlight's text and a
+        sticky note's text are the same ``/Contents``; a color is offered only
+        where there is a color to change.
+        """
         menu = QMenu(self)
         act_delete = menu.addAction("Delete Annotation")
         act_delete.triggered.connect(lambda: self._delete_annotation(ann_id))
 
+        ann = (self.annotation_manager.get_annotation(ann_id)
+               if self.annotation_manager else None)
+
+        menu.addSeparator()
+        if ann is not None and ann.has_note():
+            act_edit_note = menu.addAction("Edit Note…")
+            act_edit_note.triggered.connect(lambda: self._edit_note(ann_id))
+            act_remove_note = menu.addAction("Remove Note")
+            act_remove_note.triggered.connect(lambda: self._remove_note(ann_id))
+        else:
+            act_add_note = menu.addAction("Add Note…")
+            act_add_note.triggered.connect(lambda: self._edit_note(ann_id))
+
         if ann_type == "highlight":
-            # Get the highlight to check if it has a note
-            highlight = (self.annotation_manager.get_highlight(ann_id)
-                         if self.annotation_manager else None)
-
-            menu.addSeparator()
-
-            if highlight and highlight.has_note():
-                act_edit_note = menu.addAction("Edit Note…")
-                act_edit_note.triggered.connect(lambda: self._edit_note(ann_id))
-                
-                act_remove_note = menu.addAction("Remove Note")
-                act_remove_note.triggered.connect(lambda: self._remove_note(ann_id))
-            else:
-                act_add_note = menu.addAction("Add Note…")
-                act_add_note.triggered.connect(lambda: self._edit_note(ann_id))
-
-        act_color = menu.addMenu("Change Color")
-        for name, hex_color in HIGHLIGHT_COLORS:
-            color_act = act_color.addAction(name)
-            color_act.triggered.connect(lambda checked, a=ann_id, c=hex_color: self._change_annotation_color(a, c))
-        # Only a highlight has a color PDFAR can change; offering it on a note
-        # would be a menu item that quietly does nothing.
-        act_color.menuAction().setVisible(ann_type == "highlight")
-
-        menu.exec(self.annotations_tree.viewport().mapToGlobal(pos))
+            # Only a highlight has a color PDFAR can change; a note row would
+            # get a submenu of items that quietly do nothing.
+            act_color = menu.addMenu("Change Color")
+            for name, hex_color in HIGHLIGHT_COLORS:
+                color_act = act_color.addAction(name)
+                color_act.triggered.connect(
+                    lambda checked, a=ann_id, c=hex_color:
+                    self._change_annotation_color(a, c))
+        return menu
 
     def _edit_note(self, annotation_id: str) -> None:
         """Edit the text an annotation carries."""

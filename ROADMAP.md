@@ -906,7 +906,8 @@ PDFAR must be local-first and privacy-first.
 Phase status: **[~] Under way.** F10-0 (document session), F10-1 (edit
 framework) and F10-2 (save, save as, revert) are implemented; **F10-3** is under
 way, with annotations as edits (F10-3a), the save-cost fix (F10-3b), revision
-files for undo (F10-3c) and standalone `/Text` notes (F10-3d) done.
+files for undo (F10-3c), standalone `/Text` notes (F10-3d) and the interface that
+places them (F10-3e) done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1164,9 +1165,31 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       `set_note()` / `remove_note()` / `get_note()`) because both kinds keep their
       text in the same key. An empty note is still a note — the icon is what the
       user asked for and the popup is where the text goes — and MuPDF gives it an
-      appearance stream, so it paints without PDFAR writing one. What is left for
-      the *interface* half is the tool to place one and a popup to type into; the
-      document side is finished.)
+      appearance stream, so it paints without PDFAR writing one. The document side
+      is finished; the tool to place one is the next item.)
+- [x] The interface half of a note: a tool to place one and a popup to type into
+      (**F10-3e.** Right-clicking a page offers "Add note here…" and
+      right-clicking the icon offers "Edit Note…" / "Delete Note"; the popup is a
+      multi-line `QInputDialog` and every answer goes through the session, so the
+      note tool shares F10-3d's document side and F10-3c's undo rather than
+      adding a second way to change a PDF. The sidebar's row menu was extracted
+      into `_annotation_menu()`, which is also what made a note's own text
+      reachable from its row — the note actions used to be offered on highlight
+      rows only.)
+- [ ] A note edit on a big document costs the annotation *list*, not the edit
+      (**found in F10-3e**): `AnnotationManager._run()` re-reads every page after
+      every edit, which measures 108–175 ms on the 540-page book against 59 ms
+      for the edit itself — so placing a note there takes ~170–230 ms when 60 ms
+      of that is the document changing. The list should be rebuilt per page, or
+      only for the pages an edit touched.
+- [ ] A highlight made while the view is rotated lands on the wrong part of the
+      page (**found in F10-3e, still open**): `create_highlight_from_selection()`
+      hands `add_highlights()` rectangles in *view* space — `_word_rect_view()`
+      maps them through `map_rect()` — while the annotation edits write PDF space.
+      The two agree only at rotation 0, which is every screenshot and test so far,
+      so this is a wrong-rectangle bug rather than a crash. It is the reason the
+      note tool converts its click back to PDF space explicitly instead of
+      reusing the selection's rectangles.
 - [ ] Comments panel listing annotations and jumping to them
 - [ ] Freehand, shapes, stamps, measurement
 - [ ] Appearance streams, so other readers show the same thing without
@@ -1282,8 +1305,8 @@ Finish the annotation system. Done: annotation changes are routed through F10-1,
 so they undo and mark dirty (F10-3a); a save stopped compacting the object table
 (F10-3b); undo is a revision file in a scratch copy, so a highlight costs 55 ms
 instead of 2.1 s and no buffer (F10-3c); a sticky note is a real `/Text`
-annotation in the document (F10-3d). Next: the tool to place a note and the popup
-to type into, then the comments panel.
+annotation in the document (F10-3d) and right-clicking a page is how you place one
+(F10-3e). Next: the comments panel that lists annotations and jumps to them.
 
 Goal:
 
@@ -2297,6 +2320,80 @@ whose annotation is gone refusing rather than landing on whatever shares the key
 a page that is not there refusing, a background reader seeing the note without a
 save, and a save-and-reopen round trip with a highlight in the same document.
 Three consecutive full runs.
+
+---
+
+### F10-3e The page asks for a note — [x] Implemented
+
+**Completed**: 2026-10-27
+
+**What landed**: the interface half of F10-3d. A right-click on a page offers
+"Add note here…"; a right-click on a note's icon offers "Edit Note…" and
+"Delete Note". The popup is one multi-line `QInputDialog`, and every answer goes
+through `AnnotationManager`, so the tool inherits the document side (the note is
+a `/Text` annotation) and the undo side (a revision file) instead of adding a
+second way to change a PDF. `PDFView` gained `_pdf_point_at()`, `_note_at()`,
+`_note_menu()`, `contextMenuEvent()`, `add_note_at()`, `edit_note()` and
+`delete_note()`; the sidebar's row menu moved out of its signal handler into
+`_annotation_menu(ann_id, ann_type)`, which is what made a sticky note's own text
+reachable from its row — the note actions had been offered on highlight rows only,
+because the note was the only kind of annotation that could not exist.
+
+**A click is not a PDF point.** A note's position lives in page space, while a
+mouse press is a widget coordinate, and between them are the scroll bars, the page
+layout, the zoom and the view rotation. `_pdf_point_at()` walks that road back
+using the same conversion the page-number preview already relies on
+(`_content_to_page_view()` then `unmap_point()`), so the two tools cannot
+disagree about where the cursor is; the round trip is pinned at five
+zoom-and-rotation combinations. The page around the icon is deliberately not a
+target — a click that misses the icon means "a note *here*", which is the other
+half of the same menu — with two points of slack, because the icon is 16 points
+across and a click rounded to a whole widget pixel lands a hair off wherever the
+user aims.
+
+**Four judgement calls.** Cancel places nothing and costs no undo step. An empty
+answer still places the icon: the user asked for a note, and an empty one is a
+note that has not been written in yet (F10-3d established that MuPDF paints it).
+Clearing the text in "Edit Note" empties the note rather than deleting it, which
+is what "Remove Note" has always meant for a highlight — deleting the icon is the
+other menu item. And a menu whose annotation has disappeared says so in the status
+bar instead of doing nothing: undoing some other edit can take the annotation with
+it while the menu is open.
+
+**Files changed**: `src/pdfar/viewer.py` (the note tool, the coordinate
+conversion, the context menu), `src/pdfar/sidebar.py`
+(`_annotation_menu()` extracted from `_on_annotations_context_menu()`, the note
+actions offered on both kinds, the "Change Color" submenu no longer built for a
+row that cannot use it, and a note row now reading `📝 Note: <text>` instead of
+the raw `note:` subtype value).
+
+**Verified by eye** (headless): a synthetic `QContextMenuEvent` on an empty part
+of page 1 opens "Add note here…", and the note lands at the PDF point under the
+cursor (120, 90 aimed, 119.7, 90.1 stored — a widget pixel of rounding); the
+sidebar lists `📝 Note: check the figures on this page`; a second right-click on
+the icon opens "Edit Note…" / "Delete Note" and rewrites the text with "Edit note"
+as the undo label; rotating the view 90° and clicking the icon's *screen* position
+returns the same PDF point and finds the same note; and the rendered page shows
+the yellow icon where it was placed.
+
+**Tests**: 549 passed (was 532) — `tests/test_note_ui.py` (17) covers the click
+round trip at five zoom/rotation pairs and off the edge of the last page, a note
+placed where the user clicked and on the page under the cursor, Cancel leaving the
+version and the dirty mark alone, an empty answer still placing the icon, the
+dialog naming the page, the icon being a target and the page around it not (one
+point off its corner is still the icon), both menus offering what they should and
+*doing* it when triggered — a menu carries the point and the annotation it was
+built for, not whatever is under the cursor when it fires —, editing being
+undoable and offering the current text, deleting taking the icon with it, a gone
+annotation saying why, the sidebar row offering the note actions without a color,
+a highlight row keeping its color submenu, and the row label showing the text.
+Three consecutive full runs.
+
+**Measured on the book**: the edit itself is still F10-3c — `session.apply()` for
+a note on GS262 is **59 ms**, undo 10 ms, redo 5 ms, a reader's copy 13–22 ms.
+What the tool adds is `AnnotationManager._run()` re-listing every page after each
+edit: **108–175 ms** on 540 pages, which is where the ~220 ms a note takes in the
+running app actually comes from. Recorded as its own open item above.
 
 ---
 

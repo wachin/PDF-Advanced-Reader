@@ -32,7 +32,9 @@ from PyQt6.QtGui import (
     QPaintEvent, QPainter, QPen, QPixmap, QWheelEvent, QGuiApplication,
     QResizeEvent,
 )
-from PyQt6.QtWidgets import QAbstractScrollArea, QFrame, QMenu, QScroller
+from PyQt6.QtWidgets import (
+    QAbstractScrollArea, QFrame, QInputDialog, QMenu, QScroller,
+)
 
 from .cache import PageCache
 from .edits import Edit, EditError, Scope
@@ -55,7 +57,9 @@ from .render import RenderPool, RenderResult
 from .search import SearchHit
 from .session import DocumentSession
 from .tiles import Tile, TileGrid, TILE_SIZE
-from .annotations import AnnotationManager, HIGHLIGHT_COLORS
+from .annotations import (
+    Annotation, AnnotationManager, HIGHLIGHT_COLORS, NoteAnnotation,
+)
 
 PAD = 16          # outer margin (content coords)
 GAP = 12          # gap between pages / columns
@@ -502,6 +506,118 @@ class PDFView(QAbstractScrollArea):
     def save_annotations(self) -> bool:
         """Save all annotations to the PDF file."""
         return self.annotation_manager.save_to_pdf()
+
+    # ------------------------------------------------------------- sticky notes
+    def _pdf_point_at(self, pos: QPoint) -> Optional[Tuple[int, float, float]]:
+        """Widget coordinate -> ``(page, x, y)`` in PDF space, ``None`` if off-page.
+
+        The road from a click to a point on the page runs through the scroll
+        bars, the page layout, the zoom and the view rotation, and a note is
+        stored in the last space of those, so the click has to be walked all the
+        way back.  ``_numbering_hit_at()`` walks the same road, so the two tools
+        cannot disagree about where the cursor is.
+        """
+        if not self.page_count:
+            return None
+        cx = pos.x() + self.horizontalScrollBar().value()
+        cy = pos.y() + self.verticalScrollBar().value()
+        hit = self._content_to_page_view(cx, cy)
+        if hit is None:
+            return None
+        page, u, v = hit
+        w0, h0 = self.page_sizes[page]
+        dw, dh = display_size(w0, h0, self.rotation)
+        if not (0.0 <= u <= dw and 0.0 <= v <= dh):
+            return None
+        x, y = unmap_point(u, v, w0, h0, self.rotation)
+        return page, x, y
+
+    def _note_at(self, page: int, x: float, y: float) -> Optional[NoteAnnotation]:
+        """The note whose icon covers this PDF point.
+
+        The icon is the whole target, with a couple of points of slack: it is
+        16 pt across, and a click rounded to a widget pixel can land just off
+        its edge.  A click that misses the icon means "a note *here*", not
+        "that note".
+        """
+        tolerance = 2.0
+        for note in self.annotation_manager.get_notes_for_page(page):
+            if not note.rects:
+                continue
+            x0, y0, x1, y1 = note.rects[0]
+            if (x0 - tolerance <= x <= x1 + tolerance
+                    and y0 - tolerance <= y <= y1 + tolerance):
+                return note
+        return None
+
+    def _note_menu(self, at: Tuple[int, float, float],
+                   note: Optional[NoteAnnotation] = None) -> QMenu:
+        """The menu for a right-click at *at*: open the note on it, or add one."""
+        menu = QMenu(self)
+        if note is not None:
+            act_edit = menu.addAction("Edit Note…")
+            act_edit.triggered.connect(lambda _=False, n=note: self.edit_note(n.id))
+            act_delete = menu.addAction("Delete Note")
+            act_delete.triggered.connect(lambda _=False, n=note: self.delete_note(n.id))
+        else:
+            act_add = menu.addAction("Add note here…")
+            act_add.triggered.connect(lambda _=False, p=at: self.add_note_at(*p))
+        return menu
+
+    def add_note_at(self, page: int, x: float, y: float) -> bool:
+        """Ask for a note, then put it on *page* at the PDF point ``(x, y)``.
+
+        An empty answer still places the icon: the user asked for a note, and a
+        note with no text is a note that has not been written in yet.  Cancel
+        places nothing and leaves the undo stack alone.
+        """
+        text, ok = QInputDialog.getMultiLineText(
+            self, "Add Note", f"Note on page {page + 1}:", "")
+        if not ok:
+            return False
+        return self.annotation_manager.add_note(page, (x, y), text.strip()) is not None
+
+    def edit_note(self, annotation_id: str) -> bool:
+        """Change the text a note carries."""
+        ann = self._annotation_or_warn(annotation_id)
+        if ann is None:
+            return False
+        text, ok = QInputDialog.getMultiLineText(
+            self, "Edit Note", f"Note on page {ann.page + 1}:", ann.get_note())
+        if not ok:
+            return False
+        if not text.strip():
+            # Emptying the text is what "Remove Note" has always meant.
+            return (self.annotation_manager.remove_note(annotation_id)
+                    if ann.has_note() else False)
+        return self.annotation_manager.set_note(annotation_id, text.strip()) is not None
+
+    def delete_note(self, annotation_id: str) -> bool:
+        """Take a note and its icon off the page."""
+        if self._annotation_or_warn(annotation_id) is None:
+            return False
+        return self.annotation_manager.remove_annotation(annotation_id)
+
+    def _annotation_or_warn(self, annotation_id: str) -> Optional[Annotation]:
+        """The annotation a menu was built for, or ``None`` with the reason said.
+
+        A menu can outlive its target: undoing some other edit can make the
+        annotation it pointed at disappear before the click lands.
+        """
+        ann = self.annotation_manager.get_annotation(annotation_id)
+        if ann is None:
+            self.transient_message.emit("That annotation is not in this document")
+        return ann
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        """Right-click a page: place a note, or open the one under the cursor."""
+        if self.reflow_mode:
+            return          # reflow is its own document, with no page geometry
+        hit = self._pdf_point_at(event.pos())
+        if hit is None:
+            return
+        page, x, y = hit
+        self._note_menu(hit, self._note_at(page, x, y)).exec(event.globalPos())
 
     def set_dark_mode(self, enabled: bool) -> None:
         """Enable or disable dark mode."""
