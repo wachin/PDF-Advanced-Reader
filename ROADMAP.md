@@ -905,7 +905,7 @@ PDFAR must be local-first and privacy-first.
 
 Phase status: **[~] Under way.** F10-0 (document session), F10-1 (edit
 framework) and F10-2 (save, save as, revert) are implemented; **F10-3** is under
-way, with its first increment (F10-3a, annotations as edits) done.
+way, with annotations as edits (F10-3a) and the save-cost fix (F10-3b) done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1047,8 +1047,10 @@ bound is what keeps that cost finite.
       `doc.is_dirty` + `can_save_incrementally()`, because the last one alone
       lies for a stream-backed copy)
 - [x] Full rewrite for Save As, so deleted content is not left in an older
-      revision (`full=True`, `garbage=3`: a measured page deletion took the file
-      from 3592 to 3049 bytes and the xref table from 29 to 21 entries)
+      revision (`full=True`, `garbage=2`: a measured page deletion took the file
+      from 3836 to 3301 bytes and the xref table from 29 to 25 entries. This
+      shipped as `garbage=3`, which costs 70× more for the last few percent of
+      the table — corrected in F10-3b.)
 - [x] Verify before replacing the file: reopen the produced bytes, check the page
       count and render page 0 (`verify_bytes` / `verify_file`; MuPDF *repairs*
       truncated input, so the page count and "is this a PDF at all" are the
@@ -1127,6 +1129,11 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       whose annotation is gone refuses the document rather than writing to
       whatever shares its key, and the tab, title and Revert follow the dirty
       mark.
+- [x] Saving after an edit stopped compacting the object table (F10-3b). Ctrl+S
+      after one highlight on GS262 measured **123.9 s** with the rewrite level
+      F10-2 shipped, and **1.75 s** at `garbage=2` — 3.5 s for the whole action
+      once the undo snapshot is included, with the deleted page's bytes and
+      objects still leaving the file.
 - [ ] A comment-only edit should not have to copy the whole document to undo it.
       Measured on GS262 (540 pages, 25 MB): one highlight costs **2.1 s and
       ~25 MB**, because an undo step is a full `tobytes()` snapshot — the same
@@ -1993,9 +2000,11 @@ authentication with 6 and resets the permissions to full.
 
 **Measured**: GS262 (540 pages) open 2.12 s, first page 0.25 s, distant jump
 0.70 s, zoom sequence 2.81 s, peak RSS 508 MB — unchanged from F10-1, since
-saving is not on the read path. A full rewrite with `garbage=3` after deleting a
-page took the file from 3592 to 3049 bytes and the xref table from 29 entries to
-21; the same document saved incrementally kept all 29 and grew.
+saving is not on the read path. A full rewrite after deleting a page took the
+sample file from 3836 to 3301 bytes and its xref table from 29 entries to 25;
+the same document saved incrementally kept all 29 and grew. *(The rewrite level
+in this report was `garbage=3`, which turned out to cost 121 s on GS262 against
+1.4 s for the level that keeps the promise; see F10-3b.)*
 
 **Verified by eye** (headless, on a scratch document): the tab shows
 `• f10_visual.pdf` and the title `f10_visual.pdf[*]` with Revert enabled; after
@@ -2082,6 +2091,42 @@ document-as-store, identity, granularity, undo labels and refusal; the older
 `test_z_highlights.py` / `test_z_notes.py` re-targeted at the new API, which is
 where "the handle you held before an edit is the read from before it" is now
 pinned down. Three consecutive full runs.
+
+---
+
+### F10-3b A save stops compacting the object table — [x] Implemented
+
+**Completed**: 2026-10-27
+
+**What landed**: one option, `garbage: 3` → `garbage: 2`, in the full-rewrite
+path of `save_document()`. F10-2 chose level 3 to honour "a deleted page must
+leave the file", and nothing in the suite could see the difference — the promise
+holds at level 2 as well, and the price only shows on a book big enough to have
+a 38 000-entry object table.
+
+**What the levels actually do** (measured, not read out of a docstring): level 1
+writes the unreachable objects' *bytes* out — the sample document's dropped page
+took the file from 3836 to 3381 bytes — while the cross-reference table keeps its
+29 slots. Level 2 additionally merges duplicate streams and shrinks the table to
+25, at the same cost. Level 3 then compacts cross references and strips unused
+dictionary keys: on GS262 that buys 213 slots out of 37 187 — 0.6 % — and costs
+**121.6 s against 1.40 s**.
+
+**Why it is on the interactive path**: after an adopted edit `doc.name` is
+`None`, so `_can_append` is False and *every* Ctrl+S on an edited document is a
+full rewrite rather than the 0.03 s append. The first highlight on GS262 followed
+by Save therefore took 123.9 s of frozen UI; it now takes 1.75 s, and 3.5 s
+counting the undo snapshot the edit itself costs (apply 1.73 s + save 1.75 s).
+
+**Files changed**: `src/pdfar/save.py` (the option and the comment recording the
+numbers). `tests/test_save.py::test_save_as_rewrites_rather_than_appends` is the
+guard: it deletes a page, saves and asserts the xref table shrank — which level 1
+fails and level 2 passes, so the level cannot silently drop back.
+
+**Measured**: GS262 read path untouched — open, first page, distant jump and
+zoom are the F10-3a numbers, since nothing here runs before a save.
+
+**Tests**: 490 passed, unchanged in count; three consecutive full runs.
 
 ---
 
