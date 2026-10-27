@@ -1,7 +1,8 @@
 """Annotation system for PDFAR.
 
 The document holds the annotations (F10-3): a highlight is a PDF ``/Highlight``
-annotation, a sticky note is a ``/Text`` one, and every change to either is a
+annotation, a sticky note is a ``/Text`` one, a freehand drawing is an ``/Ink``
+one, and every change to any of them is a
 :class:`pdfar.edits.Edit`.  That is what makes a highlight undoable, what makes it
 mark the document dirty, and what makes a background reader see it without a save
 in between.  ``AnnotationManager`` is a *view* of the document: it re-reads the
@@ -36,6 +37,11 @@ HIGHLIGHT_OPACITY = 0.4
 
 #: How big MuPDF makes a note icon.  Used only to keep an icon inside the page.
 NOTE_ICON_SIZE = 16.0
+
+#: How thick a freehand stroke is by default, in PDF points.  Written into the
+#: annotation's ``/BS``, so a drawing read back out of a file reports the width
+#: it was drawn with rather than the viewer's.
+INK_WIDTH = 2.0
 
 #: What a damaged annotation can raise while the list is being read.  MuPDF
 #: signals its failures through these; asking for less than ``Exception`` means a
@@ -134,6 +140,20 @@ class NoteAnnotation(Annotation):
     type: AnnotationType = AnnotationType.NOTE
     # position: (x, y) in PDF points where the note icon appears
     position: tuple = (0.0, 0.0)
+
+
+@dataclass
+class InkAnnotation(Annotation):
+    """A freehand drawing: a PDF ``/Ink`` annotation.
+
+    ``paths`` is the pen, one list of points per stroke, in PDF points — the
+    same space a highlight's rectangles live in, so a rotated view does not move
+    the drawing (F10-3g).  ``/InkList`` keeps every stroke of one drawing in one
+    annotation, which is why one Ctrl+Z undoes one drawing and not one line of it.
+    """
+    type: AnnotationType = AnnotationType.FREEHAND
+    paths: List[List[tuple]] = field(default_factory=list)
+    width: float = INK_WIDTH
 
 
 # -------------------------------------------------------------------------- color
@@ -254,6 +274,35 @@ def _note_model(annot: fitz.Annot, page_idx: int) -> NoteAnnotation:
     )
 
 
+def _ink_model(annot: fitz.Annot, page_idx: int) -> InkAnnotation:
+    """Read one document annotation into the freehand model.
+
+    ``vertices`` hands back the ``/InkList`` in page space, which is the space
+    ``add_ink_annot`` was given — so a drawing that goes out of the file and
+    comes back is the same drawing, point for point.
+    """
+    info = annot.info
+    paths = [[(float(x), float(y)) for x, y in line]
+             for line in (annot.vertices or [])]
+    rect = annot.rect
+    opacity = annot.opacity
+    width = (annot.border or {}).get("width")
+    return InkAnnotation(
+        id=annot_key(annot),
+        page=page_idx,
+        rects=[(rect.x0, rect.y0, rect.x1, rect.y1)],
+        color=_rgb_to_hex(annot.colors.get("stroke") or (0.0, 0.0, 1.0)),
+        # An ink with no /CA paints solid, and -1 is how MuPDF reports "unset".
+        opacity=1.0 if opacity is None or opacity < 0 else opacity,
+        author=info.get("title") or "",
+        created=info.get("creationDate") or "",
+        modified=info.get("modDate") or "",
+        content=info.get("content") or "",
+        paths=paths,
+        width=INK_WIDTH if width is None else float(width),
+    )
+
+
 # -------------------------------------------------------------------------- edits
 @dataclass(frozen=True)
 class HighlightSpec:
@@ -354,6 +403,64 @@ class AddNote(SinglePageEdit):
         annot = page.add_text_annot(fitz.Point(x, y), self.note)
         if self.author:
             annot.set_info(title=self.author)
+        annot.update()
+        _name(doc, annot, self.ann_id)
+
+
+def _clean_paths(paths: Sequence[Sequence[tuple]]) -> List[List[tuple]]:
+    """The strokes as MuPDF wants them, or an edit that refuses.
+
+    The points stay plain number pairs: ``add_ink_annot`` checks for a sequence
+    of length two, and a ``fitz.Point`` is not one — passing it is a ``ValueError``
+    that reads like the drawing itself was malformed.
+
+    An empty ``/InkList`` is not an invisible annotation but a broken one: MuPDF
+    gives it the whole coordinate range as its rectangle, so the page would be
+    repainted for nothing and the row in the panel would be unclickable.
+    """
+    cleaned = [[(float(x), float(y)) for x, y in line]
+               for line in paths if line]
+    if not cleaned:
+        raise EditError("There is nothing to draw")
+    return cleaned
+
+
+@dataclass(frozen=True)
+class AddInk(SinglePageEdit):
+    """Draw *paths* on a page — a PDF ``/Ink`` annotation.
+
+    Every stroke is one annotation, because the user drew once: an edit per
+    stroke would make Ctrl+Z lift the drawing off a line at a time.  The points
+    are in page space, the space the annotation lives in — a view that has been
+    turned must not move what was drawn (F10-3g).
+    """
+
+    ann_id: str
+    page: int
+    paths: Tuple[tuple, ...]
+    color: str = "#000000"
+    width: float = INK_WIDTH
+    author: str = ""
+    note: str = ""
+
+    scope = Scope.COMMENTS
+
+    @property
+    def label(self) -> str:
+        return "Freehand"
+
+    def apply(self, doc: fitz.Document) -> None:
+        lines = _clean_paths(self.paths)
+        page = doc.load_page(self.page)
+        annot = page.add_ink_annot(lines)
+        annot.set_colors(stroke=_hex_to_rgb(self.color))
+        annot.set_border(width=float(self.width))
+        if self.author:
+            annot.set_info(title=self.author)
+        if self.note:
+            annot.set_info(content=self.note)
+        # MuPDF writes the appearance stream here, which is what makes other
+        # readers show the stroke without PDFAR drawing it a second time.
         annot.update()
         _name(doc, annot, self.ann_id)
 
@@ -528,6 +635,8 @@ class AnnotationManager(QObject):
                     model = _highlight_model(annot, page_idx)
                 elif kind == fitz.PDF_ANNOT_TEXT:
                     model = _note_model(annot, page_idx)
+                elif kind == fitz.PDF_ANNOT_INK:
+                    model = _ink_model(annot, page_idx)
                 else:
                     # A shape, stamp or free-text annotation PDFAR cannot
                     # edit yet: listing it would offer an action on something
@@ -609,6 +718,25 @@ class AnnotationManager(QObject):
         made = self.get_annotation(ann_id)
         return made if isinstance(made, NoteAnnotation) else None
 
+    def add_ink(self, page: int, paths: Sequence[Sequence[tuple]],
+                color: str = "#000000", width: float = INK_WIDTH,
+                author: str = "",
+                note: str = "") -> Optional[InkAnnotation]:
+        """Draw *paths* — one list of points per stroke — on *page*.
+
+        ``None`` if the edit was refused, which today means the drawing was
+        empty.  Unlike a multi-page highlight there is nothing to drop here: one
+        drawing is one edit, and it is either on a page or on none.
+        """
+        ann_id = str(uuid.uuid4())
+        if not self._run(AddInk(ann_id=ann_id, page=int(page),
+                                paths=tuple(tuple(line) for line in paths),
+                                color=color, width=width, author=author,
+                                note=note)):
+            return None
+        made = self.get_annotation(ann_id)
+        return made if isinstance(made, InkAnnotation) else None
+
     def remove_annotation(self, annotation_id: str) -> bool:
         """Remove an annotation by ID."""
         ann = self._annotations.get(annotation_id)
@@ -626,7 +754,7 @@ class AnnotationManager(QObject):
                                            opacity=highlight.opacity))
 
     def set_note(self, annotation_id: str, note_text: str) -> Optional[Annotation]:
-        """Add or update the text of an annotation, of either kind."""
+        """Add or update the text of an annotation, of any kind."""
         if not self._set_note(annotation_id, note_text):
             return None
         return self.get_annotation(annotation_id)

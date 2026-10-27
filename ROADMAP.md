@@ -908,8 +908,9 @@ framework) and F10-2 (save, save as, revert) are implemented; **F10-3** is under
 way, with annotations as edits (F10-3a), the save-cost fix (F10-3b), revision
 files for undo (F10-3c), standalone `/Text` notes (F10-3d), the interface that
 places them (F10-3e), a comments panel that jumps to what it lists (F10-3f), a
-highlight that stays on its words however the page is turned (F10-3g) and a list
-that re-reads the pages an edit touched (F10-3h) done.
+highlight that stays on its words however the page is turned (F10-3g), a list
+that re-reads the pages an edit touched (F10-3h) and freehand ink in the
+document (F10-3i) done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1203,7 +1204,27 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       viewport and draws a ring around it until the next click. What this panel
       is not is a reply thread: anchored popups and the appearance streams other
       readers need to show them are the item below.)
-- [ ] Freehand, shapes, stamps, measurement
+- [x] Freehand ink persisted as a real `/Ink` annotation
+      (**F10-3i.** The third kind the document is the store for, and the first
+      whose geometry is the user's own drawing: `AddInk` writes one `/Ink`
+      annotation holding every stroke of the drawing in its `/InkList`, in page
+      space, named by `/NM` like the others, with the colour in `/C` and the
+      thickness in `/BS`. MuPDF writes the appearance stream, so the stroke
+      reaches the pixels through `render.py`'s `annots=True` and any other reader
+      shows it too. The manager dispatches on the subtype, so a drawing is
+      listed, jumped to, noted and deleted by the code F10-3d left generic, and
+      F10-3h's per-page re-read carries over: drawing on one page re-reads one
+      page. An empty drawing is refused — MuPDF turns an empty `/InkList` into an
+      annotation whose rectangle is the whole coordinate range.)
+- [ ] The tool that draws one: a pen mode that captures the mouse, turns the
+      drag into page-space points, and hands them to `AddInk` as one edit per
+      drawing — with the colour and thickness the user picks
+      (**F10-3j, next**). The document side is done; nothing in the interface can
+      reach it yet.
+- [ ] Shapes: rectangle, ellipse, line, arrow, polygon (`/Square`, `/Circle`,
+      `/Line`, `/Polygon`)
+- [ ] Stamps, including the standard pre-defined rubber-stamp images
+- [ ] Measurement annotations (`/Projection`), with the scale they are drawn in
 - [ ] Appearance streams, so other readers show the same thing without
       regenerating them
 - [ ] XFDF import/export
@@ -1319,10 +1340,12 @@ so they undo and mark dirty (F10-3a); a save stopped compacting the object table
 instead of 2.1 s and no buffer (F10-3c); a sticky note is a real `/Text`
 annotation in the document (F10-3d), right-clicking a page is how you place one
 (F10-3e), a comment row in the panel jumps to the comment it names (F10-3f), a
-highlight lands on its words whatever the view rotation (F10-3g), and the
-annotation list re-reads only the pages an edit wrote to (F10-3h).
-Next, in order: the remaining kinds (freehand, shapes, stamps), appearance
-streams so other readers show what PDFAR wrote, and XFDF import/export.
+highlight lands on its words whatever the view rotation (F10-3g), the
+annotation list re-reads only the pages an edit wrote to (F10-3h), and a
+freehand drawing is a real `/Ink` annotation in the document (F10-3i).
+Next, in order: the tool that draws one, the rest of the kinds (shapes, stamps,
+measurement), appearance streams so other readers show what PDFAR wrote, and
+XFDF import/export.
 
 Goal:
 
@@ -2580,6 +2603,66 @@ in page order across partial reads. Three consecutive full runs.
 1 read in 19.9 ms. The whole edit is now 89–119 ms, of which the document change is
 78–113 ms — the list is no longer the expensive part. What a note still costs on top
 is the re-render of the page it painted, which is the point of the edit.
+
+---
+
+### F10-3i A freehand drawing is a real `/Ink` annotation — [x] Implemented
+
+**Completed**: 2026-10-27
+
+**What landed**: the third kind the document is the store for, and the first
+whose geometry is the user's own rather than a text selection or a click.
+`AddInk` writes one `/Ink` annotation whose `/InkList` holds every stroke of the
+drawing, in page space, named by `/NM` like the others, colour in `/C` and
+thickness in `/BS`. `InkAnnotation` carries `paths` and `width`;
+`_read_page()` dispatches on `PDF_ANNOT_INK`. Nothing else changed: delete,
+note, jump, the ring, the per-page re-read and the sidebar row all already spoke
+annotation rather than highlight, which is what F10-3a and F10-3d left behind.
+
+**One drawing, one edit.** The strokes live in one annotation because the user
+drew once: a `/Ink` per stroke would make Ctrl+Z lift the drawing off a line at
+a time, the same reason a several-line selection is one highlight with several
+quads (F10-3a). MuPDF writes the appearance stream on `update()`, so the stroke
+reaches the pixels through `render.py`'s existing `annots=True` and shows up in
+other readers without PDFAR drawing it a second time.
+
+**Two PyMuPDF surprises, both recorded in the code.** `add_ink_annot()` checks
+each point for a sequence of length two and a `fitz.Point` is not one, so the
+library's own object is rejected with "arg must be seq of seq of float pairs";
+the points stay plain number pairs. And an empty `/InkList` is not an invisible
+annotation but a broken one — MuPDF gives it the whole coordinate range as its
+`/Rect` — so the edit refuses before writing it rather than leaving a page that
+repaints forever and a panel row nothing can be clicked.
+
+**Files changed**: `src/pdfar/annotations.py` (`INK_WIDTH`, `InkAnnotation`,
+`_ink_model`, `_clean_paths`, `AddInk`, the subtype dispatch,
+`AnnotationManager.add_ink()`).
+
+**Verified by eye** (headless): a document carrying a red zig-zag, a note and a
+highlight opens with three rows under Page 2, the panel saying exactly what the
+model holds; the stroke is on the screen (3.9 % of the ringed box is its red);
+clicking its row scrolls it into view and rings it; deleting it takes the row,
+the ring and the red off the page (0.0 %); undo brings all three back at the
+same coverage. Screenshots `/tmp/f103i_page.png`, `/tmp/f103i_sidebar.png`.
+
+**Tests**: 598 passed (was 584) — `tests/test_freehand.py` (14): the stroke is
+in the document the moment it is drawn, one annotation holds every stroke of one
+drawing, it reaches the pixels, its box covers what was drawn, an empty drawing
+is refused without an undo step or a version bump, undo takes the whole drawing
+off and redo puts the same id back, it survives a save and a reopen point for
+point, it re-reads one page rather than the book, it is listed with the other
+kinds and deletable and notable like them, and a stroke another program drew is
+listed under `anon:{xref}` without being renamed. Three consecutive full runs.
+
+**Performance on the 540-page book**: the document change is 83.7 ms and the
+re-list **1.2 ms with 1 page read** — F10-3h's per-page cache carries to a new
+kind for free, because declaring `pages` was the edit's job, not the kind's.
+Undo + re-list 30.6 ms, redo 29.0 ms; the whole action is the same 150–500 ms a
+note costs, and most of that is repainting the page the user drew on.
+
+**What is not here**: the tool. Nothing in the interface can make a stroke yet,
+so this is the same split F10-3d/F10-3e made — the document first, the mouse
+next (F10-3j).
 
 ---
 
