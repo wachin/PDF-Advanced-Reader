@@ -70,11 +70,10 @@ def disk_text(path, page=0):
 def test_save_needs_a_document_but_not_a_dirty_one(win, open_tab):
     """Save is not gated on the dirty mark.
 
-    A highlight the user just made lives in the annotation manager and only
-    reaches the document when Save syncs it, so the session cannot report
-    "there is something to save" until F10-3 routes annotations through it.
-    Gating here would switch Ctrl+S off on exactly the document the user is
-    working on; the command asks the writer and says "Nothing to save" instead.
+    A document that matches its file can still be asked for a copy of itself
+    under a new name, and Ctrl+S on it has a better answer than a greyed-out menu
+    item: "Nothing to save".  Annotations do mark the session dirty now (F10-3),
+    but that is not what decides whether the command is offered.
     """
     assert open_tab.dirty is False
     assert win.act_save.isEnabled() is True
@@ -237,18 +236,6 @@ def test_saving_twice_writes_once(qapp, win, open_tab):
 
     assert win.status_left.text() == "Nothing to save"
     assert os.stat(open_tab.doc_path).st_mtime_ns == written
-
-
-def test_a_new_document_object_forces_the_highlights_back_in(open_tab):
-    """Undo hands back a different Document, so "already written" must expire."""
-    manager = open_tab.view.annotation_manager
-    manager.add_highlight(0, [(10.0, 55.0, 120.0, 66.0)])
-    assert manager.sync_to_document() is True
-    assert manager.sync_to_document() is False
-
-    open_tab.view.apply_edit(AddText(0, "NEW OBJECT"))
-
-    assert manager.sync_to_document() is True
 
 
 def test_the_sidebars_save_button_uses_the_windows_write(qapp, win, open_tab,

@@ -1,7 +1,14 @@
 """Annotation system for PDFAR.
 
-Handles highlights, notes, and other annotations with PDF persistence.
-Designed to work with the existing geometry layer for correct positioning.
+The document holds the annotations (F10-3): a highlight is a PDF ``/Highlight``
+annotation, and every change to it is a :class:`pdfar.edits.Edit`.  That is what
+makes a highlight undoable, what makes it mark the document dirty, and what makes
+a background reader see it without a save in between.  ``AnnotationManager`` is a
+*view* of the document: it re-reads the list after a change rather than keeping a
+pending one that Save would have to push in.
+
+An annotation's id is its ``/NM`` name, so a sidebar row, a model key and a PDF
+object all mean the same thing across an undo, a save and a reopen.
 """
 
 from __future__ import annotations
@@ -10,7 +17,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
@@ -18,8 +25,19 @@ except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from .edits import Edit, EditError, Scope
 from .save import SaveError, save_document
 from .session import DocumentSession
+
+#: How solid a highlight paints.  Stored as the annotation's ``/CA``, so a model
+#: read back out of a file reports what was written into it.
+HIGHLIGHT_OPACITY = 0.4
+
+#: What a damaged annotation can raise while the list is being read.  MuPDF
+#: signals its failures through these; asking for less than ``Exception`` means a
+#: mistake in :func:`_highlight_model` still surfaces instead of quietly
+#: emptying the sidebar.
+ANNOT_READ_ERRORS = (RuntimeError, fitz.mupdf.FzErrorBase)
 
 
 class AnnotationType(Enum):
@@ -38,7 +56,7 @@ class Annotation:
     page: int = 0                          # 0-based page index
     rects: List[tuple] = field(default_factory=list)  # List of (x0, y0, x1, y1) in PDF points
     color: str = "#FFFF00"                 # Hex color string
-    opacity: float = 0.4                   # 0.0 - 1.0
+    opacity: float = HIGHLIGHT_OPACITY     # 0.0 - 1.0
     author: str = ""
     created: str = field(default_factory=lambda: datetime.now().isoformat())
     modified: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -68,7 +86,7 @@ class Annotation:
             page=data.get("page", 0),
             rects=data.get("rects", []),
             color=data.get("color", "#FFFF00"),
-            opacity=data.get("opacity", 0.4),
+            opacity=data.get("opacity", HIGHLIGHT_OPACITY),
             author=data.get("author", ""),
             created=data.get("created", datetime.now().isoformat()),
             modified=data.get("modified", datetime.now().isoformat()),
@@ -80,31 +98,16 @@ class Annotation:
 
 @dataclass
 class HighlightAnnotation(Annotation):
-    """Text highlight annotation."""
-    type: AnnotationType = AnnotationType.HIGHLIGHT
-    # Note: notes are stored in the `content` field of the highlight
-    # For backward compatibility and simplicity, we use the same object
+    """Text highlight annotation.
 
-    @classmethod
-    def from_selection(cls, page: int, rects: List[tuple], color: str = "#FFFF00",
-                       author: str = "") -> "HighlightAnnotation":
-        """Create a highlight from a text selection."""
-        return cls(
-            type=AnnotationType.HIGHLIGHT,
-            page=page,
-            rects=rects,
-            color=color,
-            author=author,
-        )
+    A note on a highlight is the highlight's own ``/Contents``, so it needs no
+    second annotation and travels with the highlight it belongs to.
+    """
+    type: AnnotationType = AnnotationType.HIGHLIGHT
 
     def has_note(self) -> bool:
         """Check if this highlight has an associated note."""
         return bool(self.content.strip())
-
-    def set_note(self, text: str) -> None:
-        """Set the note text for this highlight."""
-        self.content = text
-        self.modified = datetime.now().isoformat()
 
     def get_note(self) -> str:
         """Get the note text for this highlight."""
@@ -114,7 +117,7 @@ class HighlightAnnotation(Annotation):
 @dataclass
 class NoteAnnotation(Annotation):
     """Standalone note annotation (not associated with a highlight).
-    
+
     Anchored to a specific position on a page.
     """
     type: AnnotationType = AnnotationType.NOTE
@@ -122,191 +125,385 @@ class NoteAnnotation(Annotation):
     position: tuple = (0.0, 0.0)
 
 
-class AnnotationManager(QObject):
-    """Manages annotations for a single document.
+# -------------------------------------------------------------------------- color
+def _hex_to_rgb(text: str) -> Tuple[float, float, float]:
+    """``#RRGGBB`` as the three floats a PDF color is."""
+    digits = (text or "").lstrip("#")
+    if len(digits) == 3:
+        digits = "".join(d * 2 for d in digits)
+    if len(digits) != 6:
+        raise EditError(f"“{text}” is not a color")
+    try:
+        red, green, blue = (int(digits[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    except ValueError:
+        raise EditError(f"“{text}” is not a color") from None
+    return (red, green, blue)
 
-    Handles both PDF-embedded annotations and external annotations.
-    Emits signals for UI updates.
+
+def _rgb_to_hex(color: Sequence[float]) -> str:
+    """A PDF color as upper-case hex, which is how :data:`HIGHLIGHT_COLORS` writes
+    them — so a highlight read back out of a saved file still matches its color
+    name in the sidebar instead of being listed as "Custom"."""
+    channels = [round(min(1.0, max(0.0, c)) * 255) for c in tuple(color)[:3]]
+    return "#{:02X}{:02X}{:02X}".format(*channels)
+
+
+# ----------------------------------------------------------------------- identity
+def annot_key(annot: fitz.Annot) -> str:
+    """The model id of a document annotation: its ``/NM`` name.
+
+    PyMuPDF reports ``/NM`` as ``info["id"]`` and gives every annotation it makes
+    a unique one, which is what lets an id survive a save and a clone.  An
+    annotation from another program may have none, and naming it on open would
+    turn reading the file into changing it, so those are keyed by object number.
+    """
+    return annot.info.get("id") or f"anon:{annot.xref}"
+
+
+def _name(doc: fitz.Document, annot: fitz.Annot, ann_id: str) -> None:
+    """Stamp an annotation with the id the interface already holds.
+
+    PDFAR's ids are UUIDs, whose characters are exactly the ones a PDF literal
+    string needs, so nothing in them has to be escaped.
+    """
+    doc.xref_set_key(annot.xref, "NM", f"({ann_id})")
+
+
+def _find_highlight(page: fitz.Page, ann_id: str) -> fitz.Annot:
+    """The annotation *ann_id* names on *page*, or an edit that refuses.
+
+    Matching by name rather than by position matters: an undo can leave the page
+    with no such annotation, and changing whatever annotation happened to sit at
+    that object number instead would damage the document.
+    """
+    for annot in page.annots():
+        if annot_key(annot) == ann_id:
+            return annot
+    raise EditError("That annotation is not in this document any more.")
+
+
+def _quad_rects(annot: fitz.Annot) -> List[tuple]:
+    """One rectangle per highlight quad — the shape the model stores.
+
+    The quads are the only faithful record of what was selected, and writing them
+    back as one multi-quad annotation reproduces the annotation unchanged, so a
+    highlight survives a reload without drifting.
+    """
+    vertices = annot.vertices or []
+    rects = []
+    for i in range(0, len(vertices) - 3, 4):
+        quad = vertices[i:i + 4]
+        # Indexed, not `.x`: PyMuPDF hands these back as plain (x, y) tuples on
+        # some releases and as Point objects on others.
+        xs = [corner[0] for corner in quad]
+        ys = [corner[1] for corner in quad]
+        rects.append((min(xs), min(ys), max(xs), max(ys)))
+    if rects:
+        return rects
+    rect = annot.rect        # a foreign highlight drawn without quad points
+    return [(rect.x0, rect.y0, rect.x1, rect.y1)]
+
+
+def _highlight_model(annot: fitz.Annot, page_idx: int) -> HighlightAnnotation:
+    """Read one document annotation into the model."""
+    info = annot.info
+    opacity = annot.opacity
+    return HighlightAnnotation(
+        id=annot_key(annot),
+        page=page_idx,
+        rects=_quad_rects(annot),
+        color=_rgb_to_hex(annot.colors.get("stroke") or (1.0, 1.0, 0.0)),
+        opacity=HIGHLIGHT_OPACITY if opacity is None else opacity,
+        author=info.get("title") or "",
+        created=info.get("creationDate") or "",
+        modified=info.get("modDate") or "",
+        content=info.get("content") or "",
+    )
+
+
+# -------------------------------------------------------------------------- edits
+@dataclass(frozen=True)
+class HighlightSpec:
+    """One page's share of a highlight: the id it will have, and its rectangles."""
+
+    ann_id: str
+    page: int
+    rects: Tuple[tuple, ...]
+
+
+@dataclass(frozen=True)
+class AddHighlight(Edit):
+    """Highlight the selected rectangles.
+
+    One edit carries every page the selection touched, because the user selected
+    once — an edit per page would make Ctrl+Z undo the answer a page at a time.
+    """
+
+    specs: Tuple[HighlightSpec, ...]
+    color: str = "#FFFF00"
+    opacity: float = HIGHLIGHT_OPACITY
+    author: str = ""
+    note: str = ""
+
+    scope = Scope.COMMENTS
+
+    @property
+    def label(self) -> str:
+        return "Highlight"
+
+    def apply(self, doc: fitz.Document) -> None:
+        if not self.specs:
+            raise EditError("There is nothing to highlight")
+        stroke = _hex_to_rgb(self.color)
+        for spec in self.specs:
+            page = doc.load_page(spec.page)
+            # One annotation holding every line of the selection: quads are how
+            # a PDF records a selection that broke across lines.
+            annot = page.add_highlight_annot([fitz.Rect(*rect) for rect in spec.rects])
+            annot.set_colors(stroke=stroke)
+            annot.set_opacity(self.opacity)
+            if self.author:
+                annot.set_info(title=self.author)
+            if self.note:
+                annot.set_info(content=self.note)
+            annot.update()
+            _name(doc, annot, spec.ann_id)
+
+
+@dataclass(frozen=True)
+class RemoveHighlight(Edit):
+    """Delete the annotation *ann_id* names."""
+
+    ann_id: str
+    page: int
+
+    scope = Scope.COMMENTS
+
+    @property
+    def label(self) -> str:
+        return "Delete annotation"
+
+    def apply(self, doc: fitz.Document) -> None:
+        page = doc.load_page(self.page)
+        page.delete_annot(_find_highlight(page, self.ann_id))
+
+
+@dataclass(frozen=True)
+class SetHighlightColor(Edit):
+    """Recolor an existing highlight."""
+
+    ann_id: str
+    page: int
+    color: str
+    opacity: float = HIGHLIGHT_OPACITY
+
+    scope = Scope.COMMENTS
+
+    @property
+    def label(self) -> str:
+        return "Change highlight color"
+
+    def apply(self, doc: fitz.Document) -> None:
+        page = doc.load_page(self.page)
+        annot = _find_highlight(page, self.ann_id)
+        annot.set_colors(stroke=_hex_to_rgb(self.color))
+        annot.set_opacity(self.opacity)
+        # The color is baked into the appearance stream, so without a new
+        # appearance the page keeps painting the color it was drawn with.
+        annot.update()
+
+
+@dataclass(frozen=True)
+class SetHighlightNote(Edit):
+    """Set or clear the note on a highlight."""
+
+    ann_id: str
+    page: int
+    note: str
+    #: Whether the highlight already had a note when the user asked.  Only the
+    #: manager knows that, and it decides which of these three steps is called.
+    had_note: bool = False
+
+    scope = Scope.COMMENTS
+
+    @property
+    def label(self) -> str:
+        if not self.note.strip():
+            return "Remove note"
+        return "Edit note" if self.had_note else "Add note"
+
+    def apply(self, doc: fitz.Document) -> None:
+        # ``page`` stays named and in scope: PyMuPDF unbinds an ``Annot`` the
+        # moment its ``Page`` is garbage, and writing to a handle in that state
+        # raises "annotation not bound to any page".
+        page = doc.load_page(self.page)
+        annot = _find_highlight(page, self.ann_id)
+        if self.note:
+            annot.set_info(content=self.note)
+            return
+        # ``set_info`` reads an empty string as "nothing to change", so clearing a
+        # note means removing the key from the annotation object itself.
+        doc.xref_set_key(annot.xref, "Contents", "null")
+
+
+class AnnotationManager(QObject):
+    """The annotations the document holds, as a list the interface can show.
+
+    A change is an :class:`pdfar.edits.Edit` applied through the session, so it
+    undoes, marks the document dirty and reaches the render workers as a new
+    content version.  The list is re-read from the document afterwards: it is a
+    cache of what the file would say, never a change waiting for Save.
     """
 
     annotations_changed = pyqtSignal()
-    annotation_added = pyqtSignal(object)    # Annotation
-    annotation_removed = pyqtSignal(str)     # annotation id
-    annotation_modified = pyqtSignal(object) # Annotation
+    #: An edit was accepted; carries the ``Scope`` the view has to invalidate.
+    annotations_edited = pyqtSignal(int)
+    #: An edit the user asked for did not happen, and why.
+    annotation_edit_failed = pyqtSignal(str)
 
     def __init__(self, session: DocumentSession, parent=None):
         super().__init__(parent)
         self.session = session
         self._annotations: Dict[str, Annotation] = {}
-        # Which document the model was last materialized into, and whether the
-        # model has moved since.  Both are needed: without the generation, an
-        # undo that hands back a different document would silently save without
-        # the highlights; without the flag, a second Ctrl+S would rewrite a
-        # document whose highlights are already in it.
-        self._materialized = session.generation
-        self._pending = False
-        self._load_from_pdf()
-
-    def _touch_model(self) -> None:
-        """The model no longer matches whatever document it was last written to."""
-        self._pending = True
-        self.annotations_changed.emit()
+        # -1 so that the first read happens even for a session at generation 0.
+        self._generation = -1
+        self.reload_from_document()
 
     @property
     def doc(self) -> fitz.Document:
         """The live document; an accepted edit replaces the object."""
         return self.session.doc
 
-    @property
-    def doc_path(self) -> str:
-        return self.session.path
-
-    def _load_from_pdf(self) -> None:
-        """Load annotations from the PDF file."""
-        try:
-            for page_idx in range(self.doc.page_count):
-                page = self.doc.load_page(page_idx)
-                annots = page.annots() or []
-                for annot in annots:
-                    if annot.type[0] == fitz.PDF_ANNOT_HIGHLIGHT:
-                        # Extract highlight info
-                        color = annot.colors.get("stroke", (1, 1, 0))
-                        hex_color = "#{:02x}{:02x}{:02x}".format(
-                            int(color[0] * 255), int(color[1] * 255), int(color[2] * 255)
-                        )
-                        rect = annot.rect
-                        quad_rects = []
-                        vertices = getattr(annot, "vertices", None)
-                        if vertices and len(vertices) >= 4 and len(vertices) % 4 == 0:
-                            for i in range(0, len(vertices), 4):
-                                pts = vertices[i:i+4]
-                                # pts can be list of fitz.Point or list of (x, y) tuples
-                                def get_x(p):
-                                    return p.x if hasattr(p, "x") else p[0]
-                                def get_y(p):
-                                    return p.y if hasattr(p, "y") else p[1]
-                                x0 = min(get_x(p) for p in pts)
-                                y0 = min(get_y(p) for p in pts)
-                                x1 = max(get_x(p) for p in pts)
-                                y1 = max(get_y(p) for p in pts)
-                                quad_rects.append((x0, y0, x1, y1))
-
-                        highlight = HighlightAnnotation(
-                            id=str(uuid.uuid4()),
-                            page=page_idx,
-                            rects=quad_rects if quad_rects else [(rect.x0, rect.y0, rect.x1, rect.y1)],
-                            color=hex_color,
-                            opacity=0.4,
-                            author=annot.info.get("title", ""),
-                            created=annot.info.get("creationDate", ""),
-                            modified=annot.info.get("modDate", ""),
-                            content=annot.info.get("content", ""),
-                        )
-                        self._annotations[highlight.id] = highlight
-        except Exception:
-            pass  # Silently ignore load errors
-
+    # ---------------------------------------------------------------- the model
     def reload_from_document(self) -> None:
-        """Rebuild the model from the live document, dropping what is not in it.
+        """Re-read the list when it no longer describes the document we hold.
 
-        Revert needs this: once the file is the truth again, a highlight that was
-        never saved must not go on living in the sidebar list.
+        An adopted edit, an undo or a revert hands back a different
+        ``fitz.Document``, which is what ``session.generation`` counts.  Re-read
+        then, so the page and the id a row carries come from the document the user
+        is looking at rather than from the one that was edited.
         """
-        self._annotations.clear()
-        self._load_from_pdf()
-        self._pending = False
-        self._materialized = self.session.generation
+        if self._generation == self.session.generation:
+            return
+        found: Dict[str, Annotation] = {}
+        doc = self.doc
+        for page_idx in range(doc.page_count):
+            page = doc.load_page(page_idx)
+            try:
+                for annot in page.annots():
+                    if annot.type[0] != fitz.PDF_ANNOT_HIGHLIGHT:
+                        continue
+                    model = _highlight_model(annot, page_idx)
+                    found[model.id] = model
+            except ANNOT_READ_ERRORS:
+                # Annotations are a linked chain, so one that the file cannot
+                # read ends this page's list.  What was read before it stays, and
+                # the rest of the document is unaffected.  The guard covers the
+                # data errors only, so a mistake in here still surfaces instead
+                # of quietly emptying the sidebar.
+                continue
+        self._annotations = found
+        self._generation = self.session.generation
         self.annotations_changed.emit()
 
-    def sync_to_document(self) -> bool:
-        """Materialize the highlights into the live document.
-
-        Returns whether the document changed, and bumps the session version when
-        it did — the change is made in place, and a reader that is not turned
-        away by a new version would paint the old content back over it.  A model
-        that has not moved and already describes this document writes nothing, so
-        saving twice costs one write.
-        """
-        if not self._pending and self._materialized == self.session.generation:
-            return False
-        changed = False
-        for page_idx in range(self.doc.page_count):
-            page = self.doc.load_page(page_idx)
-            for annot in list(page.annots() or []):
-                if annot.type[0] == fitz.PDF_ANNOT_HIGHLIGHT:
-                    page.delete_annot(annot)
-                    changed = True
-
-        for ann in self._annotations.values():
-            if ann.type == AnnotationType.HIGHLIGHT and ann.rects:
-                page = self.doc.load_page(ann.page)
-                for rect in ann.rects:
-                    x0, y0, x1, y1 = rect
-                    highlight = page.add_highlight_annot(fitz.Rect(x0, y0, x1, y1))
-                    if highlight:
-                        # Parse color
-                        color_hex = ann.color.lstrip("#")
-                        r = int(color_hex[0:2], 16) / 255.0
-                        g = int(color_hex[2:4], 16) / 255.0
-                        b = int(color_hex[4:6], 16) / 255.0
-                        highlight.set_colors(stroke=(r, g, b))
-                        highlight.set_opacity(ann.opacity)
-                        if ann.author:
-                            highlight.set_info(title=ann.author)
-                        if ann.content:
-                            highlight.set_info(content=ann.content)
-                        highlight.update()
-                        changed = True
-
-        self._pending = False
-        self._materialized = self.session.generation
-        if changed:
-            self.session.content_changed()
-        return changed
-
     def save_to_pdf(self) -> bool:
-        """Save all annotations to the PDF file.
+        """Write the document, which already holds every annotation.
 
         The write itself is F10-2's: staged, verified, incremental while the
         document is still the file handle it came from.  A refusal is reported
         as ``False`` here; the main window's Save command surfaces the reason.
         """
         try:
-            self.sync_to_document()
             return save_document(self.session) is not None
         except SaveError:
             return False
 
-    def add_highlight(self, page: int, rects: List[tuple], color: str = "#FFFF00",
-                      author: str = "") -> HighlightAnnotation:
-        """Add a new highlight annotation."""
-        highlight = HighlightAnnotation.from_selection(page, rects, color, author)
-        self._annotations[highlight.id] = highlight
-        self.annotation_added.emit(highlight)
-        self._touch_model()
-        return highlight
+    # --------------------------------------------------------------- mutators
+    def _run(self, edit: Edit) -> bool:
+        """Carry out one annotation edit: document first, then list, then view.
+
+        The session applies to a copy and adopts it only on success, so a refused
+        edit leaves the page, the version and the undo stack exactly as they were.
+        """
+        try:
+            _version, scope = self.session.apply(edit)
+        except EditError as exc:
+            self.annotation_edit_failed.emit(str(exc))
+            return False
+        self.reload_from_document()
+        self.annotations_edited.emit(int(scope))
+        return True
+
+    def add_highlights(self, by_page: Dict[int, Sequence[tuple]],
+                       color: str = "#FFFF00", author: str = "",
+                       note: str = "") -> List[HighlightAnnotation]:
+        """Highlight a selection that may cover several pages, as one edit.
+
+        Pages with nothing on them are dropped, so an empty selection cannot
+        become an undo step that appears to do nothing.
+        """
+        specs = tuple(
+            HighlightSpec(ann_id=str(uuid.uuid4()), page=int(page),
+                          rects=tuple(rects))
+            for page, rects in by_page.items() if rects)
+        if not specs:
+            return []
+        if not self._run(AddHighlight(specs=specs, color=color, author=author,
+                                      note=note)):
+            return []
+        return [h for h in (self.get_highlight(spec.ann_id) for spec in specs)
+                if h is not None]
+
+    def add_highlight(self, page: int, rects: Sequence[tuple],
+                      color: str = "#FFFF00", author: str = "",
+                      note: str = "") -> Optional[HighlightAnnotation]:
+        """Highlight one page's rectangles.  ``None`` if the edit was refused."""
+        made = self.add_highlights({page: rects}, color, author, note)
+        return made[0] if made else None
 
     def remove_annotation(self, annotation_id: str) -> bool:
         """Remove an annotation by ID."""
-        if annotation_id in self._annotations:
-            del self._annotations[annotation_id]
-            self.annotation_removed.emit(annotation_id)
-            self._touch_model()
-            return True
-        return False
+        ann = self._annotations.get(annotation_id)
+        if ann is None:
+            return False
+        return self._run(RemoveHighlight(ann_id=annotation_id, page=ann.page))
 
-    def update_annotation(self, annotation_id: str, **kwargs) -> Optional[Annotation]:
-        """Update an annotation's properties."""
-        if annotation_id in self._annotations:
-            ann = self._annotations[annotation_id]
-            for key, value in kwargs.items():
-                if hasattr(ann, key):
-                    setattr(ann, key, value)
-            ann.modified = datetime.now().isoformat()
-            self.annotation_modified.emit(ann)
-            self._touch_model()
-            return ann
-        return None
+    def set_highlight_color(self, annotation_id: str, color: str) -> bool:
+        """Recolor a highlight, keeping how solid it paints."""
+        highlight = self.get_highlight(annotation_id)
+        if highlight is None:
+            return False
+        return self._run(SetHighlightColor(ann_id=annotation_id,
+                                           page=highlight.page, color=color,
+                                           opacity=highlight.opacity))
+
+    def add_note_to_highlight(self, highlight_id: str,
+                              note_text: str) -> Optional[HighlightAnnotation]:
+        """Add or update a note on an existing highlight."""
+        if not self._set_note(highlight_id, note_text):
+            return None
+        return self.get_highlight(highlight_id)
+
+    def remove_note_from_highlight(self, highlight_id: str) -> bool:
+        """Remove the note from a highlight (keeps the highlight)."""
+        return self._set_note(highlight_id, "")
+
+    def _set_note(self, highlight_id: str, note: str) -> bool:
+        highlight = self.get_highlight(highlight_id)
+        if highlight is None:
+            return False
+        return self._run(SetHighlightNote(ann_id=highlight_id, page=highlight.page,
+                                          note=note, had_note=highlight.has_note()))
+
+    # ------------------------------------------------------------------- reads
+    def get_annotation(self, annotation_id: str) -> Optional[Annotation]:
+        """One annotation by id, or ``None`` if there is no such annotation."""
+        return self._annotations.get(annotation_id)
+
+    def get_highlight(self, annotation_id: str) -> Optional[HighlightAnnotation]:
+        """One highlight by id; ``None`` for any other kind of annotation."""
+        ann = self._annotations.get(annotation_id)
+        return ann if isinstance(ann, HighlightAnnotation) else None
 
     def get_annotations(self, page: Optional[int] = None,
                         ann_type: Optional[AnnotationType] = None) -> List[Annotation]:
@@ -334,45 +531,10 @@ class AnnotationManager(QObject):
         return [a for a in self.get_annotations(page=page, ann_type=AnnotationType.NOTE)
                 if isinstance(a, NoteAnnotation)]
 
-    def add_note_to_highlight(self, highlight_id: str, note_text: str) -> Optional[HighlightAnnotation]:
-        """Add or update a note on an existing highlight."""
-        if highlight_id in self._annotations:
-            ann = self._annotations[highlight_id]
-            if ann.type == AnnotationType.HIGHLIGHT:
-                ann.set_note(note_text)
-                self.annotation_modified.emit(ann)
-                self._touch_model()
-                return ann
-        return None
-
     def get_note_for_highlight(self, highlight_id: str) -> Optional[str]:
         """Get the note text for a highlight."""
-        if highlight_id in self._annotations:
-            ann = self._annotations[highlight_id]
-            if ann.type == AnnotationType.HIGHLIGHT:
-                return ann.get_note()
-        return None
-
-    def remove_note_from_highlight(self, highlight_id: str) -> bool:
-        """Remove the note from a highlight (keeps the highlight)."""
-        if highlight_id in self._annotations:
-            ann = self._annotations[highlight_id]
-            if ann.type == AnnotationType.HIGHLIGHT:
-                ann.set_note("")
-                self.annotation_modified.emit(ann)
-                self._touch_model()
-                return True
-        return False
-
-    def clear_page_annotations(self, page: int) -> int:
-        """Remove all annotations from a page. Returns count removed."""
-        ids_to_remove = [aid for aid, ann in self._annotations.items() if ann.page == page]
-        for aid in ids_to_remove:
-            del self._annotations[aid]
-            self.annotation_removed.emit(aid)
-        if ids_to_remove:
-            self._touch_model()
-        return len(ids_to_remove)
+        highlight = self.get_highlight(highlight_id)
+        return highlight.get_note() if highlight is not None else None
 
 
 # Standard highlight colors (Okular-style)

@@ -1119,12 +1119,10 @@ class MainWindow(QMainWindow):
                    full: bool = False, before: str = "") -> bool:
         """The one place a document reaches the disk.
 
-        Highlights are materialized into the document first: Ctrl+S has always
-        meant "save my highlights", and the writer only saves what the document
-        itself holds.
+        There is nothing to prepare: the annotations are in the document already
+        (F10-3), so the writer saves exactly what the user is looking at.
         """
         session = tab.view.session
-        tab.view.annotation_manager.sync_to_document()
         title = "Save" if path is None else "Save As"
         try:
             report = save_document(session, path, full=full)
@@ -1240,11 +1238,10 @@ class MainWindow(QMainWindow):
         except SaveError as exc:
             QMessageBox.critical(self, "Revert", str(exc))
             return False
+        # Revert hands back a new document and ``invalidate`` re-reads the
+        # annotation list from it, so a highlight the user never saved goes away
+        # with the file instead of going back in on the next Save.
         tab.view.invalidate(scope)
-        # The file is the authority now, so the highlights the user never saved
-        # go away with it; leaving them in the list would put them back on the
-        # next Save and revert would have undone nothing.
-        tab.view.annotation_manager.reload_from_document()
         self._on_document_changed(tab)
         self.status_left.setText(f"Reverted to the file on disk: {session.path}")
         return True
@@ -2260,10 +2257,10 @@ class MainWindow(QMainWindow):
             action.setEnabled(label is not None)
             # A label is document text: an "&" in it must not become a mnemonic.
             action.setText(f"{verb} {label.replace('&', '&&')}" if label else verb)
-        # Not gated on dirty, unlike Revert: highlights the user just made live in
-        # the annotation manager and only reach the document when Save syncs them,
-        # so "there is nothing to save" is not knowable here until F10-3 routes
-        # annotations through the session.  Save reports it instead.
+        # Not gated on dirty, unlike Revert: a document that matches its file can
+        # still be asked for a copy of itself under a new name, and Ctrl+S on it
+        # has a truthful answer of its own ("Nothing to save") rather than a
+        # greyed-out menu item the user has to reason about.
         self.act_save.setEnabled(tab is not None)
         self.act_save_as.setEnabled(tab is not None)
         self.act_revert.setEnabled(session is not None and session.dirty)

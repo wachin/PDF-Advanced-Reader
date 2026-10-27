@@ -253,7 +253,8 @@ class PDFView(QAbstractScrollArea):
 
         # Annotations
         self.annotation_manager = AnnotationManager(self.session, self)
-        self.annotation_manager.annotations_changed.connect(self._on_annotations_changed)
+        self.annotation_manager.annotations_edited.connect(self._on_annotation_edit)
+        self.annotation_manager.annotation_edit_failed.connect(self._on_annotation_edit_failed)
         self._highlight_color_idx = 0  # Current highlight color index
 
         self.setFrameShape(QFrame.Shape.NoFrame)
@@ -344,12 +345,15 @@ class PDFView(QAbstractScrollArea):
         """
         version = self.session.version
         if version == self._invalidated_version:
-            # The change did not arrive through the session — annotations still
-            # mutate the document in place (F10-3) — so bump it here. Without a
-            # new version, renders of the old content that are already in flight
-            # would be accepted as current the moment they land.
+            # The change did not arrive through the session — a rare path now that
+            # annotations are edits too — so bump it here. Without a new version,
+            # renders of the old content that are already in flight would be
+            # accepted as current the moment they land.
             version = self.session.content_changed()
         self._invalidated_version = version
+        # The document is the annotation store, so a document we have never read
+        # is an annotation list we have never read: re-derive it (F10-3).
+        self.annotation_manager.reload_from_document()
         if scope & self._PAINTED:
             self.pool.cancel_if(lambda job: True)
             self.cache.clear()
@@ -386,9 +390,18 @@ class PDFView(QAbstractScrollArea):
         if self.current_page >= self.page_count:
             self.current_page = max(0, self.page_count - 1)
 
-    def _on_annotations_changed(self) -> None:
-        """Called when annotations change - trigger repaint."""
-        self.viewport().update()
+    def _on_annotation_edit(self, scope: int) -> None:
+        """An annotation reached the document, so what it paints has to change.
+
+        The manager owns the edit; this is the half that says which caches the
+        change can have stale — ``Scope.COMMENTS`` is in the painted set, so the
+        page is re-rendered rather than patched with an overlay.
+        """
+        self.invalidate(Scope(scope))
+
+    def _on_annotation_edit_failed(self, reason: str) -> None:
+        """The user asked for an annotation and did not get one: say why."""
+        self.transient_message.emit(reason)
 
     def create_highlight_from_selection(self, color: Optional[str] = None) -> bool:
         """Create a highlight annotation from the current text selection.
@@ -416,13 +429,13 @@ class PDFView(QAbstractScrollArea):
         for page, rects in page_rects.items():
             merged_rects[page] = self._merge_selection_rects(rects)
 
-        # Create highlight annotations
+        # Create the highlight: one edit, so one undo step, however many pages
+        # the selection reached
         author = ""  # Could be made configurable
-        for page, rects in merged_rects.items():
-            self.annotation_manager.add_highlight(page, rects, color, author)
+        made = self.annotation_manager.add_highlights(merged_rects, color, author)
 
         self.clear_selection()
-        return True
+        return bool(made)
 
     def _merge_selection_rects(self, rects: List[tuple], y_tolerance: float = 2.0) -> List[tuple]:
         """Merge adjacent selection rectangles on the same line.
@@ -1635,8 +1648,9 @@ class PDFView(QAbstractScrollArea):
 
     def _paint_overlays(self, painter: QPainter, page: int, x: float, y: float) -> None:
         z = self.zoom
-        # annotations (highlights, etc.) - drawn first, behind search/selection
-        self._paint_annotations(painter, page, x, y)
+        # Highlights are not painted here any more: they live in the document and
+        # the renderer draws annotations, so an overlay would paint the band twice
+        # (F10-3).
 
         # search hits
         for rect in self._hit_rects.get(page, ()):
@@ -1721,18 +1735,6 @@ class PDFView(QAbstractScrollArea):
         painter.setFont(qfont)
         painter.drawText(QPointF(offset, 0.0), box.text)
         painter.restore()
-
-    def _paint_annotations(self, painter: QPainter, page: int, x: float, y: float) -> None:
-        """Draw annotations (highlights) for a page."""
-        z = self.zoom
-        highlights = self.annotation_manager.get_highlights_for_page(page)
-        for highlight in highlights:
-            color = QColor(highlight.color)
-            color.setAlphaF(highlight.opacity)
-            for rect in highlight.rects:
-                x0, y0, x1, y1 = map_rect(rect, *self.page_sizes[page], self.rotation)
-                painter.fillRect(QRect(int(x + x0 * z), int(y + y0 * z),
-                                       max(1, int((x1 - x0) * z)), max(1, int((y1 - y0) * z))), color)
 
     # ------------------------------------------------------- text layer
     def _request_page_words(self, index: int, priority: int = 3) -> None:

@@ -44,7 +44,12 @@ def win(qapp):
 
 
 def test_highlight_annotation_note_methods(tmp_path):
-    """Test HighlightAnnotation note getter/setter."""
+    """The model reports the note the document holds, and only that.
+
+    ``HighlightAnnotation`` used to own its note — ``set_note`` wrote a field and
+    Save pushed it out.  The annotation in the file is the store now, so a note
+    arrives through an edit and a model object is a snapshot of one read of it.
+    """
 
     p = build_sample_pdf(tmp_path / "test.pdf", pages=3)
     session = make_session(p)
@@ -56,18 +61,20 @@ def test_highlight_annotation_note_methods(tmp_path):
     assert not hl.has_note()
     assert hl.get_note() == ""
 
-    # Set note
-    hl.set_note("This is a test note")
-    assert hl.has_note()
-    assert hl.get_note() == "This is a test note"
+    # Add note
+    mgr.add_note_to_highlight(hl.id, "This is a test note")
+    noted = mgr.get_highlight(hl.id)
+    assert noted.has_note()
+    assert noted.get_note() == "This is a test note"
+    assert noted is not hl, "the handle taken before the edit is the read before it"
 
     # Update note
-    hl.set_note("Updated note")
-    assert hl.get_note() == "Updated note"
+    mgr.add_note_to_highlight(hl.id, "Updated note")
+    assert mgr.get_note_for_highlight(hl.id) == "Updated note"
 
     # Clear note
-    hl.set_note("")
-    assert not hl.has_note()
+    assert mgr.remove_note_from_highlight(hl.id) is True
+    assert not mgr.get_highlight(hl.id).has_note()
 
     session.close()
 
@@ -107,7 +114,7 @@ def test_note_persistence_in_pdf(tmp_path):
     mgr = AnnotationManager(session)
 
     hl = mgr.add_highlight(0, [(10.0, 10.0, 50.0, 20.0)], color="#FFFF00")
-    hl.set_note("Persistent note")
+    mgr.add_note_to_highlight(hl.id, "Persistent note")
 
     # Save to PDF
     assert mgr.save_to_pdf() is True
@@ -173,9 +180,11 @@ def test_main_window_edit_note_via_sidebar(win, tmp_path, monkeypatch):
     # Edit note via sidebar (simulate context menu -> Edit Note)
     win.sidebar._edit_note(hl.id)
 
-    # Check note was added
-    assert hl.has_note()
-    assert hl.get_note() == "Edited via sidebar"
+    # Check note was added.  The highlight is in the document now, so the answer
+    # comes from a fresh read, not from the handle held before the edit.
+    manager = win.view.annotation_manager
+    assert manager.get_note_for_highlight(hl.id) == "Edited via sidebar"
+    assert manager.get_highlight(hl.id).has_note()
 
 
 def test_remove_note_via_sidebar(win, tmp_path):
@@ -188,14 +197,16 @@ def test_remove_note_via_sidebar(win, tmp_path):
     win.view.create_highlight_from_selection("#FFFF00")
     hls = win.view.annotation_manager.get_highlights_for_page(0)
     hl = hls[0]
-    win.view.annotation_manager.add_note_to_highlight(hl.id, "Note to remove")
-    assert hl.has_note()
+    manager = win.view.annotation_manager
+    manager.add_note_to_highlight(hl.id, "Note to remove")
+    assert manager.get_note_for_highlight(hl.id) == "Note to remove"
 
     # Remove note via sidebar
     win.sidebar._remove_note(hl.id)
 
     # Check note was removed
-    assert not hl.has_note()
+    assert not manager.get_highlight(hl.id).has_note()
+    assert manager.get_note_for_highlight(hl.id) == ""
 
 
 def test_note_in_annotations_tree(win, tmp_path):
@@ -250,11 +261,12 @@ def test_multiple_highlights_different_notes(win, tmp_path):
     hl0 = hls_p0[0]
     hl1 = hls_p1[0]
 
-    win.view.annotation_manager.add_note_to_highlight(hl0.id, "Note on page 1")
-    win.view.annotation_manager.add_note_to_highlight(hl1.id, "Note on page 2")
+    manager = win.view.annotation_manager
+    manager.add_note_to_highlight(hl0.id, "Note on page 1")
+    manager.add_note_to_highlight(hl1.id, "Note on page 2")
 
-    assert hl0.get_note() == "Note on page 1"
-    assert hl1.get_note() == "Note on page 2"
+    assert manager.get_note_for_highlight(hl0.id) == "Note on page 1"
+    assert manager.get_note_for_highlight(hl1.id) == "Note on page 2"
 
 
 def test_note_saved_with_highlight_color(win, tmp_path):

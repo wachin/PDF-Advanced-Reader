@@ -77,10 +77,10 @@ def test_annotation_manager_update_and_remove(tmp_path):
     ann_id = hl.id
 
     # update color
-    updated = mgr.update_annotation(ann_id, color="#90EE90")
-    assert updated is not None
-    assert updated.color == "#90EE90"
+    assert mgr.set_highlight_color(ann_id, "#90EE90") is True
+    assert mgr.get_annotation(ann_id).color == "#90EE90"
     assert mgr.get_highlights_for_page(0)[0].color == "#90EE90"
+    assert mgr.set_highlight_color("non-existent", "#FF0000") is False
 
     # remove
     assert mgr.remove_annotation(ann_id) is True

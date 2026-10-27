@@ -992,9 +992,8 @@ class Sidebar(QWidget):
 
         if ann_type == "highlight":
             # Get the highlight to check if it has a note
-            highlight = None
-            if self.annotation_manager and ann_id in self.annotation_manager._annotations:
-                highlight = self.annotation_manager._annotations[ann_id]
+            highlight = (self.annotation_manager.get_highlight(ann_id)
+                         if self.annotation_manager else None)
 
             menu.addSeparator()
 
@@ -1017,10 +1016,10 @@ class Sidebar(QWidget):
 
     def _edit_note(self, annotation_id: str) -> None:
         """Edit a note for a highlight."""
-        if not self.annotation_manager or annotation_id not in self.annotation_manager._annotations:
+        if not self.annotation_manager:
             return
-        ann = self.annotation_manager._annotations[annotation_id]
-        if ann.type != AnnotationType.HIGHLIGHT:
+        ann = self.annotation_manager.get_highlight(annotation_id)
+        if ann is None:
             return
 
         current_note = ann.get_note()
@@ -1049,7 +1048,7 @@ class Sidebar(QWidget):
     def _change_annotation_color(self, annotation_id: str, color: str) -> None:
         """Change an annotation's color."""
         if self.annotation_manager:
-            self.annotation_manager.update_annotation(annotation_id, color=color)
+            self.annotation_manager.set_highlight_color(annotation_id, color)
 
     def _on_new_highlight(self) -> None:
         """Create a highlight from the current view selection."""

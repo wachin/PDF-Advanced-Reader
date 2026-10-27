@@ -904,8 +904,8 @@ PDFAR must be local-first and privacy-first.
 # F10 — PDF EDITING (MASTER PLAN)
 
 Phase status: **[~] Under way.** F10-0 (document session), F10-1 (edit
-framework) and F10-2 (save, save as, revert) are implemented; the next task is
-**F10-3**.
+framework) and F10-2 (save, save as, revert) are implemented; **F10-3** is under
+way, with its first increment (F10-3a, annotations as edits) done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1080,30 +1080,69 @@ second rule precisely because it does not rename anything.
 
 ### Consequences F10-3 must handle (found here)
 
-- Highlights live in `AnnotationManager`'s model and only reach the document when
-  something syncs them, so `session.dirty` is False while the user has unsaved
-  highlights. Save is therefore **not** gated on the dirty mark (it would switch
-  Ctrl+S off on exactly the document the user is working on) and the
-  close-the-tab prompt cannot warn about them. Routing annotation changes through
-  `Edit` removes the whole class of problem.
-- `sync_to_document()` now skips its work while the model matches the document it
-  was last written to, keyed on `session.generation` — otherwise a second Ctrl+S
-  rewrote the whole file, and an undo that handed back a different `Document`
-  would have saved without the highlights.
+*Both handled in F10-3a; kept because they explain why Save is not gated on the
+dirty mark.*
+
+- Highlights lived in `AnnotationManager`'s model and only reached the document
+  when something synced them, so `session.dirty` was False while the user had
+  unsaved highlights. Save is therefore **not** gated on the dirty mark (it would
+  switch Ctrl+S off on exactly the document the user is working on) and
+  close-the-tab could not warn about them. Routing annotation changes through
+  `Edit` removed the whole class of problem, which is what F10-3a did — the
+  reason left for not gating Save is the ordinary one in the test.
+- `sync_to_document()` was added here to skip its work while the model matched
+  the document it was last written to, keyed on `session.generation` — otherwise
+  a second Ctrl+S rewrote the whole file, and an undo that handed back a
+  different `Document` would have saved without the highlights. **Deleted in
+  F10-3a:** there is nothing left to sync, because the document holds the
+  annotations in the first place.
 
 ## F10-3 Finish the annotation system (P4) — [~]
 
-Highlights are implemented and persisted (`annotations.py:186-225`).
+Highlights are implemented and persisted (`src/pdfar/annotations.py`).
 
+- [x] Annotation operations routed through F10-1, so they undo and mark dirty
+      (**F10-3a.** The document is the annotation store: creating, recolouring,
+      noting and deleting a highlight are each an `Edit` with `Scope.COMMENTS`
+      applied through the session, so they undo, mark the document dirty and
+      reach a background render as a new content version. `AnnotationManager` is
+      now a *view* of that document — `reload_from_document()` re-derives the
+      list and is stamped with `session.generation`, so a document we have never
+      read is an annotation list we have never read. The Qt highlight overlay is
+      deleted: `render.py` paints annotations, and keeping the overlay painted
+      the band a second time.
+      *Identity:* an annotation's id is its `/NM` name, so a sidebar row, a model
+      key and a PDF object agree across an undo, a save and a reopen. A foreign
+      annotation with no `/NM` is filed under a read-only `anon:{xref}` fallback
+      key, because opening a file must not have to write into it.
+      *Granularity:* a selection of several lines is one annotation with several
+      quads, and a selection spanning pages is one undo step, not one per page.
+      `save_to_pdf()` no longer deletes every highlight in the file and rewrites
+      them — it asks the writer, which stages the file atomically.)
+- [x] Tests: `tests/test_annotations_edits.py` (23) — a highlight is in the
+      document the moment it is made, its `/NM` survives a save and a reopen, an
+      unrelated content edit does not lose it, a foreign unnamed annotation is
+      listed without being rewritten, the band reaches the pixels through
+      `session.open_copy()`, each operation names its own undo step, an edit
+      whose annotation is gone refuses the document rather than writing to
+      whatever shares its key, and the tab, title and Revert follow the dirty
+      mark.
+- [ ] A comment-only edit should not have to copy the whole document to undo it.
+      Measured on GS262 (540 pages, 25 MB): one highlight costs **2.1 s and
+      ~25 MB**, because an undo step is a full `tobytes()` snapshot — the same
+      price F10-1 already charges for rotating a page, but highlighting is the
+      editing action users actually perform. Ten of them reach the history's
+      256 MB byte cap, so the earlier ones start disappearing. Undoing by inverse
+      intent (`AddHighlight` ↔ `RemoveHighlight`) would make it free; that is a
+      change to the edit framework, not to annotations.
 - [ ] Notes persisted as real `/Text` annotations, not only in memory
+      (a note *on* a highlight is that annotation's own `/Contents` and is done;
+      a standalone sticky note is not)
 - [ ] Comments panel listing annotations and jumping to them
 - [ ] Freehand, shapes, stamps, measurement
 - [ ] Appearance streams, so other readers show the same thing without
       regenerating them
 - [ ] XFDF import/export
-- [ ] Annotation operations routed through F10-1, so they undo and mark dirty
-      (`save_to_pdf` currently deletes every highlight in the file and rewrites
-      them, and rewrites in place without confirmation)
 
 ## F10-4 Page manipulation (was F6) — [ ]
 
@@ -1209,9 +1248,10 @@ Edit framework (copy-and-adopt, undo, dirty state)
 F10-2 — done
 Save, Save As, Revert (atomic, verified, incremental when possible)
 
-F10-3
-Finish the annotation system: notes as real annotations, and annotation changes
-routed through F10-1 so they undo and mark dirty
+F10-3 — under way
+Finish the annotation system. Done: annotation changes are routed through F10-1,
+so they undo and mark dirty (F10-3a). Next: undo a comment-only edit without a
+whole-document snapshot, then standalone `/Text` notes and the comments panel.
 
 Goal:
 
@@ -1975,7 +2015,73 @@ migration. Three consecutive full runs.
 **Found here, left open**: a signed document whose save would break the
 signature is not detected (nothing in PDFAR reads signatures yet), and
 highlights are still invisible to `session.dirty`, which is why Save is not
-gated on it — both are recorded under F10-3.
+gated on it — both are recorded under F10-3. *(The second one closed in F10-3a;
+Save stays ungated for the ordinary reason — a clean document can still be asked
+for a copy of itself under a new name.)*
+
+---
+
+### F10-3a Annotations are edits — [x] Implemented
+
+**Completed**: 2026-10-27
+
+**What landed**: the document became the annotation store. Before this, a
+highlight lived in `AnnotationManager`'s model and was pushed into the document
+by `sync_to_document()` at Save time (F10-2), which made it invisible to the undo
+stack and to `session.dirty` and dependent on a "have I written my model into
+this document yet" cache. Now creating, recolouring, noting and deleting a
+highlight are each an `Edit` with `Scope.COMMENTS` applied through the session,
+and `AnnotationManager` is a *view* of the document that re-reads itself.
+
+**Identity is the annotation's `/NM` name**, so a sidebar row, a model key and a
+PDF object agree across an undo, a save and a reopen. A foreign annotation with
+no `/NM` is filed under a read-only `anon:{xref}` key — opening a file must not
+have to write into it. An edit that cannot find its id refuses the document
+(`EditError`) rather than writing to whatever shares the key, and a refused edit
+records nothing and changes no content version.
+
+**Files changed**:
+- `src/pdfar/annotations.py` — `AddHighlight`, `RemoveHighlight`,
+  `SetHighlightColor`, `SetHighlightNote` (each `Scope.COMMENTS`);
+  `AnnotationManager` rebuilt around `session.apply()` and
+  `reload_from_document()`; `sync_to_document()`, the `_pending` / `_materialized`
+  cache and `update_annotation()` deleted; the model's own `set_note()` gone,
+  because a note is now an edit rather than a field.
+- `src/pdfar/viewer.py` — the highlight overlay painting is deleted (the renderer
+  draws annotations, so the overlay double-painted the band); the manager's
+  `annotations_edited` / `annotation_edit_failed` signals drive
+  `invalidate(scope)` and the status bar; `invalidate()` re-reads the annotation
+  list, which is what makes undo, redo and Revert agree with the sidebar.
+- `src/pdfar/sidebar.py`, `src/pdfar/main.py` — the context menu and Save go
+  through the manager's edits instead of reaching into `_annotations` or syncing a
+  model before writing.
+
+**Two PyMuPDF behaviours worth recording**: `Annot.set_info(content="")` *keeps*
+the old note — clearing means `xref_set_key(xref, "Contents", "null")`; and an
+`Annot` handle is unbound the moment its `Page` is garbage-collected, so every
+edit keeps the page in a named local.
+
+**Measured** on GS262 (540 pages, 25 MB): open 1.87 s, first page 0.199 s,
+distant jump 0.484 s, zoom 2.17 s, peak RSS 496 MB — against the same tree at
+HEAD 1.88 s / 0.190 s / 0.655 s / 2.53 s / 470 MB, i.e. the read path is
+unchanged and the differences are run-to-run noise. The new cost is per edit:
+**one highlight on that file takes 2.1 s and about 25 MB**, because the undo step
+is a whole-document `tobytes()` snapshot, and ten of them reach the history's
+256 MB cap. That is the price F10-1 already charged for rotating a page — but
+highlighting is the action users really do, so undoing a comment-only edit by
+inverse intent is now its own open item under F10-3.
+
+**Verified by eye** (headless, on `demo.pdf`): Ctrl+A + highlight paints the band
+once — the pixels read (248, 248, 152), which is one pass of `#FFFF00` at `/CA`
+0.4 over the page's near-white ground, where a second pass would land near 92 —
+the thumbnails repaint in the same step, the tab gains `•`, the Edit menu reads
+"&Undo Highlight", and the file on disk is untouched until Save.
+
+**Tests**: 490 passed (was 468) — `tests/test_annotations_edits.py` (23) for the
+document-as-store, identity, granularity, undo labels and refusal; the older
+`test_z_highlights.py` / `test_z_notes.py` re-targeted at the new API, which is
+where "the handle you held before an edit is the read from before it" is now
+pinned down. Three consecutive full runs.
 
 ---
 
