@@ -856,18 +856,6 @@ class PDFView(QAbstractScrollArea):
             return rows
         return [[i] for i in range(n)]
 
-    def _column_widths(self, rows: List[List[int]],
-                       cols: int) -> List[float]:
-        """Widest page per grid column at the current zoom."""
-        widths = [0.0] * cols
-        for row in rows:
-            if len(row) == 1 and cols > 1:
-                continue        # centered lone page spans the whole row
-            for c, index in enumerate(row[:cols]):
-                widths[c] = max(widths[c], self._disp_sizes[index][0])
-        fallback = max((w for w, _h in self._disp_sizes), default=1.0)
-        return [w if w > 0 else fallback for w in widths]
-
     def _relayout(self) -> None:
         if self.reflow_mode:
             self._recompute_reflow_layout()
@@ -917,18 +905,19 @@ class PDFView(QAbstractScrollArea):
             return
 
         cols = max((len(r) for r in self._rows), default=1)
-        col_widths = self._column_widths(self._rows, cols)
         gap = GAP * z          # gutters scale with the pages
-        full_w = sum(col_widths) + gap * (cols - 1)
+        row_widths = [sum(self._disp_sizes[i][0] for i in row)
+                      + gap * (len(row) - 1) for row in self._rows]
+        full_w = max(row_widths, default=0.0)
+        max_page_w = max((dw for dw, _dh in self._disp_sizes), default=1.0)
 
         if self.view_mode == "single":
             row = next((r for r in self._rows if self.current_page in r),
                        self._rows[0])
             row_h = max(self._disp_sizes[i][1] for i in row)
-            self._max_w = max(col_widths)
+            self._max_w = max_page_w
             self._content_w = max(float(vw), full_w + 2 * PAD)
             self._content_h = max(float(vh), row_h + 2 * PAD)
-            row_x = (self._content_w - full_w) / 2.0
             row_y = (self._content_h - row_h) / 2.0
             index = row[0]
             dw, dh = self._disp_sizes[index]
@@ -943,37 +932,30 @@ class PDFView(QAbstractScrollArea):
         # like Okular with ViewContinuous (its default).
         row_heights = [max(self._disp_sizes[i][1] for i in row)
                        for row in self._rows]
-        self._max_w = max(col_widths)
+        self._max_w = max_page_w
         self._content_w = max(float(vw), full_w + 2 * PAD)
         self._content_h = (2 * PAD + sum(row_heights)
                            + gap * (len(self._rows) - 1))
         top = float(PAD)
-        for row, row_h in zip(self._rows, row_heights):
-            if len(row) < cols and self.view_mode == "overview":
-                # Short last row: center the group instead of leaving empty
-                # cells on the right.
-                row_w = sum(col_widths[:len(row)]) + gap * (len(row) - 1)
-            else:
-                row_w = full_w
-            row_x = (self._content_w - row_w) / 2.0
-            for c, index in enumerate(row):
+        for row, row_h, row_w in zip(self._rows, row_heights, row_widths):
+            # Each row is centred as its own group.  Aligning to shared
+            # column widths instead makes a narrow spread drift off-centre
+            # in documents with mixed page sizes (an A3 sheet in one column
+            # widens every row's cell), and the scroll range cannot always
+            # bring it back to the middle.
+            x = (self._content_w - row_w) / 2.0
+            lone_left = (len(row) == 1 and cols > 1
+                         and self.view_mode == "facing")
+            for index in row:
                 dw, dh = self._disp_sizes[index]
-                if len(row) == 1 and cols > 1:
-                    if self.view_mode == "facing":
-                        x = row_x + col_widths[0] - dw
-                    else:
-                        x = (self._content_w - dw) / 2.0
-                elif self.view_mode in ("facing", "facing_centered"):
-                    if c == 0:
-                        x = row_x + col_widths[0] - dw
-                    else:
-                        x = row_x + col_widths[0] + gap
-                else:
-                    x = (row_x + sum(col_widths[:c]) + gap * c
-                         + (col_widths[c] - dw) / 2.0)
+                if lone_left:
+                    # A trailing odd page keeps the left-page slot so the
+                    # gutter stays where the full spreads had it.
+                    x = self._content_w / 2.0 - gap / 2.0 - dw
                 y = top + (row_h - dh) / 2.0
                 self._page_rects[index] = (x, y, dw, dh)
                 self._page_tops[index] = top
+                x += dw + gap
             self._row_tops.append(top)
             self._row_heights.append(row_h)
             top += row_h + gap
@@ -1031,18 +1013,35 @@ class PDFView(QAbstractScrollArea):
         return lo
 
     def _center_page(self, index: int) -> None:
-        """Scroll so a page's row is centred, horizontally when needed."""
+        """Scroll so the page's row is centred in the viewport.
+
+        Grid rows can be wider than the viewport (a spread or an overview
+        row).  Centring the row rather than one page keeps the horizontal
+        scroll range symmetrical and places the spread's gutter in the
+        middle, as Okular does.
+        """
         if not self.page_count or index >= len(self._disp_sizes):
             return
-        px, py = self._page_origin(index)
-        dw, dh = self._disp_sizes[index]
+        row_idx = next((k for k, row in enumerate(self._rows) if index in row),
+                       None)
+        if row_idx is None or row_idx >= len(self._rows):
+            return
+        rects = [self._page_rects[i] for i in self._rows[row_idx]
+                 if i < len(self._page_rects)
+                 and self._page_rects[i] is not None]
+        if not rects:
+            return
+        left = min(r[0] for r in rects)
+        right = max(r[0] + r[2] for r in rects)
+        top = min(r[1] for r in rects)
+        bottom = max(r[1] + r[3] for r in rects)
         vbar = self.verticalScrollBar()
         hbar = self.horizontalScrollBar()
         vbar.setValue(int(max(0, min(
-            py + dh / 2.0 - self.viewport().height() / 2.0,
+            top + (bottom - top) / 2.0 - self.viewport().height() / 2.0,
             vbar.maximum()))))
         hbar.setValue(int(max(0, min(
-            px + dw / 2.0 - self.viewport().width() / 2.0,
+            left + (right - left) / 2.0 - self.viewport().width() / 2.0,
             hbar.maximum()))))
         self.current_page = index
 
@@ -2043,16 +2042,8 @@ class PDFView(QAbstractScrollArea):
         if self.view_mode in ("continuous", "single"):
             return max(self._unit_size(i)[0] for i in range(self.page_count))
         rows = self._rows_for_mode()
-        cols = max((len(r) for r in rows), default=1)
-        if cols == 1:
-            return max(self._unit_size(r[0])[0] for r in rows)
-        col_w = [0.0] * cols
-        for row in rows:
-            if len(row) == 1 and cols > 1:
-                continue        # centered lone page spans the whole row
-            for c, index in enumerate(row[:cols]):
-                col_w[c] = max(col_w[c], self._unit_size(index)[0])
-        return sum(col_w) + GAP * (cols - 1)
+        return max(sum(self._unit_size(i)[0] for i in row)
+                   + GAP * (len(row) - 1) for row in rows)
 
     def apply_fit(self) -> None:
         if self.reflow_mode or self.fit_mode == "none" or not self.page_count:

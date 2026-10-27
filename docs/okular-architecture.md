@@ -220,13 +220,16 @@ Behavior studied and reimplemented:
   laid out, centered in the viewport, and the scrollbars stay at zero.
 - In Facing layouts the two page edges touch the viewport centre (the gutter),
   rather than each page being centered in an arbitrary cell
-  (`part/pageview.cpp:4836-4843`).
+  (`part/pageview.cpp:4836-4843`).  PDFAR centres each row as its own page
+  group, so equal-width spreads put the gutter exactly at the centre and
+  documents with mixed page sizes (e.g. an A3 sheet among A4 pages) keep
+  every row visually centred instead of drifting off-axis.
 - PDFAR's "Continuous" mode is the single-column continuous stack that PDFAR
   already had; Okular expresses the same thing with `Single` plus its
   independent `ViewContinuous` toggle.
 
 The PDFAR implementation (`src/pdfar/viewer.py`, `_relayout`,
-`_rows_for_mode`, `_column_widths`) is written from scratch: no code from
+`_rows_for_mode`, `_fit_width_unit`) is written from scratch: no code from
 Okular was copied, compiled or linked. Okular is GPL-2.0+/GPL-3.0+ and
 PDFAR is GPL-3.0+, so reusing the behaviour and ideas is compatible.
 

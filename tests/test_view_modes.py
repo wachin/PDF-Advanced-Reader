@@ -122,6 +122,61 @@ def test_facing_pairs_pages(view_factory, five_pdf, qapp):
     assert abs((lone[0] + lone[2]) - (view._content_w / 2 - 6)) <= 1
 
 
+def test_facing_centers_the_spread_horizontally(view_factory, five_pdf, qapp):
+    view = view_factory(five_pdf)
+    view.set_view_mode("facing")
+    view.set_zoom(3.0)
+    qapp.processEvents()
+    hbar = view.horizontalScrollBar()
+    assert hbar.maximum() > 0
+
+    left = view._page_rects[0]
+    right = view._page_rects[1]
+    spread_center = (left[0] + right[0] + right[2]) / 2.0
+    assert hbar.value() == pytest.approx(
+        spread_center - view.viewport().width() / 2.0, abs=1)
+    # The spread starts centred, so panning room is equal both ways.
+    assert abs(hbar.value() - (hbar.maximum() - hbar.value())) <= 1
+
+    view.goto_page(4)
+    qapp.processEvents()
+    lone = view._page_rects[4]
+    assert hbar.value() == pytest.approx(
+        lone[0] + lone[2] / 2.0 - view.viewport().width() / 2.0, abs=1)
+
+
+def test_facing_centers_rows_with_mixed_page_sizes(view_factory, tmp_path,
+                                                   qapp):
+    # An A3-style wide page must not push the narrow spreads off-centre:
+    # each row is centred as its own group (demo.pdf page 31 regression).
+    path = tmp_path / "mixed.pdf"
+    doc = fitz.open()
+    for i, w in enumerate((200, 400, 400, 200)):
+        page = doc.new_page(width=w, height=100)
+        page.insert_text((10, 40), f"Page {i + 1}", fontsize=12)
+    doc.save(path)
+    doc.close()
+    view = view_factory(str(path))
+    view.set_view_mode("facing")
+    qapp.processEvents()
+    assert view._rows == [[0, 1], [2, 3]]
+
+    for pair in ((0, 1), (2, 3)):
+        left = view._page_rects[pair[0]]
+        right = view._page_rects[pair[1]]
+        assert left[0] + left[2] + 12 == right[0]
+        assert (left[0] + right[0] + right[2]) / 2.0 == pytest.approx(
+            view._content_w / 2.0, abs=1)
+
+    # Fit Width sizes on the widest real row (200+12+400), not the sum of
+    # per-column maxima (400+12+400).
+    view.set_fit_mode("width")
+    qapp.processEvents()
+    vw = view.viewport().width() - 32
+    assert view.zoom == pytest.approx(vw / 612.0, rel=1e-6)
+    assert view.horizontalScrollBar().maximum() == 0
+
+
 def test_facing_centered_first_and_last(view_factory, six_pdf, five_pdf,
                                         qapp):
     view = view_factory(six_pdf)
