@@ -52,9 +52,18 @@ main.py
 viewer.py
 render.py
 cache.py
+tiles.py
 geometry.py
 search.py
 sidebar.py
+tabs.py
+bookmarks.py
+annotations.py
+selection_tools.py
+reflow.py
+page_numbers.py
+fonts.py
+icons.py
 i18n.py
 
 Additionally:
@@ -62,6 +71,7 @@ Additionally:
 - tests/
 - tools/
 - translations/
+- docs/
 - run.py
 - pyproject.toml
 - Debian documentation
@@ -73,18 +83,26 @@ The current architecture already features:
 - independent workers
 - one PyMuPDF document per worker
 - memory-limited LRU cache
+- tiled rendering for deep zoom
 - continuous scrolling
+- page view modes (single, facing, facing-centered, overview, continuous)
 - actual text selection
+- area and table selection
 - text copying
 - AND search
 - OR search
 - phrase search
+- regex search
 - case sensitivity
 - whole-word matching
 - result highlighting
 - F3 / Shift+F3 navigation
-- thumbnails
+- thumbnails, with configurable size, border and shadow
 - index/outline
+- user bookmarks
+- highlights and notes (in-memory model; highlights persist)
+- page numbering and erase masks, exported as a separate copy
+- reflow (text and figures)
 - zoom
 - fit page
 - fit width
@@ -93,6 +111,9 @@ The current architecture already features:
 - recent files
 - drag & drop
 - window state persistence
+- per-document reading position resume
+- presentation mode
+- dark mode
 - Qt Linguist-based internationalization
 - headless tests
 - screenshot tool
@@ -337,34 +358,36 @@ Use a functional comparison matrix to identify gaps.
 
 | Area | PDFAR 2.0 | Future Goal | Status |
 |---|---|---|---|
-| Rendering | Yes | Fast and stable rendering | Implemented |
-| Continuous scroll | Yes | Smooth scrolling | Implemented |
-| Text selection | Yes | Multi-column / precise | Improve |
-| Search | Yes | Regex + advanced | Improve |
-| Thumbnails | Yes | Advanced management | Improve |
-| Outline | Yes | Editing/management | Improve |
-| Tabs | Yes | Multiple documents | Implemented |
-| Presentation | No | Fullscreen/slideshow | Pending |
-| Dark mode | Yes | Full theme | Implemented |
-| Resumption | Partial | Per-document position | Pending |
-| Reflow | Yes | Adaptive reading | Implemented (text + figures) |
-| Bookmarks | No | Full bookmarks | Pending |
-| Properties | Partial | Full inspector | Pending |
-| Attachments | Yes | Full management | Implemented |
-| Regex search | Yes | Secure regex | Implemented |
-| Layers | No | OCG | Pending |
-| Annotations | Basic/none | Full system | High priority |
-| Forms | No | AcroForm | Pending |
-| Signatures | No | Cryptographic verification | Pending |
-| Page manipulation | No | Split/merge/reorder | Pending |
-| TTS | No | Accessible reading | Pending |
-| OCR | No | Optional OCR | Pending |
-| Redaction | No | TRUE redaction | Pending |
-| Comparison | No | Compare documents | Stretch |
-| Content editing | No | PDF editing | Stretch |
-| Distribution | Partial | .deb/AppImage/Flatpak | Pending |
+| Rendering | Yes | Fast and stable rendering | [x] |
+| Continuous scroll | Yes | Smooth scrolling | [x] |
+| Text selection | Yes | Multi-column / precise | [~] |
+| Search | Yes | Regex + advanced | [~] |
+| Thumbnails | Yes | Advanced management | [~] |
+| Outline | Yes | Editing/management | [ ] |
+| Tabs | Yes | Multiple documents | [x] |
+| Presentation | Yes | Fullscreen/slideshow | [x] |
+| Dark mode | Yes | Full theme | [~] |
+| Resumption | Yes | Per-document position | [x] |
+| Reflow | Yes | Adaptive reading | [x] (text + figures) |
+| Bookmarks | Yes | Full bookmarks | [x] |
+| Properties | Partial | Full inspector | [~] |
+| Attachments | Yes | Full management | [~] (list and extract; no add/remove) |
+| Regex search | Yes | Secure regex | [x] |
+| Layers | No | OCG | [ ] |
+| Annotations | Partial | Full system | [~] (highlights persist; notes are in-memory only) |
+| Forms | No | AcroForm | [ ] |
+| Signatures | No | Cryptographic verification | [ ] |
+| Page manipulation | No | Split/merge/reorder | [ ] → F10-4 |
+| TTS | No | Accessible reading | [ ] |
+| OCR | No | Optional OCR | [ ] |
+| Redaction | No | TRUE redaction | [ ] → F10-5 |
+| Comparison | No | Compare documents | [ ] |
+| Content editing | No | PDF editing | [ ] → F10 |
+| Distribution | Partial | .deb/AppImage/Flatpak | [~] |
 
 This table serves as a coverage guide, not a list for simultaneous implementation.
+
+Statuses follow the rules in section 7.
 
 ---
 
@@ -373,6 +396,26 @@ This table serves as a coverage guide, not a list for simultaneous implementatio
 Implement features in phases.
 
 Do not skip arbitrarily from one phase to another unless there is a technical reason.
+
+## Statuses
+
+- [x] Implemented
+- [~] Partially implemented
+- [ ] Not yet implemented
+
+### Status rules
+
+[x] means the functionality is implemented and verified.
+
+[~] means there is a partial implementation, but at least one significant
+requirement, test, integration, or validation step is still pending.
+
+[ ] means it has not yet been implemented.
+
+Do not change [ ] or [~] to [x] simply because some related code exists.
+
+A task should only be marked as [x] when the full requirement has been
+implemented and, where applicable, tested.
 
 ---
 
@@ -612,6 +655,10 @@ Clicking an annotation → jump to it.
 
 Annotation operations must support undo/redo.
 
+Provided by the general edit framework, **F10-1**: annotations are the first
+operations routed through it, so undo covers every document change and not only
+comments.
+
 ## P4-9 XFDF
 
 Investigate XFDF import/export support.
@@ -682,6 +729,8 @@ Display a clear warning.
 
 # F6 — PAGE MANIPULATION
 
+Tracked and implemented as **F10-4**.
+
 Implement:
 
 - insert
@@ -732,6 +781,8 @@ Ideally:
 
 ## F7-3 True redaction
 
+Tracked and implemented as **F10-5**.
+
 THIS IS CRITICAL.
 
 A black rectangle over text is NOT true redaction.
@@ -766,6 +817,8 @@ Never execute active content automatically.
 These features should only be addressed once the core is stable.
 
 ## F8-1 Content editing
+
+Tracked and implemented as **F10-7**.
 
 Modify existing text or graphic elements.
 
@@ -847,35 +900,202 @@ PDFAR must be local-first and privacy-first.
 
 ---
 
-# 8. FIRST SPRINT PRIORITY
+# F10 — PDF EDITING (MASTER PLAN)
+
+Phase status: **[ ] Not started.** The next task is **F10-0**.
+
+This is the umbrella for every capability that changes a document. F6 (page
+manipulation), F7-3 (true redaction) and F8-1 (content editing) are now
+sub-sections of this plan and are implemented here, not separately.
+
+Reference study, with the reasoning behind each rule below:
+`docs/pdfcraft-editing-analysis.md`.
+
+The ordering is not arbitrary: every step depends on the one above it. In
+particular, nothing in this phase is safe to build before F10-0 and F10-1 exist,
+because today PDFAR has no way to know that a document changed, no undo, and no
+save path that cannot lose the user's work.
+
+## F10-0 Document session — the prerequisite — [ ]
+
+Nothing may read the document from disk any more while an edited version exists
+in memory.
+
+- [ ] One authoritative `Document`, owned by the GUI thread (`viewer.py:150`)
+- [ ] A `content_version` counter that every accepted edit bumps exactly once
+- [ ] Render workers open a byte snapshot (`fitz.open(stream=…)`) instead of the
+      path (`render.py:232`)
+- [ ] Search worker: same (`search.py:235`)
+- [ ] Reflow worker: same (`reflow.py:824`)
+- [ ] Document Properties reads the live snapshot (`main.py:1515`)
+- [ ] The snapshot is produced once per version and reused, never per job
+- [ ] `PageCache` key gains the content version (`cache.py:40`)
+- [ ] Tile and thumbnail caches invalidated by version, not by clearing manually
+- [ ] The large-PDF benchmark shows no regression (this step is on the hot path)
+- [ ] Tests: an in-memory change is visible to render, search and reflow without
+      the file on disk changing at all
+
+Why: MuPDF is not thread-safe, so each worker needs its own `Document`. The only
+correct way to share state between them is a byte snapshot pinned to a version.
+
+## F10-1 Edit framework — [ ]
+
+- [ ] An `Edit` type carrying *intent* (`RotatePages { pages, delta }`), not
+      before/after values
+- [ ] Edits run on a copy of the document; the result is adopted only on success,
+      so a failed edit cannot be half-applied
+- [ ] Undo/redo stacks with a human label per step and a fixed depth
+- [ ] Scope-based invalidation: an edit declares what it can change (metadata,
+      annotations, page content…) and only those caches are rebuilt
+- [ ] A dirty flag driving `setWindowModified(True)` and the tab indicator
+- [ ] Confirm before discarding: closing a tab or the window with unsaved changes
+- [ ] A document `generation` so stale UI references are rejected rather than
+      applied to the wrong object
+- [ ] Tests: apply, undo, redo, dirty state after each, and a failing edit leaving
+      the document byte-identical
+
+## F10-2 Save, Save As, Revert — [ ]
+
+- [ ] Atomic write: temp file in the same directory, flush, `fsync`, then
+      `os.replace` (the pattern already exists in `page_numbers.py:525-556`,
+      minus the `fsync`)
+- [ ] Incremental save when `doc.can_save_incrementally()`, so unknown objects
+      and signatures survive
+- [ ] Full rewrite for Save As, so deleted content is not left in an older
+      revision
+- [ ] Verify before replacing the file: reopen the produced bytes and check the
+      page count and a render
+- [ ] Refuse, with an actionable message: read-only file, insufficient
+      permissions, signed document that would need a rewrite, missing space
+- [ ] Revert to saved
+- [ ] Per-document state migration on Save As (`viewState/<path>` and
+      `bookmarks/<path>` are keyed by path today and would silently orphan)
+- [ ] Tests: crash-safety of the staging write, permissions, revert, Save As
+      migration
+
+## F10-3 Finish the annotation system (P4) — [~]
+
+Highlights are implemented and persisted (`annotations.py:186-225`).
+
+- [ ] Notes persisted as real `/Text` annotations, not only in memory
+- [ ] Comments panel listing annotations and jumping to them
+- [ ] Freehand, shapes, stamps, measurement
+- [ ] Appearance streams, so other readers show the same thing without
+      regenerating them
+- [ ] XFDF import/export
+- [ ] Annotation operations routed through F10-1, so they undo and mark dirty
+      (`save_to_pdf` currently deletes every highlight in the file and rewrites
+      them, and rewrites in place without confirmation)
+
+## F10-4 Page manipulation (was F6) — [ ]
+
+- [ ] Rotate permanently
+- [ ] Delete, extract, duplicate, move, reverse
+- [ ] Insert blank page
+- [ ] Split, merge/combine
+- [ ] Page boxes (crop)
+- [ ] Inherited page-tree attributes (`/Resources`, `/MediaBox`, `/CropBox`,
+      `/Rotate`) pushed down and the tree flattened before any reorder
+- [ ] Cross-document copy that rewires parents, destinations and fields, and
+      drops links whose target was not copied
+- [ ] Metadata and outline preserved; outline entries pointing at deleted pages
+      removed
+- [ ] Every operation undoable, and destructive ones confirmed
+
+## F10-5 True redaction (was F7-3) — [ ]
+
+A black rectangle is not redaction. The Erase tab of the numbering panel is
+explicitly a cover, not a redaction.
+
+- [ ] Redaction marks drawn in the view, with a preview
+- [ ] `page.add_redact_annot()` + `apply_redactions()` to delete the operators
+- [ ] Remove overlapping annotations, reply threads, popups, form fields and
+      structure-tree references
+- [ ] Strip XFA packets and document metadata when they mirror redacted content
+- [ ] **Proof step:** after applying, re-extract text and images from every
+      redacted page and abort the whole operation if anything survives
+- [ ] Force a full save afterwards — the previous revision still holds the secret
+- [ ] Report exactly what was removed, and fail closed when a page cannot be
+      processed (vertical text, inline images, undecodable streams)
+- [ ] Tests that assert the redacted string cannot be selected, copied, searched
+      or extracted, in the saved file
+
+## F10-6 Adding content — [ ]
+
+- [ ] Add text (box with wrapping, font, size, colour)
+- [ ] Add images, inserting JPEG bytes without recompression
+- [ ] Header/footer, watermark, background
+- [ ] Bates numbering (the page-numbering code is most of this already)
+- [ ] Font embedding by full program, never a subset, with ToUnicode so the text
+      stays searchable after saving
+- [ ] Refuse to add a character no available font can draw, and name it
+- [ ] Page rotation, crop box and `/UserUnit` accounted for in every placement
+
+## F10-7 Editing existing text (was F8-1) — [ ]
+
+The hardest step, and the one that must not be promised for arbitrary PDFs.
+
+- [ ] A tolerant content-stream tokenizer that keeps the byte span of every
+      operator, over `doc.xref_stream()` / `doc.update_stream()`
+- [ ] Glyph-to-operator mapping through `page.get_texttrace()` (`seqno`,
+      per-glyph `chars`)
+- [ ] Splice, do not rebuild: replace the one show operator and delete its
+      siblings, leaving every other byte of the page identical
+- [ ] The font ladder: source font → another font of the same face on the page →
+      embed the full program → generated fallback → base-14 → refuse
+- [ ] Preserve text and graphics state by emitting only the delta, wrapped in its
+      own `q … Q`
+- [ ] Image placement editing by folding the new transform into the existing
+      `q cm … Do Q`, not by nesting another graphics state
+- [ ] Never share a page's `/Resources` or `/AP` dict when rewriting them
+
+## Explicitly out of scope
+
+- Editing inside Form XObjects, and arbitrary vector paths
+- Inline images (`BI … ID … EI`)
+- Keeping unrelated pages byte-identical across a full rewrite
+- Reflow-preserving paragraph rewrites, OpenType shaping and CJK line breaking —
+  PdfCraft needed a font engine and a Type 3 generator to make this acceptable,
+  and that is a project of its own
+
+## Rules for the whole phase
+
+1. Never mutate the live document in place; edit a copy, adopt on success.
+2. Never save over a file that has changed on disk since it was opened.
+3. Refuse rather than degrade: an edit that cannot be completed exactly is an
+   error the user can act on, never a silently wrong file.
+4. Bound every size that comes from the file: decoded streams, operators per page,
+   graphics-state depth, copied objects.
+5. Every editing feature must be callable headlessly, so it can be tested without
+   the GUI.
+6. Signed documents are appended to, never rewritten.
+
+---
+
+# 8. CURRENT SPRINT PRIORITY
 
 DO NOT attempt to implement the entire roadmap immediately.
 
-The first sprint must focus exclusively on:
+The previous sprint list (F9-1 CI, P1-1 Tabs, P1-2 Presentation, P2-1
+Bookmarks, P4-1 Highlight, P4-2 Notes) is complete and has been removed; P4-2
+keeps one open item, tracked as F10-3.
 
-F9-1
-CI
+The current sprint must focus exclusively on the editing foundation:
 
-P1-1
-Tabs
+F10-0
+Document session (`content_version`, workers off the disk)
 
-P1-2
-Fullscreen / presentation
+F10-1
+Edit framework (copy-and-adopt, undo, dirty state)
 
-P2-1
-Bookmarks
-
-P4-1
-Highlight
-
-P4-2
-Notes
+F10-2
+Save, Save As, Revert (atomic, verified, incremental when possible)
 
 Goal:
 
 PDFAR 2.1
 
-The first sprint must be small, verifiable, and stable.
+The sprint must be small, verifiable, and stable.
 
 Do not add extra features simply because they seem easy.
 
@@ -1406,6 +1626,45 @@ page, and exports a new `name-erased.pdf` copy.
 
 ---
 
+### PDF Editing Master Plan — [x] Implemented
+
+**Completed**: 2026-10-26
+
+**Scope**: Study how the reference Rust editor `pdfcraft` performs PDF editing,
+record the findings so they outlive the reference copy, and turn them into the
+F10 phase of this roadmap. Refresh the stale state and comparison sections, and
+adopt the `[x] / [~] / [ ]` status convention throughout.
+
+**Status**: DONE
+
+**Files changed**:
+
+- `docs/pdfcraft-editing-analysis.md` (new) — the object-graph-as-model,
+  copy-and-adopt edits, snapshot undo, incremental save, rendering from the bytes
+  that will be saved, content-stream splicing, the font ladder, redaction that
+  aborts on residue, and the refusal/permission/budget stance.
+- `ROADMAP.md` — new F10 phase with eight ordered increments; the status legend
+  and rules in section 7; the section 6 matrix converted to checkboxes with every
+  value re-verified against the code; the module and capability lists in section 1
+  brought up to date; F6, F7-3, F8-1 and P4-8 pointing at their F10 successor;
+  the obsolete first-sprint lists in sections 8 and 20 replaced.
+
+**Verified against the code, not assumed**:
+
+1. Highlights persist through an incremental save; notes do not — so P4-2 and the
+   Annotations row stay `[~]`.
+2. Four readers open the document from disk (`render.py:232`, `search.py:235`,
+   `reflow.py:824`, `main.py:1515`) while the view holds its own handle, and the
+   cache key has no content dimension (`cache.py:40`). That is why F10-0 exists
+   and why it comes first.
+3. `page.add_redact_annot()` + `apply_redactions()` really do delete the operators
+   (the page stream became `q Q` and text extraction returned empty), which is the
+   base F10-5 builds its proof step on.
+
+**Tests**: unchanged — this milestone adds no runtime code.
+
+---
+
 # 17. RELEASE CRITERIA
 
 A version must not be declared stable solely because it compiles.
@@ -1486,25 +1745,17 @@ First:
 2. run the current tests;
 3. confirm the baseline;
 4. review the actual state of PDFAR 2.0;
-5. identify which parts of F9-1, P1-1, P1-2, P2-1, P4-1, and P4-2 already partially exist;
-6. do not duplicate existing functionality;
-7. propose the exact order for the first sprint;
-8. start with the first task;
-9. implement;
-10. test;
-11. verify visually;
-12. measure performance;
-13. document;
-14. make a clean commit.
+5. do not duplicate existing functionality;
+6. start with the first open task of the current sprint (section 8);
+7. implement;
+8. test;
+9. verify visually;
+10. measure performance;
+11. document;
+12. make a clean commit.
 
-Do not move on to the next task until the previous one meets the Definition of Done. FIRST SPRINT PRIORITIES:
-
-F9-1 CI
-P1-1 Tabs
-P1-2 Fullscreen/Presentation
-P2-1 Bookmarks
-P4-1 Highlight
-P4-2 Notes
+Do not move on to the next task until the previous one meets the Definition of
+Done. The current priorities are listed in section 8 and tracked in F10.
 
 Target version:
 
