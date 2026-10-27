@@ -1,7 +1,7 @@
 
+20261023 21:30 qoder with Qwen3.8-Flash Model 200K ctx 
 
-
-20261023 qoder with DeepSeek-Flash 200k ctx   
+20261023 09:00 qoder with DeepSeek-Flash Model 200K ctx   
 
 20261009 00:25 OpenCode Desktop with FreeLLMAPI: Read what said the Agent and continue
 

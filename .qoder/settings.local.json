@@ -56,7 +56,11 @@
       "Bash(cd /home/wachin/Dev4/PDF-Advanced-Reader && QT_QPA_PLATFORM=offscreen PYTHONPATH=src python3 - <<'EOF' 2>/dev/null\nimport sys\nfrom PyQt6.QtWidgets import QApplication, QDialog\nfrom pdfar.main import MainWindow\n\napp = QApplication\\([]\\)\nwin = MainWindow\\(\\); win.resize\\(1100, 800\\); win.show\\(\\); app.processEvents\\(\\)\nwin.open_document\\(\"external/LibreOffice-Getting-Started-Guides-PDF-BackUp/GS262-GettingStarted.pdf\"\\)\napp.processEvents\\(\\)\n\ndef fake_exec\\(dlg\\):\n    dlg.resize\\(680, 520\\)\n    dlg.show\\(\\)\n    app.processEvents\\(\\)\n    dlg.grab\\(\\).save\\(\"/tmp/properties_general.png\"\\)\n    from PyQt6.QtWidgets import QTabWidget\n    tabs = dlg.findChild\\(QTabWidget\\)\n    tabs.setCurrentIndex\\(1\\)\n    app.processEvents\\(\\)\n    dlg.grab\\(\\).save\\(\"/tmp/properties_fonts.png\"\\)\n    return 0\n\nQDialog.exec = fake_exec\nwin._show_properties\\(\\)\nprint\\(\"dialog rendered\"\\)\nwin._close_document\\(\\)\nEOF)",
       "Bash(cd /home/wachin/Dev4/PDF-Advanced-Reader && for i in 1 2 3; do echo \"=== run $i ===\"; PYTHONPATH=src timeout 300 python3 -m pytest tests/ -q 2>&1 | tail -2; done)",
       "Bash(/home/wachin/.qoder/security-resources/security-scan/bin/security-scan-settings.sh)",
-      "Bash(cd /home/wachin/Dev4/PDF-Advanced-Reader && git status --short && echo \"---\" && git diff --stat && echo \"---\" && git log --oneline -3)"
+      "Bash(cd /home/wachin/Dev4/PDF-Advanced-Reader && git status --short && echo \"---\" && git diff --stat && echo \"---\" && git log --oneline -3)",
+      "Bash(ls src/pdfar; echo ---; grep -rn \"Thumbnails\\\\|Bookmarks\\\\|Attachments\\\\|Annotations\" src/pdfar | head -40)",
+      "Bash(cd /home/wachin/Dev4/PDF-Advanced-Reader && grep -n \"class NumberBox\\\\|def number_box\\\\|def layout_number\\\\|def _display_rect_to_page\\\\|def mask_rgb\\\\|def stamp_copy\\\\|def numbered_copy_path\" src/pdfar/page_numbers.py)",
+      "Bash(cd /home/wachin/Dev4/PDF-Advanced-Reader && grep -n \"numbering\\\\|NumberBox\\\\|number_box\\\\|mask_rect\" src/pdfar/viewer.py | head -60)",
+      "Bash(cd /home/wachin/Dev4/PDF-Advanced-Reader && grep -n \"numbering\\\\|page_numbers\\\\|numbered_copy\\\\|_save_numbered_copy\" src/pdfar/main.py | head -60)"
     ]
   }
 }

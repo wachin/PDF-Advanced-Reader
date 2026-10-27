@@ -3018,3 +3018,39 @@ trailer
 startxref
 1491992
 %%EOF
+
+% Written by MuPDF 1.28.2
+
+56 0 obj
+<</Type/Page/Contents 345 0 R/MediaBox[0 0 595.2756 841.8898]/Parent 180 0 R/Resources<</Font<</F2+0 74 0 R/F3+0 78 0 R/F4+0 82 0 R>>>>/Rotate 0/Trans<<>>/Annots[191 0 R 193 0 R 195 0 R 197 0 R 198 0 R 200 0 R 359 0 R]>>
+endobj
+
+103 0 obj
+<</Type/Catalog/Outlines 105 0 R/PageMode/UseAttachments/Pages 180 0 R/AcroForm<</Fields[219 0 R 221 0 R 223 0 R 225 0 R 229 0 R 230 0 R 233 0 R 235 0 R 236 0 R 237 0 R 239 0 R 241 0 R]>>/Names<</EmbeddedFiles<</Names[(table-data.csv)<</Type/Filespec/CI<<>>/EF<</F 245 0 R>>/F(table-data.csv)/UF(table-data.csv)/Desc(Source rows for the long table)>>(feature-matrix.csv)<</Type/Filespec/CI<<>>/EF<</F 246 0 R>>/F(feature-matrix.csv)/UF(feature-matrix.csv)/Desc(Feature support matrix)>>(demo-data.ods)<</Type/Filespec/CI<<>>/EF<</F 247 0 R>>/F(demo-data.ods)/UF(demo-data.ods)/Desc(LibreOffice Calc workbook)>>(manifest.json)<</Type/Filespec/CI<<>>/EF<</F 248 0 R>>/F(manifest.json)/UF(manifest.json)/Desc(Build manifest)>>(notes.txt)<</Type/Filespec/CI<<>>/EF<</F 249 0 R>>/F(notes.txt)/UF(notes.txt)/Desc(Plain-text field notes)>>]>>>>/PageLabels<</Nums[0<</S/D>>35<</P(A-)/S/D>>]>>>>
+endobj
+
+359 0 obj
+<</Type/Annot/Subtype/Highlight/C[1 .85882356 .2]/P 56 0 R/F 4/QuadPoints[58 623.11148 338.69465 623.11148 58 613.2114 338.69465 613.2114]/Rect[55.666467 612.59268 341.02818 623.7302]/AP<</N 360 0 R>>/NM(fitz-A0)/CA .4/T(Reviewer)/Contents(Highlighted to verify quad-based text markup.)/BM/Multiply>>
+endobj
+
+360 0 obj
+<</Type/XObject/Subtype/Form/BBox[55.666467 612.59268 341.02818 623.7302]/Matrix[1 0 0 1 0 0]/Resources<</ExtGState<</H<</CA .4/ca .4/BM/Multiply>>>>>>/Length 113/Filter/FlateDecode>>
+stream
+xÚMÎ»ƒP…áŞSxƒÇ×l@ËHĞ@‘d)D"â6.>é?ò‹†™÷Ï}•¥Ped1~ï„âTS>	ÌŒlBàNl”ÖÚÄ¿Ä\ôJŠWr/É)ä¡2Zi=]G÷x—şXi#Zèl‚$[
+endstream
+endobj
+
+xref
+56 1
+0001499357 00000 n 
+103 1
+0001499595 00000 n 
+359 2
+0001500500 00000 n 
+0001500819 00000 n 
+
+trailer
+<</Size 361/Info 104 0 R/Root 103 0 R/ID[<514FBD115C98E0EB9BEE22BDB69CCE82><E5A20E0E406C2584A2453BE9EB85956B>]/Prev 1491992>>
+startxref
+1501152
+%%EOF
