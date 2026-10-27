@@ -10,8 +10,8 @@ import pytest
 from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (
-    QCheckBox, QDialogButtonBox, QLabel, QMenu, QMessageBox, QToolButton,
-    QToolTip,
+    QCheckBox, QDialogButtonBox, QLabel, QMenu, QMessageBox, QRadioButton,
+    QToolButton, QToolTip,
 )
 
 from pdfar import APP_NAME, __version__
@@ -505,33 +505,51 @@ def test_open_missing_file_is_rejected(qapp, tmp_path):
         qapp.processEvents()
 
 
-def test_memory_level_combo_applies_and_persists(qapp, sample_pdf, big_pdf):
-    """The toolbar Memory combo applies to the active view, persists the
-    choice, and is inherited by documents opened afterwards."""
+def test_memory_level_setting_applies_and_persists(qapp, sample_pdf, big_pdf):
+    """The Settings dialog exposes the preload level with visible
+    descriptions: it persists, applies to every open tab and is inherited by
+    documents opened afterwards."""
+    settings, snapshot = _keep_settings("memory_level")
     win = MainWindow()
     win.show()
     qapp.processEvents()
     try:
+        assert not hasattr(win, "mem_combo")   # moved out of the toolbar
         win.open_document(sample_pdf)
         qapp.processEvents()
         assert win.view.memory_level == "normal"
-        assert win.mem_combo.currentText() == "Normal"
 
-        win.mem_combo.setCurrentText("Greedy")
+        dlg = win._build_settings_dialog()
+        assert dlg.findChild(QRadioButton, "memoryNormal").isChecked()
+        dlg.findChild(QRadioButton, "memoryGreedy").setChecked(True)
+        dlg.findChild(QDialogButtonBox).button(
+            QDialogButtonBox.StandardButton.Ok).click()
         qapp.processEvents()
         assert win.memory_level == "greedy"
         assert win.view.memory_level == "greedy"
-        assert win.settings.value("memory_level") == "greedy"
+        assert settings.value("memory_level") == "greedy"
 
         # a new document inherits the chosen level
         win.open_document(big_pdf)
         qapp.processEvents()
         assert win.view.memory_level == "greedy"
+
+        # reopening the dialog round-trips the choice; Low switches all tabs
+        dlg = win._build_settings_dialog()
+        assert dlg.findChild(QRadioButton, "memoryGreedy").isChecked()
+        dlg.findChild(QRadioButton, "memoryLow").setChecked(True)
+        dlg.findChild(QDialogButtonBox).button(
+            QDialogButtonBox.StandardButton.Ok).click()
+        qapp.processEvents()
+        assert win.memory_level == "low"
+        for i in range(win.tabs.count()):
+            assert win.tabs.widget(i).view.memory_level == "low"
     finally:
         win._close_document()
         win.close()
         win.deleteLater()
         qapp.processEvents()
+        _restore_settings(settings, snapshot)
 
 
 def _keep_settings(*keys):

@@ -76,6 +76,37 @@ SEARCH_MODE_DESCRIPTIONS = (
     "\"Match case\" controls case sensitivity.",
 )
 
+# Detailed, always-visible explanations for the preload memory levels shown in
+# Tools > Settings.  Keys match viewer.MEMORY_LEVELS.
+MEMORY_LEVEL_DESCRIPTIONS = {
+    "low": (
+        "Renders only the pages you can currently see and preloads nothing, "
+        "so memory use stays minimal.\n\n"
+        "Use it on computers with limited RAM, or for very large scanned "
+        "documents you open only occasionally.\n\n"
+        "Trade-off: after fast scrolling or a page jump, newly visible pages "
+        "briefly show a placeholder while they render."
+    ),
+    "normal": (
+        "Renders the visible pages first, then quietly preloads a few pages "
+        "before and after the current view (about 3 behind, 8 ahead).\n\n"
+        "Best for everyday reading: scrolling feels smooth because the next "
+        "pages are usually ready before they appear, while memory stays "
+        "bounded no matter how large the document is.\n\n"
+        "Trade-off: jumping far away can still show a brief placeholder on "
+        "the target page."
+    ),
+    "greedy": (
+        "Preloads the entire document into the render cache as fast as "
+        "possible, so every page is ready before you reach it.\n\n"
+        "Use it for small-to-medium documents when you want the most fluid "
+        "experience: scrolling, page jumps and search-result navigation all "
+        "feel instant.\n\n"
+        "Trade-off: memory use grows with the document size. For very large "
+        "PDFs or low-RAM systems, prefer Normal or Low."
+    ),
+}
+
 
 class DelayedItemTooltip(QObject):
     """Show a combo-box item's ToolTipRole text after the pointer rests on it."""
@@ -532,7 +563,8 @@ class MainWindow(QMainWindow):
         self.act_settings = QAction("Settings…", self)
         self.act_settings.setShortcut("Ctrl+,")
         self.act_settings.setToolTip(
-            "Configure thumbnails and window startup (Ctrl+,)")
+            "Configure thumbnails, page preloading and window startup "
+            "(Ctrl+,)")
         self.act_settings.triggered.connect(self._show_settings)
 
         self.act_about = QAction("About", self)
@@ -713,18 +745,6 @@ class MainWindow(QMainWindow):
             "Zoom step for Zoom In/Out, Ctrl++/Ctrl+- and Ctrl+wheel")
         self.zoom_step_combo.currentIndexChanged.connect(self._apply_zoom_step)
         tb.addWidget(self.zoom_step_combo)
-        tb.addSeparator()
-
-        # Memory level
-        tb.addWidget(QLabel("Memory:"))
-        self.mem_combo = QComboBox()
-        self.mem_combo.addItems(["Low", "Normal", "Greedy"])
-        self.mem_combo.setCurrentText("Normal")
-        self.mem_combo.setFixedWidth(96)
-        self.mem_combo.setToolTip("Preload memory level (Okular): how much of "
-                                  "the document to render ahead of the viewport")
-        self.mem_combo.currentTextChanged.connect(self._apply_memory_level)
-        tb.addWidget(self.mem_combo)
         tb.addSeparator()
 
         # Rotation
@@ -1222,7 +1242,8 @@ class MainWindow(QMainWindow):
     def _build_settings_dialog(self):
         """Build the Settings dialog (separate so it can be tested)."""
         from PyQt6.QtWidgets import (
-            QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
+            QDialog, QDialogButtonBox, QFormLayout, QRadioButton, QSizePolicy,
+            QTabWidget,
         )
 
         current = ThumbnailSettings.load()
@@ -1233,31 +1254,61 @@ class MainWindow(QMainWindow):
         dlg.setMinimumWidth(420)
 
         layout = QVBoxLayout(dlg)
-        group = QGroupBox("Thumbnails", dlg)
-        form = QFormLayout(group)
+        tabs = QTabWidget(dlg)
 
-        size = QSpinBox(group)
+        # --- Thumbnails tab ---
+        thumbs_tab = QWidget()
+        form = QFormLayout(thumbs_tab)
+
+        size = QSpinBox(thumbs_tab)
         size.setRange(THUMB_MIN_WIDTH, THUMB_MAX_WIDTH)
         size.setSingleStep(8)
         size.setSuffix(" px")
         size.setValue(current.width)
         form.addRow("Page size:", size)
 
-        border = QComboBox(group)
+        border = QComboBox(thumbs_tab)
         for px in (1, 2, 3):
             border.addItem(f"{px} px", px)
         border.setCurrentIndex(current.border_width - 1)
         form.addRow("Border width:", border)
 
-        shadow = QCheckBox("Draw a drop shadow behind each page", group)
+        shadow = QCheckBox("Draw a drop shadow behind each page", thumbs_tab)
+        shadow.setObjectName("thumbnailShadow")
         shadow.setChecked(current.shadow)
         form.addRow("Shadow:", shadow)
 
-        layout.addWidget(group)
+        tabs.addTab(thumbs_tab, "Thumbnails")
 
-        window_group = QGroupBox("Window", dlg)
-        window_form = QFormLayout(window_group)
-        start_maximized = QCheckBox("Open the window maximized", window_group)
+        # --- Page preloading tab (Okular memory levels) ---
+        # Radio buttons with the detailed description always visible under
+        # each option.
+        mem_tab = QWidget()
+        mem_layout = QVBoxLayout(mem_tab)
+        mem_radios: dict = {}
+        for level, title in (("low", "Low"),
+                             ("normal", "Normal (recommended)"),
+                             ("greedy", "Greedy")):
+            radio = QRadioButton(title, mem_tab)
+            radio.setObjectName(f"memory{level.capitalize()}")
+            radio.setChecked(self.memory_level == level)
+            desc = QLabel(MEMORY_LEVEL_DESCRIPTIONS[level], mem_tab)
+            desc.setWordWrap(True)
+            # sizeHint is the floor: the layout must not shrink the wrapped
+            # description below its full height (clips the last paragraph).
+            desc.setSizePolicy(QSizePolicy.Policy.Preferred,
+                               QSizePolicy.Policy.Minimum)
+            desc.setContentsMargins(24, 0, 8, 6)
+            mem_layout.addWidget(radio)
+            mem_layout.addWidget(desc)
+            mem_radios[level] = radio
+        mem_layout.addStretch(1)
+        tabs.addTab(mem_tab, "Page preloading")
+
+        # --- Window tab ---
+        window_tab = QWidget()
+        window_form = QFormLayout(window_tab)
+        start_maximized = QCheckBox("Open the window maximized", window_tab)
         start_maximized.setObjectName("windowStartMaximized")
         start_maximized.setChecked(
             self.settings.value("window_maximized", True, type=bool))
@@ -1265,10 +1316,12 @@ class MainWindow(QMainWindow):
         remember = QLabel(
             "When this is off, PDFAR reopens at the size and position you "
             "last used. Resize or move the window to change them.",
-            window_group)
+            window_tab)
         remember.setWordWrap(True)
         window_form.addRow(remember)
-        layout.addWidget(window_group)
+        tabs.addTab(window_tab, "Window")
+
+        layout.addWidget(tabs)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -1285,6 +1338,9 @@ class MainWindow(QMainWindow):
             settings.save()
             self._apply_thumbnail_settings(settings)
             self._apply_window_preference(start_maximized.isChecked())
+            level = next((lvl for lvl, radio in mem_radios.items()
+                          if radio.isChecked()), "normal")
+            self._set_memory_level(level)
             dlg.accept()
 
         buttons.accepted.connect(apply)
@@ -2132,16 +2188,17 @@ class MainWindow(QMainWindow):
                 tab.view.set_zoom_step(self.zoom_step)
                 tab.view.set_ctrl_wheel_step(self.ctrl_wheel_step)
 
-    def _apply_memory_level(self, text: str) -> None:
-        """Apply the chosen preload memory level to the active view and persist
-        it for new documents (Okular-style)."""
-        level = text.strip().lower()
+    def _set_memory_level(self, level: str) -> None:
+        """Apply the chosen preload memory level (Okular-style) to every open
+        document, persist it, and inherit it in newly opened documents."""
         if level not in MEMORY_LEVELS:
             level = "normal"
         self.memory_level = level
         self.settings.setValue("memory_level", level)
-        if self.view:
-            self.view.set_memory_level(level)
+        for i in range(self.tabs.count()):
+            tab = self.tabs.widget(i)
+            if isinstance(tab, DocumentTab) and tab.view:
+                tab.view.set_memory_level(level)
 
     def _rotate(self, degrees: int) -> None:
         if self.view:
@@ -2541,12 +2598,12 @@ class MainWindow(QMainWindow):
 
     def _restore_state(self) -> None:
         self._restore_geometry()
-        # restore the preload memory level (Okular) and sync the toolbar combo
+        # restore the preload memory level (Okular); the Settings dialog reads
+        # it from self.memory_level when it opens.
         lvl = self.settings.value("memory_level", "normal")
         if lvl not in MEMORY_LEVELS:
             lvl = "normal"
         self.memory_level = lvl
-        self.mem_combo.setCurrentText(lvl.capitalize())
         # restore the additive zoom step and the Ctrl+wheel behaviour
         try:
             step = float(self.settings.value("zoom_step", DEFAULT_ZOOM_STEP,

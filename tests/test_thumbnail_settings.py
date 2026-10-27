@@ -116,7 +116,7 @@ def test_settings_dialog_saves_and_applies(win, tmp_path):
     dlg = win._build_settings_dialog()
     size = dlg.findChild(QSpinBox)
     border = dlg.findChild(QComboBox)
-    shadow = dlg.findChild(QCheckBox)
+    shadow = dlg.findChild(QCheckBox, "thumbnailShadow")
 
     size.setValue(168)
     border.setCurrentIndex(1)
