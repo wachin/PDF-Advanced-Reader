@@ -264,6 +264,20 @@ class HighlightSpec:
     rects: Tuple[tuple, ...]
 
 
+class SinglePageEdit(Edit):
+    """An edit whose ``page`` field names the one page it writes to.
+
+    Says so for the list's sake: a page nobody wrote to cannot have changed, so
+    there is nothing there to re-read (F10-3h).
+    """
+
+    page: int
+
+    @property
+    def pages(self) -> Tuple[int, ...]:
+        return (self.page,)
+
+
 @dataclass(frozen=True)
 class AddHighlight(Edit):
     """Highlight the selected rectangles.
@@ -283,6 +297,10 @@ class AddHighlight(Edit):
     @property
     def label(self) -> str:
         return "Highlight"
+
+    @property
+    def pages(self) -> Tuple[int, ...]:
+        return tuple(spec.page for spec in self.specs)
 
     def apply(self, doc: fitz.Document) -> None:
         if not self.specs:
@@ -304,7 +322,7 @@ class AddHighlight(Edit):
 
 
 @dataclass(frozen=True)
-class AddNote(Edit):
+class AddNote(SinglePageEdit):
     """Put a sticky note at *position* — a PDF ``/Text`` annotation.
 
     The point is the icon's top-left.  It is pulled inside the page if the user
@@ -341,7 +359,7 @@ class AddNote(Edit):
 
 
 @dataclass(frozen=True)
-class RemoveAnnotation(Edit):
+class RemoveAnnotation(SinglePageEdit):
     """Delete the annotation *ann_id* names."""
 
     ann_id: str
@@ -359,7 +377,7 @@ class RemoveAnnotation(Edit):
 
 
 @dataclass(frozen=True)
-class SetHighlightColor(Edit):
+class SetHighlightColor(SinglePageEdit):
     """Recolor an existing highlight."""
 
     ann_id: str
@@ -384,7 +402,7 @@ class SetHighlightColor(Edit):
 
 
 @dataclass(frozen=True)
-class SetAnnotationNote(Edit):
+class SetAnnotationNote(SinglePageEdit):
     """Set or clear the text an annotation carries.
 
     The same step for both kinds: a standalone note's text and a note on a
@@ -438,6 +456,9 @@ class AnnotationManager(QObject):
     def __init__(self, session: DocumentSession, parent=None):
         super().__init__(parent)
         self.session = session
+        #: What each page's read produced, so a page that did not change does not
+        #: have to be read again.
+        self._by_page: Dict[int, Dict[str, Annotation]] = {}
         self._annotations: Dict[str, Annotation] = {}
         # -1 so that the first read happens even for a session at generation 0.
         self._generation = -1
@@ -456,36 +477,71 @@ class AnnotationManager(QObject):
         ``fitz.Document``, which is what ``session.generation`` counts.  Re-read
         then, so the page and the id a row carries come from the document the user
         is looking at rather than from the one that was edited.
+
+        Only the pages that step wrote to are read again: an annotation belongs to
+        one page, so a page nobody wrote to cannot have changed, and on the 540-page
+        book walking all of them cost three to five times the edit itself (F10-3h).
         """
-        if self._generation == self.session.generation:
+        generation = self.session.generation
+        if self._generation == generation:
             return
-        found: Dict[str, Annotation] = {}
         doc = self.doc
-        for page_idx in range(doc.page_count):
-            page = doc.load_page(page_idx)
-            try:
-                for annot in page.annots():
-                    kind = annot.type[0]
-                    if kind == fitz.PDF_ANNOT_HIGHLIGHT:
-                        model = _highlight_model(annot, page_idx)
-                    elif kind == fitz.PDF_ANNOT_TEXT:
-                        model = _note_model(annot, page_idx)
-                    else:
-                        # A shape, stamp or free-text annotation PDFAR cannot
-                        # edit yet: listing it would offer an action on something
-                        # the user brought in from another program.
-                        continue
-                    found[model.id] = model
-            except ANNOT_READ_ERRORS:
-                # Annotations are a linked chain, so one that the file cannot
-                # read ends this page's list.  What was read before it stays, and
-                # the rest of the document is unaffected.  The guard covers the
-                # data errors only, so a mistake in here still surfaces instead
-                # of quietly emptying the sidebar.
-                continue
-        self._annotations = found
-        self._generation = self.session.generation
+        changed = self._changed_pages(generation)
+        if changed is None:
+            self._by_page = {}
+            to_read = list(range(doc.page_count))
+        else:
+            to_read = [page for page in sorted(set(changed))
+                       if 0 <= page < doc.page_count]
+        for page_idx in to_read:
+            models = self._read_page(doc, page_idx)
+            if models:
+                self._by_page[page_idx] = models
+            else:
+                self._by_page.pop(page_idx, None)
+        self._annotations = {ann_id: model
+                             for page in sorted(self._by_page)
+                             for ann_id, model in self._by_page[page].items()}
+        self._generation = generation
         self.annotations_changed.emit()
+
+    def _changed_pages(self, generation: int) -> Optional[Sequence[int]]:
+        """The pages to read again, or ``None`` for the whole document.
+
+        ``session.changed_pages`` describes the step that produced this generation,
+        so it can only be trusted when this list is one step behind.  Anything else
+        — an edit that could not say which pages it wrote, a list nobody asked to
+        read for several edits — and the safe answer is to look at everything.
+        """
+        if generation > self._generation + 1:
+            return None
+        return self.session.changed_pages
+
+    def _read_page(self, doc: fitz.Document, page_idx: int) -> Dict[str, Annotation]:
+        """The models for one page, keyed by the id the document gives them."""
+        found: Dict[str, Annotation] = {}
+        try:
+            page = doc.load_page(page_idx)
+            for annot in page.annots():
+                kind = annot.type[0]
+                if kind == fitz.PDF_ANNOT_HIGHLIGHT:
+                    model = _highlight_model(annot, page_idx)
+                elif kind == fitz.PDF_ANNOT_TEXT:
+                    model = _note_model(annot, page_idx)
+                else:
+                    # A shape, stamp or free-text annotation PDFAR cannot
+                    # edit yet: listing it would offer an action on something
+                    # the user brought in from another program.
+                    continue
+                found[model.id] = model
+        except ANNOT_READ_ERRORS:
+            # Annotations are a linked chain, so one that the file cannot
+            # read ends this page's list.  What was read before it stays, and
+            # the rest of the document is unaffected.  The guard covers the
+            # data errors only, so a mistake in here still surfaces instead
+            # of quietly emptying the sidebar.
+            pass
+        return found
 
     def save_to_pdf(self) -> bool:
         """Write the document, which already holds every annotation.

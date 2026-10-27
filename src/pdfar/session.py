@@ -77,6 +77,11 @@ class DocumentSession:
         # "is it the same object?" — caches built from the object itself
         # (annotation references, page handles) must rebind on the latter.
         self.generation = 0
+        #: Which pages the step that produced this generation wrote to, or ``None``
+        #: when that step could not say.  A cache keyed by page can re-read just
+        #: those instead of the document, so long as it is keeping up: fall behind
+        #: by two steps and this describes only the newer one.
+        self.changed_pages: Optional[Tuple[int, ...]] = None
         self.history = EditHistory(on_release=self._release_revision)
         self.encryption = Encryption.capture(doc, self.password, authenticated)
         self._disk_stamp = _disk_stamp(path)
@@ -157,6 +162,7 @@ class DocumentSession:
         self._adopt(clone)
         if staged:
             self._revision = staged
+        self.changed_pages = edit.pages
         self.history.record(edit, before)
         return self.version, edit.scope
 
@@ -182,6 +188,7 @@ class DocumentSession:
         self._adopt(clone)
         if target.before.path:
             self._revision = target.before.path
+        self.changed_pages = target.pages
         if direction == "undo":
             history.take_undo(leaving)
         else:
@@ -318,6 +325,7 @@ class DocumentSession:
             reopened.close()
             raise SaveError(f"“{name}” needs its password to be reopened.")
         self._adopt(reopened)
+        self.changed_pages = None       # a whole document came in; nothing is known
         self.history.clear()
         self._close_revisions()
         self.mark_saved()

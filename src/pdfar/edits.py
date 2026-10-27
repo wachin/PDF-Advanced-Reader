@@ -62,6 +62,13 @@ class Edit(ABC):
     #: default for anything that rewrites page content.
     scope: Scope = Scope.FULL
 
+    #: Which pages this edit writes to.  ``()`` says none of them, ``None`` says
+    #: the edit cannot say — which is the default, because being wrong in that
+    #: direction is the safe one: a reader that caches per page re-reads the
+    #: whole document when it sees ``None``, and only wastes time when the edit
+    #: named pages that turned out not to change.
+    pages: Optional[Tuple[int, ...]] = None
+
     @property
     @abstractmethod
     def label(self) -> str:
@@ -79,6 +86,7 @@ class SetMetadata(Edit):
     entries: Tuple[Tuple[str, str], ...]
 
     scope = Scope.METADATA
+    pages = ()
 
     @property
     def label(self) -> str:
@@ -146,6 +154,7 @@ class _Step:
     label: str
     scope: Scope
     before: Snapshot
+    pages: Optional[Tuple[int, ...]] = None
 
     @property
     def size(self) -> int:
@@ -176,7 +185,7 @@ class EditHistory:
     # ------------------------------------------------------------- recording
     def record(self, edit: Edit, before: Union[Snapshot, bytes, str]) -> None:
         """Store the pre-edit state for ``edit`` and clear the redo branch."""
-        step = _Step(edit.label, edit.scope, _as_snapshot(before))
+        step = _Step(edit.label, edit.scope, _as_snapshot(before), edit.pages)
         self._undo.append(step)
         self._bytes += step.size
         self._bytes -= sum(s.size for s in self._redo)
@@ -241,7 +250,7 @@ class EditHistory:
             raise EditError("Nothing to undo")
         step = self._undo.pop()
         self._bytes -= step.size
-        parked = _Step(step.label, step.scope, _as_snapshot(current))
+        parked = _Step(step.label, step.scope, _as_snapshot(current), step.pages)
         self._redo.append(parked)
         self._bytes += parked.size
         self._trim_redo()
@@ -253,7 +262,7 @@ class EditHistory:
             raise EditError("Nothing to redo")
         step = self._redo.pop()
         self._bytes -= step.size
-        parked = _Step(step.label, step.scope, _as_snapshot(current))
+        parked = _Step(step.label, step.scope, _as_snapshot(current), step.pages)
         self._undo.append(parked)
         self._bytes += parked.size
         self._trim()

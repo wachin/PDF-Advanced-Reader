@@ -907,8 +907,9 @@ Phase status: **[~] Under way.** F10-0 (document session), F10-1 (edit
 framework) and F10-2 (save, save as, revert) are implemented; **F10-3** is under
 way, with annotations as edits (F10-3a), the save-cost fix (F10-3b), revision
 files for undo (F10-3c), standalone `/Text` notes (F10-3d), the interface that
-places them (F10-3e), a comments panel that jumps to what it lists (F10-3f) and a
-highlight that stays on its words however the page is turned (F10-3g) done.
+places them (F10-3e), a comments panel that jumps to what it lists (F10-3f), a
+highlight that stays on its words however the page is turned (F10-3g) and a list
+that re-reads the pages an edit touched (F10-3h) done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1177,12 +1178,13 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       into `_annotation_menu()`, which is also what made a note's own text
       reachable from its row — the note actions used to be offered on highlight
       rows only.)
-- [ ] A note edit on a big document costs the annotation *list*, not the edit
-      (**found in F10-3e**): `AnnotationManager._run()` re-reads every page after
-      every edit, which measures 108–175 ms on the 540-page book against 59 ms
-      for the edit itself — so placing a note there takes ~170–230 ms when 60 ms
-      of that is the document changing. The list should be rebuilt per page, or
-      only for the pages an edit touched.
+- [x] A note edit no longer costs the annotation *list* more than the edit
+      (**found in F10-3e, fixed in F10-3h**): `AnnotationManager._run()` re-read
+      every page after every edit, which measures 167–302 ms on the 540-page book
+      against 59 ms for the edit itself — the walk of a document that has just been
+      adopted is cold, so every page is parsed again. The list is now kept per page
+      and an edit says which pages it wrote to (`Edit.pages`), so placing a note
+      there re-reads one page: **1.6–2.8 ms**.
 - [x] A highlight made while the view is rotated no longer lands on the wrong
       part of the page (**found in F10-3e, fixed in F10-3g**):
       `create_highlight_from_selection()` had been handing `add_highlights()`
@@ -1316,11 +1318,11 @@ so they undo and mark dirty (F10-3a); a save stopped compacting the object table
 (F10-3b); undo is a revision file in a scratch copy, so a highlight costs 55 ms
 instead of 2.1 s and no buffer (F10-3c); a sticky note is a real `/Text`
 annotation in the document (F10-3d), right-clicking a page is how you place one
-(F10-3e), a comment row in the panel jumps to the comment it names (F10-3f), and a
-highlight lands on its words whatever the view rotation (F10-3g).
-Next, in order: the one item still open from F10-3 — the annotation list re-read
-from every page after each edit — then the remaining kinds (freehand, shapes,
-stamps).
+(F10-3e), a comment row in the panel jumps to the comment it names (F10-3f), a
+highlight lands on its words whatever the view rotation (F10-3g), and the
+annotation list re-reads only the pages an edit wrote to (F10-3h).
+Next, in order: the remaining kinds (freehand, shapes, stamps), appearance
+streams so other readers show what PDFAR wrote, and XFDF import/export.
 
 Goal:
 
@@ -2521,6 +2523,63 @@ passed at rotation 0. Three consecutive full runs.
 selection from 3.03 ms to 0.57 ms to collect and merge. The edit itself is
 unchanged — F10-3c's 54–70 ms — and what is left of the cost is the annotation list
 re-read, the one item still open under F10-3.
+
+---
+
+### F10-3h The annotation list re-reads the pages an edit touched — [x] Implemented
+
+**Completed**: 2026-10-27
+
+**What landed**: the list the sidebar shows is kept per page now, and an edit says
+which pages it wrote to. `Edit` gained `pages` — `()` for none, `(3,)` for one,
+`None` for "the edit cannot say" — the session records the pages of the step that
+produced the current generation as `changed_pages`, and
+`AnnotationManager.reload_from_document()` reads those pages and keeps what it had
+read of the rest. `AddHighlight` names every page of its selection; the four
+single-page annotation edits say so through `SinglePageEdit`.
+
+**The walk was worse than it looked.** F10-3e measured the re-list at 108–175 ms;
+measuring it again in the app, in pieces, put it at **167–302 ms** against 59 ms for
+the edit. The reason it is that far above the cost of the same walk on a warm
+document (30 ms) is F10-3c: an adopted edit is a *different* `fitz.Document`, opened
+from a revision file, so its page cache starts empty and all 540 page dictionaries
+are parsed again. The list was not slow because it reads annotations; it was slow
+because it loads every page to find out that it has none.
+
+**`None` is the answer that keeps this safe.** An edit that does not name its pages,
+a revert (a whole document came in from disk), and a list that has fallen behind by
+more than one generation all mean "read the document", which is exactly what F10-3a
+did. The partial path only runs when the manager is one step behind and that step
+said which pages it wrote. Getting this wrong would show a user a comment that is no
+longer there, or hide one that is, so the tests count `load_page` calls rather than
+trusting that the list looks right — a stale row and a correct one are the same
+object otherwise.
+
+**Files changed**: `src/pdfar/edits.py` (`Edit.pages`, `SetMetadata.pages`,
+`_Step.pages` carried through `record`/`take_undo`/`take_redo` so an undo knows what
+it un-did), `src/pdfar/session.py` (`changed_pages` set by `apply`, `_step` and
+`revert`), `src/pdfar/annotations.py` (`SinglePageEdit`, the per-page cache,
+`_read_page`).
+
+**Verified by eye** (headless): through six steps in the app — empty, a highlight on
+page 2, a note on page 4, the note rewritten, the note removed, the removal undone —
+the comments panel listed exactly what the manager listed, including page 4's group
+disappearing and coming back. The screenshot shows both rows, two pages apart, each
+written by its own edit.
+
+**Tests**: 584 passed (was 571) — `tests/test_annotation_list_cache.py` (13) counts
+page reads: a note re-reads its own page and not the neighbours, an untouched page
+keeps the model it had (identity, not equality), a multi-page highlight re-reads
+each of its pages, a metadata edit re-reads nothing at all, an edit that cannot say
+re-reads the document, a list two steps behind re-reads the document, a revert
+re-reads it, undo re-reads the page the undone edit had written, and the list stays
+in page order across partial reads. Three consecutive full runs.
+
+**Performance on the 540-page book**: a note edit's re-list went from 167–302 ms to
+**1.6–2.8 ms** (2 page reads for the note's own page instead of 540), and undo to
+1 read in 19.9 ms. The whole edit is now 89–119 ms, of which the document change is
+78–113 ms — the list is no longer the expensive part. What a note still costs on top
+is the re-render of the page it painted, which is the point of the edit.
 
 ---
 
