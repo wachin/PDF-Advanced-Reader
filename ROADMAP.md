@@ -754,19 +754,7 @@ Before modifying a file:
 
 # F7 — ACCESSIBILITY AND SECURITY
 
-## F7-1 Text-to-Speech
-
-Implement text reading.
-
-Must respect:
-
-- reading order
-- selection
-- pause
-- resume
-- speed
-
-## F7-2 OCR
+## F7-1 OCR
 
 Modular architecture.
 
@@ -780,7 +768,7 @@ Ideally:
 - allow cancellation
 - preserve original PDF
 
-## F7-3 True redaction
+## F7-2 True redaction
 
 Tracked and implemented as **F10-5**.
 
@@ -797,7 +785,7 @@ There must be proof demonstrating that the redacted text can no longer be:
 - searched
 - extracted
 
-## F7-4 PDF security
+## F7-3 PDF security
 
 Protect against:
 
@@ -909,8 +897,9 @@ way, with annotations as edits (F10-3a), the save-cost fix (F10-3b), revision
 files for undo (F10-3c), standalone `/Text` notes (F10-3d), the interface that
 places them (F10-3e), a comments panel that jumps to what it lists (F10-3f), a
 highlight that stays on its words however the page is turned (F10-3g), a list
-that re-reads the pages an edit touched (F10-3h) and freehand ink in the
-document (F10-3i) done.
+that re-reads the pages an edit touched (F10-3h), freehand ink in the
+document (F10-3i), the pen tool and its style pickers (F10-3j/3k) and the
+shape tool (F10-3l/3m) done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1247,11 +1236,23 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       into `ShapeAnnotation` and distinguishes `"arrow"` from `"line"` by
       `line_ends`, so undo, redo, save/reopen, the comment list, notes and
       delete all reach shapes through the code the earlier kinds left generic.)
-- [ ] The shape tool: drag a rectangle, ellipse, line, arrow or polygon on the
-      page and see it while dragging (**F10-3m, next**). F10-3j's page-space
-      capture and F10-3k's styling are reusable; the new part is the geometry
-      a drag means for each kind.
+- [x] The shape tool: drag a rectangle, ellipse, line, arrow or polygon on the
+      page and see it while dragging (**F10-3m.** A "Shape" tool beside
+      Freehand, whose split button chooses the kind and keeps the choice per
+      tab. The drag means what the kind needs: two opposite corners for a box,
+      two endpoints for a line or arrow, the traced outline for a polygon. The
+      capture is F10-3j's, so points are page space and a rotated or zoomed
+      view draws where the pointer is. The trace is reduced with
+      Ramer–Douglas–Peucker at `PEN_MIN_STEP / zoom`, so a shaky hand becomes
+      the corners it meant rather than hundreds of vertices, and a trace closed
+      back on its start does not repeat the first point. One drag is one
+      `AddShape` and one Ctrl+Z; a click makes no shape, Escape or another
+      tool gives up an unfinished one, and points off the page are ignored so
+      the shape stops at the paper. The preview paints in view space in the
+      chosen colour and thickness, arrowhead included, and F10-3k's pickers
+      appear for this tool too.)
 - [ ] Stamps, including the standard pre-defined rubber-stamp images
+      (**F10-3n, next**)
 - [ ] Measurement annotations (`/Projection`), with the scale they are drawn in
 - [ ] Appearance streams, so other readers show the same thing without
       regenerating them
@@ -1373,8 +1374,9 @@ annotation list re-reads only the pages an edit wrote to (F10-3h), a
 freehand drawing is a real `/Ink` annotation in the document (F10-3i), the pen
 tool draws one where the pointer is, under any rotation (F10-3j), and the pen's
 colour and thickness come from pickers beside the tool (F10-3k); shapes are real
-`/Square`, `/Circle`, `/Line` and `/Polygon` annotations (F10-3l).
-Next, in order: the shape tool (F10-3m), stamps, measurement, appearance streams
+`/Square`, `/Circle`, `/Line` and `/Polygon` annotations (F10-3l), and the shape
+tool drags all five kinds with a live preview (F10-3m).
+Next, in order: stamps (F10-3n), measurement, appearance streams
 so other readers show what PDFAR wrote, and XFDF import/export.
 
 Goal:
@@ -2884,6 +2886,105 @@ already refreshed the page.
 **What is not here**: the tool. Nothing in the interface draws a shape yet — the
 same document-first split as F10-3d/F10-3e and F10-3i/F10-3j. The drag, the
 live preview and the kind picker are F10-3m.
+
+---
+
+### F10-3m The shape tool — [x] Implemented
+
+**Completed**: 2026-10-27
+
+**What landed**: a sixth tool mode, `"shape"`, and one toolbar split button for
+it. The button draws the last kind used and its menu offers the other four;
+`view.shape_kind` is per tab, so two documents can each keep the kind they were
+drawn with. `_shape_drag` holds one drag — page, kind, start corner, moving
+corner, and for a polygon the trace — and `_commit_shape` turns it into exactly
+one `add_shape`, the pen's rule that one press-to-release is one edit and one
+Ctrl+Z.
+
+**What a drag means depends on the kind.** A rectangle and an ellipse take the
+press and release points as opposite corners, in either direction, because
+`_clean_shape` already normalises them. A line and an arrow take them as the
+two endpoints. A polygon cannot: it is the outline the user traced, so moves
+are captured with F10-3j's `PEN_MIN_STEP / zoom` spacing and the finished trace
+is reduced by Ramer–Douglas–Peucker at the same tolerance. A shaky triangle
+traced in dozens of moves becomes three corners, not one per move; a trace that
+comes back to where it started loses the repeated closing point, since
+`/Polygon` closes itself. Fewer than three corners after reduction means no shape: `add_shape`
+would refuse it, so the tool does not ask.
+
+**The capture is F10-3j's, with one difference.** `_pdf_point_at` still owns
+the walk from widget coordinates through scroll bars, zoom, rotation and page
+layout into page space, which is why a shape drawn on a 90°-turned page lands on
+the point under the pointer. A point that lands off the page or on a
+neighbouring page is ignored rather than clamped, so the shape stops at the
+paper edge instead of growing into the gutter; for a box that means it freezes
+at the last on-page corner. A press in the gutter starts nothing. Escape and
+changing tools cancel a shape in progress, which never reaches the document;
+undoing, of course, removes a committed one.
+
+**Preview.** `_paint_shape` draws in view coordinates straight from the live
+drag: a normalized `QRectF` for boxes, a `drawLine` plus a hand-drawn arrowhead
+for line/arrow, and a closed `QPainterPath` through the traced points for the
+polygon. The arrowhead is sized in pixels from the ink width so it stays visible
+at any zoom. The shape is painted under the pointer from the press on; nothing
+is written until release.
+
+**Style reuse.** The tool reads the same `view.ink_color` and `view.ink_width`
+the pen does, so F10-3k's palette, custom colour and width combo appear for the
+shape tool too. The swatch's icon becomes the current kind's, so the button
+says what is being drawn, and its tooltip stays "Drawing colour".
+
+**One UI trap, again.** F10-3k hid the options by hiding their `QWidgetAction`.
+Once the toolbar had a split button between the tool and the page-view button,
+that was not enough: the action stayed in the toolbar with `isHidden()` while
+`isVisible()` could still read true. The options are now removed from the
+toolbar when the tool changes and re-inserted with `addWidget()` when a drawing
+tool becomes active.
+
+**Files changed**: `src/pdfar/viewer.py` (`_segment_distance`,
+`_simplify_outline`, `shape_kind`, `_shape_drag`, `set_shape_kind`,
+`_cancel_shape`, `_extend_shape`, `_commit_shape`, `_paint_shape`,
+`_paint_arrowhead`, the mouse and key branches, `TOOL_MODES` and
+`_PAGE_ONLY_TOOLS`), `src/pdfar/main.py` (the five kind actions, the
+`shape_split` button, `_choose_shape`, per-tab kind sync, shape icons, the pen
+options shown for both drawing tools), five `assets/icons/shape_*.svg`,
+`tests/test_shape_tool.py`, and the toolbar-order assertion in
+`tests/test_main.py`.
+
+**Verified by eye** (headless): a 300×200 page at 150 % took one drag of each
+kind and read back `Square`, `Circle`, `Line`, `Line` with ends `(0, 5)`,
+`Polygon`, with history labels Rectangle, Ellipse, Line, Arrow, Polygon; the
+shape options were visible with the tool; an arrow dragged on the same page at
+90° stored the page-space points `(30, 30)–(120, 60)`; after saving and
+reopening in a fresh window the six annotations came back as
+`rect, ellipse, line, arrow, polygon, arrow`. Screenshots `/tmp/f103m_ui.png`,
+`/tmp/f103m_rotated.png`, `/tmp/f103m_reopened.png`.
+
+**Tests**: 709 passed (was 674) — `tests/test_shape_tool.py` (35): each kind is
+one tool with a kind and its own menu entry; another tool draws nothing; every
+kind's drag produces the shape the document holds; nothing is written until
+release; box corners, line endpoints and the arrow's `(0, 5)` are right; a
+22-point jittered triangle trace is reduced to its three corners; a line
+survives 0°, 90°, 180° and 270° and three zooms; a drag leaving the page stops
+at the paper;
+a press in the gutter draws nothing; a click draws nothing; the live preview
+paints; Escape and a tool change cancel; reflow disables the tool; colour and
+width reach `/C` and `/BS`; the pickers appear with the tool; and two tabs keep
+their own kind. Three consecutive full runs.
+
+**Performance on the 540-page book** (page 1, real `PDFView` driven with mouse
+events): capturing the drag is the pen's cost — 60 moves trace in 3.2 ms — and
+the release applies the shape in 56–187 ms, the F10-3l `add_shape` edit plus
+the view's update. The number that looks large is the repaint after any edit,
+299–533 ms; it is the edited page being re-rasterised, not the tool, because an
+undo costs the same 533 ms and a repaint with no edit is 2.8–6.3 ms. Shapes
+therefore have no measurable cost of their own beyond the edit every annotation
+kind already pays.
+
+**What is not here**: constraining a box to a square/circle with Shift, a fill
+choice (shapes are hollow), and editing a committed shape's geometry — the
+comment list can select, note and delete one, but changing its corners is not a
+tool yet. Stamps (F10-3n) are next.
 
 ---
 

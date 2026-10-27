@@ -17,6 +17,7 @@ back through a Qt signal and are stored in a byte-budget LRU cache.
 from __future__ import annotations
 
 import bisect
+import math
 from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple
 
@@ -58,14 +59,55 @@ from .search import SearchHit
 from .session import DocumentSession
 from .tiles import Tile, TileGrid, TILE_SIZE
 from .annotations import (
-    INK_COLOR, INK_WIDTH, Annotation, AnnotationManager, HIGHLIGHT_COLORS,
-    NoteAnnotation,
+    INK_COLOR, INK_WIDTH, SHAPE_LABELS, Annotation, AnnotationManager,
+    HIGHLIGHT_COLORS, NoteAnnotation,
 )
 
 #: How far apart two captured points of a pen stroke have to be, in screen
 #: pixels.  A drag delivers a point every couple of pixels; keeping all of them
 #: would put thousands of numbers in the file to draw one line.
 PEN_MIN_STEP = 2.0
+
+
+def _segment_distance(point: tuple, start: tuple, end: tuple) -> float:
+    """How far *point* is from the segment *start*–*end*, in page points."""
+    px, py = point
+    ax, ay = start
+    bx, by = end
+    dx, dy = bx - ax, by - ay
+    if dx == 0.0 and dy == 0.0:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0,
+                     ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def _simplify_outline(points: List[tuple], tolerance: float) -> List[tuple]:
+    """Reduce a traced outline to its corners (Ramer–Douglas–Peucker).
+
+    A polygon annotation should hold the corners the user meant, not the jitter
+    of the hand.  The tolerance is in page points and comes from the same
+    screen-space rule that spaces a stroke, so the result looks the same at any
+    zoom.  The split stack is explicit because a long scribble can have more
+    points than Python's recursion limit.
+    """
+    if len(points) < 3:
+        return list(points)
+    keep = [False] * len(points)
+    keep[0] = keep[-1] = True
+    pending = [(0, len(points) - 1)]
+    while pending:
+        start, end = pending.pop()
+        index, farthest = 0, 0.0
+        for i in range(start + 1, end):
+            distance = _segment_distance(points[i], points[start], points[end])
+            if distance > farthest:
+                index, farthest = i, distance
+        if farthest > tolerance:
+            keep[index] = True
+            pending.append((start, index))
+            pending.append((index, end))
+    return [point for point, kept in zip(points, keep) if kept]
 
 PAD = 16          # outer margin (content coords)
 GAP = 12          # gap between pages / columns
@@ -258,9 +300,14 @@ class PDFView(QAbstractScrollArea):
         #: page space, or ``None`` when the pen is not down.
         self._stroke: Optional[dict] = None
         #: What the pen draws with.  Both go into the annotation, so a drawing
-        #: keeps its look when another reader shows the file.
+        #: keeps its look when another reader shows the file.  The shape tool
+        #: draws with the same two attributes.
         self.ink_color = INK_COLOR
         self.ink_width = INK_WIDTH
+        #: The shape the shape tool draws next, and the drag in progress:
+        #: ``{"page", "kind", "start", "current", "points"}`` in page space.
+        self.shape_kind = "rect"
+        self._shape_drag: Optional[dict] = None
 
         # search
         self._hit_rects: Dict[int, List[Tuple[float, float, float, float]]] = {}
@@ -699,13 +746,13 @@ class PDFView(QAbstractScrollArea):
         self.viewport().update()
 
     # ---------------------------------------------------------- mouse tools
-    TOOL_MODES = ("browse", "text", "area", "table", "draw")
+    TOOL_MODES = ("browse", "text", "area", "table", "draw", "shape")
 
     #: Tools that need the page geometry reflow does not have.
-    _PAGE_ONLY_TOOLS = ("area", "table", "draw")
+    _PAGE_ONLY_TOOLS = ("area", "table", "draw", "shape")
 
     def set_tool_mode(self, mode: str) -> None:
-        """Switch the left-button tool: browse, text, area, table or pen."""
+        """Switch the left-button tool: browse, text, area, table, pen or shape."""
         if mode not in self.TOOL_MODES:
             return
         if self.reflow_mode and mode in self._PAGE_ONLY_TOOLS:
@@ -716,10 +763,18 @@ class PDFView(QAbstractScrollArea):
         self.tool_mode = mode
         self._cancel_marquee()
         self._cancel_stroke()
+        self._cancel_shape()
         self._panning = False
         if mode != "text":
             self.clear_selection()
         self._apply_tool_cursor()
+        self.viewport().update()
+
+    def set_shape_kind(self, kind: str) -> None:
+        """Choose which shape the shape tool draws next."""
+        if kind not in SHAPE_LABELS:
+            return
+        self.shape_kind = kind
         self.viewport().update()
 
     def set_ink_color(self, color: str) -> None:
@@ -806,6 +861,70 @@ class PDFView(QAbstractScrollArea):
         self.annotation_manager.add_ink(stroke["page"], [points],
                                         color=self.ink_color,
                                         width=self.ink_width)
+
+    def _cancel_shape(self) -> None:
+        """Give up the shape in progress: it never reaches the document."""
+        if self._shape_drag is not None:
+            self._shape_drag = None
+            self.viewport().update()
+
+    def _extend_shape(self, pos: QPoint) -> None:
+        """Move the shape in progress to the point under the cursor.
+
+        A rectangle, ellipse, line or arrow keeps one moving corner in page
+        space; a polygon keeps the outline the user traced, with the same
+        :data:`PEN_MIN_STEP` spacing rule a stroke follows, and is reduced to
+        its corners when the button comes up.  A point off the page is ignored,
+        so the shape ends at the paper rather than beyond it.
+        """
+        drag = self._shape_drag
+        hit = self._pdf_point_at(pos)
+        if hit is None or hit[0] != drag["page"]:
+            return
+        _page, x, y = hit
+        if drag["kind"] == "polygon":
+            last_x, last_y = drag["points"][-1]
+            step = PEN_MIN_STEP / self.zoom
+            if abs(x - last_x) < step and abs(y - last_y) < step:
+                return
+            drag["points"].append((x, y))
+        drag["current"] = (x, y)
+        self.viewport().update()
+
+    def _commit_shape(self, drag: dict) -> None:
+        """Hand the finished drag to the document as one shape edit.
+
+        One drag is one annotation and one Ctrl+Z, the rule the pen follows.
+        A drag with no extent is dropped: the edit would refuse it anyway, and
+        a click is not a shape the user meant to draw.
+        """
+        kind = drag["kind"]
+        color = self.ink_color
+        width = self.ink_width
+        if kind in ("rect", "ellipse"):
+            sx, sy = drag["start"]
+            ex, ey = drag["current"]
+            self.annotation_manager.add_shape(
+                drag["page"], kind, rect=(sx, sy, ex, ey),
+                color=color, width=width)
+        elif kind in ("line", "arrow"):
+            self.annotation_manager.add_shape(
+                drag["page"], kind, points=(drag["start"], drag["current"]),
+                color=color, width=width)
+        else:
+            tolerance = PEN_MIN_STEP / self.zoom
+            traced = list(drag["points"])
+            if traced[-1] != drag["current"]:
+                traced.append(drag["current"])
+            points = _simplify_outline(traced, tolerance)
+            # Tracing all the way back to the start repeats the first corner;
+            # a /Polygon closes itself, so the repeat is noise.
+            if len(points) >= 3 and math.dist(points[0], points[-1]) <= tolerance:
+                points = points[:-1]
+            if len(points) >= 3:
+                self.annotation_manager.add_shape(
+                    drag["page"], "polygon", points=tuple(points),
+                    color=color, width=width)
 
     # ------------------------------------------------------ numbering preview
     def set_numbering_preview(
@@ -1727,6 +1846,7 @@ class PDFView(QAbstractScrollArea):
 
         self._paint_marquee(painter)
         self._paint_stroke(painter)
+        self._paint_shape(painter)
         painter.end()
 
     def _paint_stroke(self, painter: QPainter) -> None:
@@ -1764,6 +1884,64 @@ class PDFView(QAbstractScrollArea):
         for point in mapped[1:]:
             path.lineTo(point)
         painter.drawPath(path)
+
+    def _paint_shape(self, painter: QPainter) -> None:
+        """Draw the shape being dragged, in view coordinates.
+
+        Like the pen, the geometry is captured in page space and mapped on
+        every paint, so zoom and a turned view carry the preview with the page
+        instead of leaving it under the mouse (F10-3g).
+        """
+        drag = self._shape_drag
+        if drag is None or drag["page"] >= len(self.page_sizes):
+            return
+        page = drag["page"]
+        w0, h0 = self.page_sizes[page]
+        ox, oy = self._page_origin(page)
+        ox -= self.horizontalScrollBar().value()
+        oy -= self.verticalScrollBar().value()
+
+        def spot(point):
+            u, v = map_point(point[0], point[1], w0, h0, self.rotation)
+            return QPointF(ox + u * self.zoom, oy + v * self.zoom)
+
+        pen = QPen(QColor(self.ink_color))
+        pen.setWidthF(max(1.0, self.ink_width * self.zoom))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        kind = drag["kind"]
+        start = spot(drag["start"])
+        current = spot(drag["current"])
+        if kind == "rect":
+            painter.drawRect(QRectF(start, current).normalized())
+        elif kind == "ellipse":
+            painter.drawEllipse(QRectF(start, current).normalized())
+        elif kind in ("line", "arrow"):
+            painter.drawLine(start, current)
+            if kind == "arrow":
+                self._paint_arrowhead(painter, start, current)
+        else:
+            outline = list(drag["points"])
+            if outline[-1] != drag["current"]:
+                outline.append(drag["current"])
+            path = QPainterPath(spot(outline[0]))
+            for point in outline[1:]:
+                path.lineTo(spot(point))
+            path.closeSubpath()
+            painter.drawPath(path)
+
+    def _paint_arrowhead(self, painter: QPainter, start: QPointF,
+                         head: QPointF) -> None:
+        """The V the arrow will get, so the preview shows what the file gets."""
+        size = max(8.0, 6.0 + self.ink_width * self.zoom)
+        angle = math.atan2(head.y() - start.y(), head.x() - start.x())
+        for spread in (math.radians(150.0), math.radians(-150.0)):
+            wing = angle + spread
+            painter.drawLine(head, QPointF(head.x() + math.cos(wing) * size,
+                                           head.y() + math.sin(wing) * size))
 
     def _paint_marquee(self, painter: QPainter) -> None:
         """Draw the area/table selection rectangle in view coordinates."""
@@ -2759,6 +2937,20 @@ class PDFView(QAbstractScrollArea):
             event.accept()
             return
         if (event.button() == Qt.MouseButton.LeftButton
+                and self.tool_mode == "shape"):
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            self.clear_selection()
+            hit = self._pdf_point_at(event.position().toPoint())
+            if hit is not None:
+                page, x, y = hit
+                self._shape_drag = {
+                    "page": page, "kind": self.shape_kind,
+                    "start": (x, y), "current": (x, y), "points": [(x, y)],
+                }
+                self.viewport().update()
+            event.accept()
+            return
+        if (event.button() == Qt.MouseButton.LeftButton
                 and self.tool_mode in ("area", "table")):
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             self.clear_selection()
@@ -2817,6 +3009,11 @@ class PDFView(QAbstractScrollArea):
             self._extend_stroke(event.position().toPoint())
             event.accept()
             return
+        if (self._shape_drag is not None
+                and (event.buttons() & Qt.MouseButton.LeftButton)):
+            self._extend_shape(event.position().toPoint())
+            event.accept()
+            return
         if (self._marquee is not None
                 and (event.buttons() & Qt.MouseButton.LeftButton)):
             self._marquee["current"] = event.position().toPoint() + QPoint(
@@ -2865,6 +3062,15 @@ class PDFView(QAbstractScrollArea):
             event.accept()
             return
         if (event.button() == Qt.MouseButton.LeftButton
+                and self._shape_drag is not None):
+            drag = self._shape_drag
+            self._extend_shape(event.position().toPoint())
+            self._shape_drag = None
+            self.viewport().update()
+            self._commit_shape(drag)
+            event.accept()
+            return
+        if (event.button() == Qt.MouseButton.LeftButton
                 and self._marquee is not None):
             start = self._marquee["start"]
             current = self._marquee["current"]
@@ -2908,6 +3114,10 @@ class PDFView(QAbstractScrollArea):
             return
         if key == Qt.Key.Key_Escape and self._stroke is not None:
             self._cancel_stroke()
+            event.accept()
+            return
+        if key == Qt.Key.Key_Escape and self._shape_drag is not None:
+            self._cancel_shape()
             event.accept()
             return
         if key == Qt.Key.Key_Escape and self._marquee is not None:

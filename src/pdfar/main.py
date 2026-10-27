@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 )
 
 from . import APP_NAME, __version__
-from .annotations import INK_COLORS, INK_WIDTH, INK_WIDTHS
+from .annotations import INK_COLORS, INK_WIDTH, INK_WIDTHS, SHAPE_LABELS
 from .bookmarks import settings_key_for
 from .i18n import I18n
 from .icons import asset_path as _asset_path, tinted_icon
@@ -296,6 +296,7 @@ class MainWindow(QMainWindow):
         self._ui_dark = False
         self._tool_mode = "text"
         self._last_selection = "text"
+        self._shape_kind = "rect"
         self._start_maximized = True
         self._was_maximized = False
         self._geometry_timer = QTimer(self)
@@ -494,8 +495,31 @@ class MainWindow(QMainWindow):
         self.act_draw.triggered.connect(
             lambda: self._set_tool_mode("draw"))
 
+        # Shape tools: one action per kind, all under one toolbar button.
+        self._shape_tips = {
+            "rect": "drag out a rectangle",
+            "ellipse": "drag out an ellipse",
+            "line": "drag from one end to the other",
+            "arrow": "drag from tail to head",
+            "polygon": "trace the outline; it closes itself",
+        }
+        self._shape_actions = {}
+        for kind, label in SHAPE_LABELS.items():
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setToolTip(f"{label}: {self._shape_tips[kind]}")
+            action.triggered.connect(
+                lambda _checked=False, k=kind: self._choose_shape(k))
+            self._shape_actions[kind] = action
+        self.act_shape_rect = self._shape_actions["rect"]
+        self.act_shape_ellipse = self._shape_actions["ellipse"]
+        self.act_shape_line = self._shape_actions["line"]
+        self.act_shape_arrow = self._shape_actions["arrow"]
+        self.act_shape_polygon = self._shape_actions["polygon"]
+
         for action in (self.act_explore, self.act_sel_text,
-                       self.act_sel_area, self.act_sel_table, self.act_draw):
+                       self.act_sel_area, self.act_sel_table, self.act_draw,
+                       *self._shape_actions.values()):
             self._tool_group.addAction(action)
 
         # Page view modes (Okular-inspired).  Per document; the active view
@@ -791,6 +815,20 @@ class MainWindow(QMainWindow):
         self.tool_split.setMenu(select_menu)
         self.tool_split.setDefaultAction(self.act_sel_text)
         tb.addWidget(self.tool_split)
+
+        # Shapes: the button draws the kind picked from its menu.
+        self.shape_split = QToolButton(tb)
+        self.shape_split.setPopupMode(
+            QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.shape_split.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.shape_split.setAutoRaise(True)
+        shape_menu = QMenu(self.shape_split)
+        for action in self._shape_actions.values():
+            shape_menu.addAction(action)
+        self.shape_split.setMenu(shape_menu)
+        self.shape_split.setDefaultAction(self.act_shape_rect)
+        tb.addWidget(self.shape_split)
 
         # Page view mode menu button (icon reflects the active mode)
         self.view_mode_button = QToolButton(tb)
@@ -2510,6 +2548,8 @@ class MainWindow(QMainWindow):
             self.zoom_label.setToolTip("Zoom level")
 
     def _tool_action(self, mode: str) -> QAction:
+        if mode == "shape":
+            return self._shape_actions[self._shape_kind]
         return {
             "browse": self.act_explore,
             "text": self.act_sel_text,
@@ -2520,20 +2560,35 @@ class MainWindow(QMainWindow):
 
     def _set_tool_mode(self, mode: str) -> None:
         """Activate a mouse tool and apply it to the current view."""
-        if mode not in ("browse", "text", "area", "table", "draw"):
+        if mode not in ("browse", "text", "area", "table", "draw", "shape"):
             return
         view = self.view
-        if view is not None and view.reflow_mode and mode in ("area", "table", "draw"):
+        if (view is not None and view.reflow_mode
+                and mode in ("area", "table", "draw", "shape")):
             mode = "text"
         self._tool_mode = mode
         action = self._tool_action(mode)
         action.setChecked(True)
         if mode != "browse":
             self._last_selection = mode
-            self.tool_split.setDefaultAction(action)
+            if mode == "shape":
+                self.shape_split.setDefaultAction(action)
+            else:
+                self.tool_split.setDefaultAction(action)
         if view is not None:
+            view.set_shape_kind(self._shape_kind)
             view.set_tool_mode(mode)
         self._sync_pen_options()
+
+    def _choose_shape(self, kind: str) -> None:
+        """Pick the shape the button draws and switch to that tool."""
+        if kind not in self._shape_actions:
+            return
+        self._shape_kind = kind
+        action = self._shape_actions[kind]
+        action.setChecked(True)
+        self.shape_split.setDefaultAction(action)
+        self._set_tool_mode("shape")
 
     def _set_view_mode(self, mode: str) -> None:
         """Apply a page view mode to the active document."""
@@ -2602,17 +2657,29 @@ class MainWindow(QMainWindow):
         self.act_sel_area.setEnabled(selection_ok)
         self.act_sel_table.setEnabled(selection_ok)
         self.act_draw.setEnabled(selection_ok)
+        for action in self._shape_actions.values():
+            action.setEnabled(selection_ok)
         split = getattr(self, "tool_split", None)
         if split is None:
             return
         split.setEnabled(has_doc)
-        if reflow and self._tool_mode in ("area", "table", "draw"):
+        shape_split = getattr(self, "shape_split", None)
+        if shape_split is not None:
+            shape_split.setEnabled(has_doc)
+        if reflow and self._tool_mode in ("area", "table", "draw", "shape"):
             self._set_tool_mode("text")
             self.statusBar().showMessage(
-                "Area, Table and Freehand tools are unavailable in Reflow", 5000)
+                "Area, Table, Freehand and Shape tools are unavailable in "
+                "Reflow", 5000)
             return
         if view is not None:
             view.set_tool_mode(self._tool_mode)
+            if self._tool_mode == "shape":
+                # The kind is viewer state, like the pen's colour, so the tab
+                # the user switched to keeps the shape it was drawing.
+                self._shape_kind = view.shape_kind
+                self.shape_split.setDefaultAction(
+                    self._shape_actions[self._shape_kind])
         self._tool_action(self._tool_mode).setChecked(True)
         self._sync_pen_options()
 
@@ -2665,29 +2732,43 @@ class MainWindow(QMainWindow):
         self.pen_width_combo.setCurrentIndex(
             max(0, self.pen_width_combo.findData(INK_WIDTH)))
         self.pen_width_combo.setFixedWidth(68)
-        self.pen_width_combo.setToolTip("Pen thickness")
+        self.pen_width_combo.setToolTip("Line thickness")
         self.pen_width_combo.currentIndexChanged.connect(
             self._on_ink_width_changed)
         layout.addWidget(self.pen_width_combo)
 
         self.pen_options.hide()
-        self.pen_action = tb.addWidget(self.pen_options)
+        self.pen_action: Optional[QAction] = None
 
     def _sync_pen_options(self) -> None:
-        """Show the pen's controls only with the pen, mirroring its view."""
-        pen_action = getattr(self, "pen_action", None)
-        if pen_action is None:
+        """Show the drawing controls with the tools that draw, mirroring the view.
+
+        The widget is put into the toolbar and taken out again rather than
+        merely hidden: a toolbar re-shows the widgets it owns when it lays
+        out, and hiding a widget that lives inside one is not reliable enough
+        to depend on.  Removing the action takes the widget out of the layout,
+        and inserting it puts it back where it belongs.
+        """
+        toolbar = getattr(self, "toolbar", None)
+        if toolbar is None:
             return
         view = self.view
-        # A toolbar re-shows its widgets when it lays out, so the hide is
-        # on the action that owns the widget, not on the widget.
-        pen_action.setVisible(view is not None and self._tool_mode == "draw")
+        visible = view is not None and self._tool_mode in ("draw", "shape")
+        present = (self.pen_action is not None
+                   and self.pen_action in toolbar.actions())
+        if visible and not present:
+            self.pen_action = toolbar.addWidget(self.pen_options)
+            self.pen_options.show()
+        elif not visible and present:
+            toolbar.removeAction(self.pen_action)
+            self.pen_options.hide()
         if view is None:
             return
         color = view.ink_color
-        self.pen_color_button.setIcon(
-            tinted_icon("draw_freehand.svg", color))
-        self.pen_color_button.setToolTip(f"Pen colour: {color}")
+        icon = (f"shape_{view.shape_kind}.svg" if self._tool_mode == "shape"
+                else "draw_freehand.svg")
+        self.pen_color_button.setIcon(tinted_icon(icon, color))
+        self.pen_color_button.setToolTip(f"Drawing colour: {color}")
         for action in self._pen_color_actions:
             action.setChecked(action.data() == color)
         self.pen_width_combo.blockSignals(True)
@@ -2732,6 +2813,8 @@ class MainWindow(QMainWindow):
         self.act_sel_area.setIcon(tinted_icon("select_area.svg", ink))
         self.act_sel_table.setIcon(tinted_icon("select_table.svg", ink))
         self.act_draw.setIcon(tinted_icon("draw_freehand.svg", ink))
+        for kind, action in self._shape_actions.items():
+            action.setIcon(tinted_icon(f"shape_{kind}.svg", ink))
         for mode in ("single", "facing", "facing_centered", "overview",
                      "continuous"):
             self._view_actions[mode].setIcon(
