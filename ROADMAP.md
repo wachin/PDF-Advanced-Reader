@@ -907,8 +907,8 @@ Phase status: **[~] Under way.** F10-0 (document session), F10-1 (edit
 framework) and F10-2 (save, save as, revert) are implemented; **F10-3** is under
 way, with annotations as edits (F10-3a), the save-cost fix (F10-3b), revision
 files for undo (F10-3c), standalone `/Text` notes (F10-3d), the interface that
-places them (F10-3e) and a comments panel that jumps to what it lists (F10-3f)
-done.
+places them (F10-3e), a comments panel that jumps to what it lists (F10-3f) and a
+highlight that stays on its words however the page is turned (F10-3g) done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1183,14 +1183,14 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       for the edit itself — so placing a note there takes ~170–230 ms when 60 ms
       of that is the document changing. The list should be rebuilt per page, or
       only for the pages an edit touched.
-- [ ] A highlight made while the view is rotated lands on the wrong part of the
-      page (**found in F10-3e, still open**): `create_highlight_from_selection()`
-      hands `add_highlights()` rectangles in *view* space — `_word_rect_view()`
-      maps them through `map_rect()` — while the annotation edits write PDF space.
-      The two agree only at rotation 0, which is every screenshot and test so far,
-      so this is a wrong-rectangle bug rather than a crash. It is the reason the
-      note tool converts its click back to PDF space explicitly instead of
-      reusing the selection's rectangles.
+- [x] A highlight made while the view is rotated no longer lands on the wrong
+      part of the page (**found in F10-3e, fixed in F10-3g**):
+      `create_highlight_from_selection()` had been handing `add_highlights()`
+      rectangles in *view* space — `_word_rect_view()` maps them through
+      `map_rect()` — while the annotation edits write PDF space. The words the
+      selection is made of are already in page space, so the mapping is now gone
+      and the merge runs there too, which also puts the merged quads back on the
+      text lines instead of on screen rows.
 - [x] Comments panel listing annotations and jumping to them
       (**F10-3f.** The panel is the sidebar's Annotations tab: it groups what the
       document holds by page — both kinds, since F10-3d's subtype dispatch — and
@@ -1316,10 +1316,11 @@ so they undo and mark dirty (F10-3a); a save stopped compacting the object table
 (F10-3b); undo is a revision file in a scratch copy, so a highlight costs 55 ms
 instead of 2.1 s and no buffer (F10-3c); a sticky note is a real `/Text`
 annotation in the document (F10-3d), right-clicking a page is how you place one
-(F10-3e), and a comment row in the panel jumps to the comment it names (F10-3f).
-Next, in order: the two found-and-open items under F10-3 — the annotation list
-re-read from every page after each edit, and a highlight placed while the view is
-rotated — then the remaining kinds (freehand, shapes, stamps).
+(F10-3e), a comment row in the panel jumps to the comment it names (F10-3f), and a
+highlight lands on its words whatever the view rotation (F10-3g).
+Next, in order: the one item still open from F10-3 — the annotation list re-read
+from every page after each edit — then the remaining kinds (freehand, shapes,
+stamps).
 
 Goal:
 
@@ -2468,6 +2469,58 @@ its icon, clearing, selecting another annotation moving the ring, an undo drawin
 nothing, an unknown id saying why, activating a sidebar row jumping to its
 annotation, a row without an annotation still going to its page, and a click on
 the page letting go. Three consecutive full runs.
+
+---
+
+### F10-3g A highlight stays on its words when the page is turned — [x] Implemented
+
+**Completed**: 2026-10-27
+
+**What landed**: the rectangles a highlight is made of now come from the page
+rather than from the screen. `create_highlight_from_selection()` had been mapping
+every selected word through `_word_rect_view()` — `map_rect()` into view space —
+before handing the list to `add_highlights()`, which writes the rectangles
+straight into `page.add_highlight_annot()`. Both ends of that speak PDF points, so
+the map was a harmless round trip at rotation 0 and a displacement at every other
+angle. The words come out of `get_text("words")` in page space already, so the
+mapping is simply gone: `word[:4]` goes into the per-page list and the merge runs
+there. `_word_rect_view()` stays where it belongs, which is painting.
+
+**Two wrong answers, one line.** The misplaced band is the visible one, but the
+merge broke too: `_merge_selection_rects()` sorts by `y` and joins whatever
+overlaps vertically, and at 90° a text line runs *down* the screen. So each word
+became its own quad — four rectangles on a page with two lines of text — and the
+whole thing landed a quarter of the page away from the text it was drawn over.
+Measuring the same selection of page 1 (words spanning `(10.0, 47.1, 193.9, 93.0)`)
+before the change: rotation 0 gave 2 rectangles with that union, rotation 90 gave 4
+with `(7.0, 10.0, 52.9, 193.9)`. Both are fixed by working in the space the
+document uses, and the fix is why the note tool (F10-3e) had to convert its click
+back to PDF space by hand instead of reusing the selection.
+
+**Files changed**: `src/pdfar/viewer.py` (the collection loop; the merge's
+docstring now names the space it works in).
+
+**Verified by eye** (headless): selecting everything and highlighting at 0°, 90°,
+180° and 270°, then rendering page 1 through MuPDF and counting highlight-yellow
+pixels inside each word's box — 0.79 to 0.81 of the pixels for all four words at
+every rotation, 0.00 in the blank strip between the two lines, and two quads on the
+page every time. The numbers are identical to two decimal places across the four
+rotations, which is the point. The screen grabs show continuous bands riding on the
+rotated text, not beside it.
+
+**Tests**: 571 passed (was 560) — `tests/test_highlight_rotation.py` (11) fixes the
+unrotated answer first (page 1 is two lines, so two rectangles, at the words' own
+coordinates) and then holds 90°, 180° and 270° to it: the stored union equals the
+selected words' union on every page, mapping the result back to the screen puts it
+under the selection the user saw, a rotation-0 highlight and a rotation-90 one are
+the same rectangles, and a three-word selection at 90° highlights those three words
+and nothing else. Written before the fix, 8 of the 11 failed and every one of them
+passed at rotation 0. Three consecutive full runs.
+
+**Performance**: dropping the per-word `map_rect()` takes a 358-word, 60-page
+selection from 3.03 ms to 0.57 ms to collect and merge. The edit itself is
+unchanged — F10-3c's 54–70 ms — and what is left of the cost is the annotation list
+re-read, the one item still open under F10-3.
 
 ---
 

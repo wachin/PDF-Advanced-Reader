@@ -428,11 +428,13 @@ class PDFView(QAbstractScrollArea):
         if color is None:
             color = HIGHLIGHT_COLORS[self._highlight_color_idx][1]
 
-        # Collect selection rects grouped by page
+        # Selection rects grouped by page.  Words are read in page space and a
+        # highlight is stored in page space, so they go straight through: mapping
+        # them onto the screen first would move the answer under view rotation,
+        # and merge the lines along the wrong axis.
         page_rects: Dict[int, List[tuple]] = {}
         for page, _idx, word in self._iter_selected_words():
-            rect = self._word_rect_view(page, word)
-            page_rects.setdefault(page, []).append(rect)
+            page_rects.setdefault(page, []).append(word[:4])
 
         # Merge adjacent rects on the same line for cleaner highlights
         merged_rects: Dict[int, List[tuple]] = {}
@@ -448,10 +450,10 @@ class PDFView(QAbstractScrollArea):
         return bool(made)
 
     def _merge_selection_rects(self, rects: List[tuple], y_tolerance: float = 2.0) -> List[tuple]:
-        """Merge adjacent selection rectangles on the same line.
+        """Merge adjacent selection rectangles on the same text line.
 
         Args:
-            rects: List of (x0, y0, x1, y1) rectangles
+            rects: List of (x0, y0, x1, y1) rectangles, in page space
             y_tolerance: Max vertical distance to consider rects on same line
 
         Returns:
