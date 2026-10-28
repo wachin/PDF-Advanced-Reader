@@ -59,8 +59,8 @@ from .search import SearchHit
 from .session import DocumentSession
 from .tiles import Tile, TileGrid, TILE_SIZE
 from .annotations import (
-    INK_COLOR, INK_WIDTH, SHAPE_LABELS, Annotation, AnnotationManager,
-    HIGHLIGHT_COLORS, NoteAnnotation,
+    INK_COLOR, INK_WIDTH, SHAPE_LABELS, STAMP_LABELS, Annotation,
+    AnnotationManager, HIGHLIGHT_COLORS, NoteAnnotation,
 )
 
 #: How far apart two captured points of a pen stroke have to be, in screen
@@ -308,6 +308,8 @@ class PDFView(QAbstractScrollArea):
         #: ``{"page", "kind", "start", "current", "points"}`` in page space.
         self.shape_kind = "rect"
         self._shape_drag: Optional[dict] = None
+        #: The standard stamp the stamp tool places on the next click.
+        self.stamp_name = "Draft"
 
         # search
         self._hit_rects: Dict[int, List[Tuple[float, float, float, float]]] = {}
@@ -746,13 +748,14 @@ class PDFView(QAbstractScrollArea):
         self.viewport().update()
 
     # ---------------------------------------------------------- mouse tools
-    TOOL_MODES = ("browse", "text", "area", "table", "draw", "shape")
+    TOOL_MODES = ("browse", "text", "area", "table", "draw", "shape", "stamp")
 
     #: Tools that need the page geometry reflow does not have.
-    _PAGE_ONLY_TOOLS = ("area", "table", "draw", "shape")
+    _PAGE_ONLY_TOOLS = ("area", "table", "draw", "shape", "stamp")
 
     def set_tool_mode(self, mode: str) -> None:
-        """Switch the left-button tool: browse, text, area, table, pen or shape."""
+        """Switch the left-button tool: browse, text, area, table, pen, shape
+        or stamp."""
         if mode not in self.TOOL_MODES:
             return
         if self.reflow_mode and mode in self._PAGE_ONLY_TOOLS:
@@ -776,6 +779,12 @@ class PDFView(QAbstractScrollArea):
             return
         self.shape_kind = kind
         self.viewport().update()
+
+    def set_stamp_name(self, name: str) -> None:
+        """Choose the standard stamp the stamp tool places next."""
+        if name not in STAMP_LABELS:
+            return
+        self.stamp_name = name
 
     def set_ink_color(self, color: str) -> None:
         """Choose the colour the pen writes into the annotation's ``/C``.
@@ -2948,6 +2957,16 @@ class PDFView(QAbstractScrollArea):
                     "start": (x, y), "current": (x, y), "points": [(x, y)],
                 }
                 self.viewport().update()
+            event.accept()
+            return
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self.tool_mode == "stamp"):
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            self.clear_selection()
+            hit = self._pdf_point_at(event.position().toPoint())
+            if hit is not None:
+                page, x, y = hit
+                self.annotation_manager.add_stamp(page, self.stamp_name, (x, y))
             event.accept()
             return
         if (event.button() == Qt.MouseButton.LeftButton

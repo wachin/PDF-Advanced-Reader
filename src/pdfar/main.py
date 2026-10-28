@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 )
 
 from . import APP_NAME, __version__
-from .annotations import INK_COLORS, INK_WIDTH, INK_WIDTHS, SHAPE_LABELS
+from .annotations import INK_COLORS, INK_WIDTH, INK_WIDTHS, SHAPE_LABELS, STAMP_LABELS
 from .bookmarks import settings_key_for
 from .i18n import I18n
 from .icons import asset_path as _asset_path, tinted_icon
@@ -297,6 +297,7 @@ class MainWindow(QMainWindow):
         self._tool_mode = "text"
         self._last_selection = "text"
         self._shape_kind = "rect"
+        self._stamp_name = "Draft"
         self._start_maximized = True
         self._was_maximized = False
         self._geometry_timer = QTimer(self)
@@ -517,9 +518,21 @@ class MainWindow(QMainWindow):
         self.act_shape_arrow = self._shape_actions["arrow"]
         self.act_shape_polygon = self._shape_actions["polygon"]
 
+        # Stamps: the fourteen names the PDF specification defines.
+        self._stamp_actions = {}
+        for key, label in STAMP_LABELS.items():
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setToolTip(f"Stamp: {label}")
+            action.triggered.connect(
+                lambda _checked=False, k=key: self._choose_stamp(k))
+            setattr(self, f"act_stamp_{key.lower()}", action)
+            self._stamp_actions[key] = action
+
         for action in (self.act_explore, self.act_sel_text,
                        self.act_sel_area, self.act_sel_table, self.act_draw,
-                       *self._shape_actions.values()):
+                       *self._shape_actions.values(),
+                       *self._stamp_actions.values()):
             self._tool_group.addAction(action)
 
         # Page view modes (Okular-inspired).  Per document; the active view
@@ -829,6 +842,20 @@ class MainWindow(QMainWindow):
         self.shape_split.setMenu(shape_menu)
         self.shape_split.setDefaultAction(self.act_shape_rect)
         tb.addWidget(self.shape_split)
+
+        # Stamps: the button places the stamp picked from its menu.
+        self.stamp_split = QToolButton(tb)
+        self.stamp_split.setPopupMode(
+            QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.stamp_split.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.stamp_split.setAutoRaise(True)
+        stamp_menu = QMenu(self.stamp_split)
+        for action in self._stamp_actions.values():
+            stamp_menu.addAction(action)
+        self.stamp_split.setMenu(stamp_menu)
+        self.stamp_split.setDefaultAction(self._stamp_actions["Draft"])
+        tb.addWidget(self.stamp_split)
 
         # Page view mode menu button (icon reflects the active mode)
         self.view_mode_button = QToolButton(tb)
@@ -2550,6 +2577,8 @@ class MainWindow(QMainWindow):
     def _tool_action(self, mode: str) -> QAction:
         if mode == "shape":
             return self._shape_actions[self._shape_kind]
+        if mode == "stamp":
+            return self._stamp_actions[self._stamp_name]
         return {
             "browse": self.act_explore,
             "text": self.act_sel_text,
@@ -2560,11 +2589,12 @@ class MainWindow(QMainWindow):
 
     def _set_tool_mode(self, mode: str) -> None:
         """Activate a mouse tool and apply it to the current view."""
-        if mode not in ("browse", "text", "area", "table", "draw", "shape"):
+        if mode not in ("browse", "text", "area", "table", "draw", "shape",
+                        "stamp"):
             return
         view = self.view
         if (view is not None and view.reflow_mode
-                and mode in ("area", "table", "draw", "shape")):
+                and mode in ("area", "table", "draw", "shape", "stamp")):
             mode = "text"
         self._tool_mode = mode
         action = self._tool_action(mode)
@@ -2573,10 +2603,13 @@ class MainWindow(QMainWindow):
             self._last_selection = mode
             if mode == "shape":
                 self.shape_split.setDefaultAction(action)
+            elif mode == "stamp":
+                self.stamp_split.setDefaultAction(action)
             else:
                 self.tool_split.setDefaultAction(action)
         if view is not None:
             view.set_shape_kind(self._shape_kind)
+            view.set_stamp_name(self._stamp_name)
             view.set_tool_mode(mode)
         self._sync_pen_options()
 
@@ -2589,6 +2622,16 @@ class MainWindow(QMainWindow):
         action.setChecked(True)
         self.shape_split.setDefaultAction(action)
         self._set_tool_mode("shape")
+
+    def _choose_stamp(self, name: str) -> None:
+        """Pick the stamp the button places and switch to that tool."""
+        if name not in self._stamp_actions:
+            return
+        self._stamp_name = name
+        action = self._stamp_actions[name]
+        action.setChecked(True)
+        self.stamp_split.setDefaultAction(action)
+        self._set_tool_mode("stamp")
 
     def _set_view_mode(self, mode: str) -> None:
         """Apply a page view mode to the active document."""
@@ -2659,6 +2702,8 @@ class MainWindow(QMainWindow):
         self.act_draw.setEnabled(selection_ok)
         for action in self._shape_actions.values():
             action.setEnabled(selection_ok)
+        for action in self._stamp_actions.values():
+            action.setEnabled(selection_ok)
         split = getattr(self, "tool_split", None)
         if split is None:
             return
@@ -2666,11 +2711,15 @@ class MainWindow(QMainWindow):
         shape_split = getattr(self, "shape_split", None)
         if shape_split is not None:
             shape_split.setEnabled(has_doc)
-        if reflow and self._tool_mode in ("area", "table", "draw", "shape"):
+        stamp_split = getattr(self, "stamp_split", None)
+        if stamp_split is not None:
+            stamp_split.setEnabled(has_doc)
+        if reflow and self._tool_mode in ("area", "table", "draw", "shape",
+                                          "stamp"):
             self._set_tool_mode("text")
             self.statusBar().showMessage(
-                "Area, Table, Freehand and Shape tools are unavailable in "
-                "Reflow", 5000)
+                "Area, Table, Freehand, Shape and Stamp tools are unavailable "
+                "in Reflow", 5000)
             return
         if view is not None:
             view.set_tool_mode(self._tool_mode)
@@ -2680,6 +2729,10 @@ class MainWindow(QMainWindow):
                 self._shape_kind = view.shape_kind
                 self.shape_split.setDefaultAction(
                     self._shape_actions[self._shape_kind])
+            elif self._tool_mode == "stamp":
+                self._stamp_name = view.stamp_name
+                self.stamp_split.setDefaultAction(
+                    self._stamp_actions[self._stamp_name])
         self._tool_action(self._tool_mode).setChecked(True)
         self._sync_pen_options()
 
@@ -2815,6 +2868,9 @@ class MainWindow(QMainWindow):
         self.act_draw.setIcon(tinted_icon("draw_freehand.svg", ink))
         for kind, action in self._shape_actions.items():
             action.setIcon(tinted_icon(f"shape_{kind}.svg", ink))
+        stamp_icon = tinted_icon("stamp.svg", ink)
+        for action in self._stamp_actions.values():
+            action.setIcon(stamp_icon)
         for mode in ("single", "facing", "facing_centered", "overview",
                      "continuous"):
             self._view_actions[mode].setIcon(

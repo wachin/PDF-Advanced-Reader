@@ -133,12 +133,13 @@ def test_a_note_is_listed_as_a_note_and_not_as_a_highlight(manager):
 
 
 def test_other_annotation_kinds_are_left_out_of_the_list(manager):
-    """Only what PDFAR can edit is claimed; a shape is not a note, and a stamp
-    is not listed at all.
+    """Only what PDFAR can edit is claimed; a shape is not a note, and a free
+    text box is not listed at all.
 
-    Since F10-3l a square *is* editable, so it appears as a shape.  A stamp is
-    still only read, and listing it would offer the user an action on it that
-    rewrites a document they did not ask to change.
+    Since F10-3l a square *is* editable and since F10-3n so is a stamp, so both
+    appear.  A free-text annotation is still only read, and listing it would
+    offer the user an action on it that rewrites a document they did not ask to
+    change.
     """
     page = manager.doc.load_page(0)
     square = page.add_rect_annot(fitz.Rect(10, 70, 40, 95))
@@ -146,10 +147,13 @@ def test_other_annotation_kinds_are_left_out_of_the_list(manager):
     square.update()
     stamp = page.add_stamp_annot(fitz.Rect(10, 20, 40, 50))
     stamp.update()
+    text = page.add_freetext_annot(fitz.Rect(60, 10, 150, 40), "from elsewhere")
+    text.update()
 
     listed = AnnotationManager(manager.session)      # read from the top
 
-    assert [ann.type for ann in listed.get_annotations()] == [AnnotationType.SHAPE]
+    assert {ann.type for ann in listed.get_annotations()} == {
+        AnnotationType.SHAPE, AnnotationType.STAMP}
     assert listed.get_notes_for_page(0) == []
 
 

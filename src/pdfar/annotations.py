@@ -71,6 +71,35 @@ SHAPE_LABELS = {
     "polygon": "Polygon",
 }
 
+#: The fourteen rubber stamps the PDF specification defines, in its order:
+#: the ``/Name`` the file keeps, the label the menu shows, MuPDF's constant.
+#: The appearance is drawn from the name, so the name is the whole mark.
+STAMP_NAMES = (
+    ("Approved", "Approved", fitz.STAMP_Approved),
+    ("Experimental", "Experimental", fitz.STAMP_Experimental),
+    ("NotApproved", "Not Approved", fitz.STAMP_NotApproved),
+    ("AsIs", "As Is", fitz.STAMP_AsIs),
+    ("Expired", "Expired", fitz.STAMP_Expired),
+    ("NotForPublicRelease", "Not For Public Release",
+     fitz.STAMP_NotForPublicRelease),
+    ("Confidential", "Confidential", fitz.STAMP_Confidential),
+    ("Final", "Final", fitz.STAMP_Final),
+    ("Sold", "Sold", fitz.STAMP_Sold),
+    ("Departmental", "Departmental", fitz.STAMP_Departmental),
+    ("ForComment", "For Comment", fitz.STAMP_ForComment),
+    ("TopSecret", "Top Secret", fitz.STAMP_TopSecret),
+    ("Draft", "Draft", fitz.STAMP_Draft),
+    ("ForPublicRelease", "For Public Release", fitz.STAMP_ForPublicRelease),
+)
+STAMP_LABELS = {key: label for key, label, _value in STAMP_NAMES}
+STAMP_VALUES = {key: value for key, _label, value in STAMP_NAMES}
+
+#: A stamp's natural width and the width:height ratio of MuPDF's appearance.
+#: ``add_stamp_annot`` fits its box to that ratio whatever rectangle it is
+#: given, so :func:`stamp_box` asks for the same shape and gets what it clicked.
+STAMP_WIDTH = 190.0
+STAMP_ASPECT = 3.8
+
 #: What a damaged annotation can raise while the list is being read.  MuPDF
 #: signals its failures through these; asking for less than ``Exception`` means a
 #: mistake in :func:`_highlight_model` still surfaces instead of quietly
@@ -197,6 +226,40 @@ class ShapeAnnotation(Annotation):
     kind: str = "rect"
     points: List[tuple] = field(default_factory=list)
     width: float = INK_WIDTH
+
+
+@dataclass
+class StampAnnotation(Annotation):
+    """A rubber stamp: a PDF ``/Stamp`` annotation.
+
+    ``name`` is the standard ``/Name`` the file keeps (``"Draft"``,
+    ``"Approved"``…), which is also what MuPDF draws the appearance from; the
+    box lives in ``rects[0]``.  ``content`` is a note the user attached, not the
+    stamp's name: MuPDF fills ``/Contents`` with the name it already knows, and
+    that caption is not something the user wrote.
+    """
+    type: AnnotationType = AnnotationType.STAMP
+    name: str = "Draft"
+
+
+def stamp_box(width: float, height: float,
+              center: Sequence[float]) -> Tuple[float, float, float, float]:
+    """The box a stamp takes around *center*, inside a *width* x *height* page.
+
+    The stamp keeps MuPDF's 3.8:1 appearance, is at most 190 pt wide, and never
+    covers more than 60 % of either side of a small page.  A click near an edge
+    moves the whole box inwards rather than clipping it: half a stamp hanging
+    off the paper is an annotation no reader can select.
+    """
+    box_width = min(STAMP_WIDTH, width * 0.6)
+    box_height = box_width / STAMP_ASPECT
+    if box_height > height * 0.6:
+        box_height = height * 0.6
+        box_width = box_height * STAMP_ASPECT
+    cx, cy = float(center[0]), float(center[1])
+    x0 = min(max(cx - box_width / 2.0, 0.0), width - box_width)
+    y0 = min(max(cy - box_height / 2.0, 0.0), height - box_height)
+    return (x0, y0, x0 + box_width, y0 + box_height)
 
 
 # -------------------------------------------------------------------------- color
@@ -377,6 +440,37 @@ def _shape_model(annot: fitz.Annot, page_idx: int,
         kind=kind,
         points=points,
         width=INK_WIDTH if width is None else float(width),
+    )
+
+
+def _stamp_model(annot: fitz.Annot, page_idx: int) -> StampAnnotation:
+    """Read one document stamp into the model.
+
+    The name is ``/Name``, the standard key MuPDF drew the appearance from; it
+    is not the same as ``/Contents``, which MuPDF fills with that same name by
+    default.  Treating that caption as a note would put a note on every stamp
+    the user never wrote, so it is only a note when it differs from the name.
+    """
+    info = annot.info
+    rect = annot.rect
+    opacity = annot.opacity
+    name = info.get("name") or ""
+    content = info.get("content") or ""
+    if content and content == name:
+        content = ""
+    return StampAnnotation(
+        id=annot_key(annot),
+        page=page_idx,
+        rects=[(rect.x0, rect.y0, rect.x1, rect.y1)],
+        color=_rgb_to_hex(annot.colors.get("stroke") or (1.0, 0.0, 0.0)),
+        # A stamp with no /CA paints as its appearance stream says, and -1 is
+        # how MuPDF reports "unset".
+        opacity=1.0 if opacity is None or opacity < 0 else opacity,
+        author=info.get("title") or "",
+        created=info.get("creationDate") or "",
+        modified=info.get("modDate") or "",
+        content=content,
+        name=name,
     )
 
 
@@ -627,6 +721,45 @@ class AddShape(SinglePageEdit):
 
 
 @dataclass(frozen=True)
+class AddStamp(SinglePageEdit):
+    """Put a standard rubber stamp on a page — a PDF ``/Stamp`` annotation.
+
+    ``center`` is where the user clicked; the box around it comes from
+    :func:`stamp_box`, so the tool places exactly what the model stores.  The
+    appearance needs no work of ours: MuPDF draws it from ``/Name``, which is
+    also what makes the mark readable in any other viewer.
+    """
+
+    ann_id: str
+    page: int
+    name: str = "Draft"
+    center: Tuple[float, float] = (0.0, 0.0)
+    author: str = ""
+    note: str = ""
+
+    scope = Scope.COMMENTS
+
+    @property
+    def label(self) -> str:
+        return "Stamp"
+
+    def apply(self, doc: fitz.Document) -> None:
+        if self.name not in STAMP_VALUES:
+            raise EditError(f"“{self.name}” is not a stamp")
+        page = doc.load_page(self.page)
+        annot = page.add_stamp_annot(
+            fitz.Rect(*stamp_box(page.rect.width, page.rect.height,
+                                 self.center)),
+            stamp=STAMP_VALUES[self.name])
+        if self.author:
+            annot.set_info(title=self.author)
+        if self.note:
+            annot.set_info(content=self.note)
+        annot.update()
+        _name(doc, annot, self.ann_id)
+
+
+@dataclass(frozen=True)
 class RemoveAnnotation(SinglePageEdit):
     """Delete the annotation *ann_id* names."""
 
@@ -806,10 +939,12 @@ class AnnotationManager(QObject):
                     model = _shape_model(annot, page_idx, "line")
                 elif kind == fitz.PDF_ANNOT_POLYGON:
                     model = _shape_model(annot, page_idx, "polygon")
+                elif kind == fitz.PDF_ANNOT_STAMP:
+                    model = _stamp_model(annot, page_idx)
                 else:
-                    # A stamp or free-text annotation PDFAR cannot edit yet:
-                    # listing it would offer an action on something the user
-                    # brought in from another program.
+                    # A free-text annotation PDFAR cannot edit yet: listing it
+                    # would offer an action on something the user brought in
+                    # from another program.
                     continue
                 found[model.id] = model
         except ANNOT_READ_ERRORS:
@@ -929,6 +1064,24 @@ class AnnotationManager(QObject):
             return None
         made = self.get_annotation(ann_id)
         return made if isinstance(made, ShapeAnnotation) else None
+
+    def add_stamp(self, page: int, name: str = "Draft",
+                  center: Sequence[float] = (0.0, 0.0),
+                  author: str = "",
+                  note: str = "") -> Optional[StampAnnotation]:
+        """Place one standard rubber stamp on *page*, centred on *center*.
+
+        One stamp is one edit, so one Ctrl+Z takes the mark off.  ``None`` if
+        the name is not one of the fourteen the file format defines.
+        """
+        ann_id = str(uuid.uuid4())
+        if not self._run(AddStamp(
+                ann_id=ann_id, page=int(page), name=name,
+                center=(float(center[0]), float(center[1])),
+                author=author, note=note)):
+            return None
+        made = self.get_annotation(ann_id)
+        return made if isinstance(made, StampAnnotation) else None
 
     def remove_annotation(self, annotation_id: str) -> bool:
         """Remove an annotation by ID."""

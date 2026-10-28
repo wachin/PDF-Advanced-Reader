@@ -690,9 +690,9 @@ def test_settings_dialog_controls_maximized_startup(qapp):
 
 # ------------------------------------------------------ selection tools
 def test_toolbar_groups_mode_buttons_right_of_reflow(qapp):
-    """Reflow, Explore, the selection split, the shape split and the page-view
-    menu form one contiguous group, placed after the navigation and zoom
-    controls."""
+    """Reflow, Explore, the selection split, the shape split, the stamp split
+    and the page-view menu form one contiguous group, placed after the
+    navigation and zoom controls."""
     win = MainWindow()
     win.show()
     qapp.processEvents()
@@ -709,7 +709,8 @@ def test_toolbar_groups_mode_buttons_right_of_reflow(qapp):
         assert at(win.act_explore) == at(win.act_reflow) + 1
         assert at(win.tool_split) == at(win.act_explore) + 1
         assert at(win.shape_split) == at(win.tool_split) + 1
-        assert at(win.view_mode_button) == at(win.shape_split) + 1
+        assert at(win.stamp_split) == at(win.shape_split) + 1
+        assert at(win.view_mode_button) == at(win.stamp_split) + 1
         assert at(win.act_reflow) > at(win.act_zin)
     finally:
         win.close()

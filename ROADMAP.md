@@ -898,8 +898,9 @@ files for undo (F10-3c), standalone `/Text` notes (F10-3d), the interface that
 places them (F10-3e), a comments panel that jumps to what it lists (F10-3f), a
 highlight that stays on its words however the page is turned (F10-3g), a list
 that re-reads the pages an edit touched (F10-3h), freehand ink in the
-document (F10-3i), the pen tool and its style pickers (F10-3j/3k) and the
-shape tool (F10-3l/3m) done.
+document (F10-3i), the pen tool and its style pickers (F10-3j/3k), the
+shape tool (F10-3l/3m) and the standard rubber stamps with their tool
+(F10-3n) done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1251,8 +1252,20 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       the shape stops at the paper. The preview paints in view space in the
       chosen colour and thickness, arrowhead included, and F10-3k's pickers
       appear for this tool too.)
-- [ ] Stamps, including the standard pre-defined rubber-stamp images
-      (**F10-3n, next**)
+- [x] Stamps: the standard pre-defined rubber-stamp images (**F10-3n.** The
+      fourteen `/Name`s every PDF reader knows — Approved, Draft, Confidential,
+      Top Secret, Sold and the rest — are real `/Stamp` annotations whose
+      appearance MuPDF draws from the name alone, so the mark looks the same in
+      another reader without PDFAR shipping an image. `AddStamp` places one
+      centred on a page-space point, fits it to the built-in 3.8:1 box within
+      60 % of the page and slides it back inside at the margins. The manager
+      reads `/Stamp` back into `StampAnnotation`, blanking MuPDF's own
+      `/Contents` caption, so a stamp lists, takes a note, deletes, undoes and
+      survives save/reopen through the code the other kinds left generic. The
+      Stamp tool is a click, not a drag, and its split button offers all
+      fourteen and keeps the chosen stamp per tab.)
+- [ ] Custom stamps: a text caption or an image file as the stamp's appearance
+      (**F10-3o, next**)
 - [ ] Measurement annotations (`/Projection`), with the scale they are drawn in
 - [ ] Appearance streams, so other readers show the same thing without
       regenerating them
@@ -1375,8 +1388,9 @@ freehand drawing is a real `/Ink` annotation in the document (F10-3i), the pen
 tool draws one where the pointer is, under any rotation (F10-3j), and the pen's
 colour and thickness come from pickers beside the tool (F10-3k); shapes are real
 `/Square`, `/Circle`, `/Line` and `/Polygon` annotations (F10-3l), and the shape
-tool drags all five kinds with a live preview (F10-3m).
-Next, in order: stamps (F10-3n), measurement, appearance streams
+tool drags all five kinds with a live preview (F10-3m); the 14 standard rubber
+stamps are real `/Stamp` annotations with a click-to-place tool (F10-3n).
+Next, in order: custom stamps (F10-3o), measurement, appearance streams
 so other readers show what PDFAR wrote, and XFDF import/export.
 
 Goal:
@@ -2985,6 +2999,91 @@ kind already pays.
 choice (shapes are hollow), and editing a committed shape's geometry — the
 comment list can select, note and delete one, but changing its corners is not a
 tool yet. Stamps (F10-3n) are next.
+
+### F10-3n The standard rubber stamps and the Stamp tool — [x] Implemented
+
+**Completed**: 2026-10-27
+
+**What landed**: PDF has fourteen standard stamp names — `/Approved`,
+`/Draft`, `/Confidential`, `/TopSecret`, `/Sold` and nine more — and every
+viewer draws the same red rubber-stamp appearance for each from the `/Name`
+alone. `AddStamp` writes one as a `/Stamp` annotation, so PDFAR ships no image
+of its own and another reader shows the same mark: `page.add_stamp_annot()`
+generates the appearance stream in the file. The manager reads `/Stamp` back
+into the new `StampAnnotation` (`type`, `name`, plus the generic page, rect,
+colour, opacity, note fields), so stamps go through the list, note, delete,
+undo and save paths F10-3a–3h built for every kind.
+
+**Where the stamp goes.** The standard appearance is 3.8:1, and
+`add_stamp_annot` stretches whatever rect it is given into that shape, so the
+box has to be right before the call: `stamp_box` takes the page size and a
+centre, uses 190 pt wide unless the page is narrow (60 % of the width, or of
+the height if that is the tighter limit), then slides the box back inside the
+paper. A click at a corner therefore leaves a whole stamp, not half of one.
+
+**One MuPDF quirk.** `add_stamp_annot` writes `/Contents` equal to the raw
+name — "Draft", not "Draft" as a note the user typed. The reader blanks that
+caption when it matches the name, so a fresh stamp has no note; a note the user
+adds later is a different string and survives. `AddStamp.apply` also renames
+the annotation to the `NM` id F10-3d introduced, so undo/redo and the comment
+list recognise it like any other kind.
+
+**The tool.** "Stamp" joins the tool modes and the tool button's page-only
+group: it needs a page, not a drag. A press places the chosen stamp centred on
+the page point under the pointer and is one edit and one Ctrl+Z; a click in the
+gutter or on a neighbouring page does nothing. The split button offers all
+fourteen names (label order as PDF lists them, menu checked on the current
+one) and keeps the choice per tab, like F10-3m's shape kind. The click goes
+through F10-3g's page-space mapping, so it lands where the pointer is at 90°,
+180° and 270°; Reflow disables the tool with the others and falls back to
+Text.
+
+**Files changed**: `src/pdfar/annotations.py` (`STAMP_NAMES`,
+`STAMP_LABELS`, `STAMP_VALUES`, `STAMP_WIDTH`, `STAMP_ASPECT`,
+`StampAnnotation`, `stamp_box`, `_stamp_model`, `AddStamp`,
+`AnnotationManager.add_stamp`), `src/pdfar/viewer.py` (`stamp_name`,
+`set_stamp_name`, the `"stamp"` tool branch, tool lists),
+`src/pdfar/main.py` (fourteen stamp actions, the `stamp_split` button,
+`_choose_stamp`, per-tab name sync, reflow fallback, `stamp.svg`), a new
+`assets/icons/stamp.svg`, `tests/test_stamps.py`, and the annotation-kind
+expectations in `tests/test_text_notes.py` / the toolbar order in
+`tests/test_main.py`.
+
+**Verified by eye** (headless): a 300×200 page at 150 % took four clicks —
+Approved, Draft, Confidential, Top Secret — each read back with the matching
+`/Name` and a box inside the page; the corner click (2, 198) placed TopSecret
+at `(0, 152.6, 180, 200)` rather than hanging off the paper; a Final stamp on
+page 2 stayed on page 2. The page rendered 25,956 red stamp pixels; a Sold
+stamp clicked at 90° landed centred on `(150, 100)`; after saving and
+reopening, the five stamps came back as Approved, Draft, Confidential, Top
+Secret and Sold with their ids. Screenshots `/tmp/f103n_ui.png`,
+`/tmp/f103n_rotated.png`, `/tmp/f103n_reopened.png`.
+
+**Tests**: 747 passed (was 709) — `tests/test_stamps.py` (38): a stamp is a
+real `/Stamp` with its `/Name`, an `NM` id and the label "Stamp"; all fourteen
+names keep their key; the box is `stamp_box`'s 3.8:1 box; three page edges
+clamp it inside; the appearance paints; an unknown name is refused with the
+version, dirty flag and history unchanged; `AddStamp.apply` raises `EditError`;
+undo/redo restores the same id; save + reopen; the list holds stamps and shapes
+and skips a `/FreeText` note; a stamp takes a note and deletes; a stamp whose
+`NM` PDFAR did not write is listed as `anon:{xref}` and not renamed. On the
+tool side: the click places exactly one stamp of the chosen name, other tools
+place none, an off-page click places none, the centre is right at 0°/90°/180°/
+270°, Reflow disables it, and two tabs keep Approved and TopSecret separately
+with the default action following the tab. Three consecutive full runs.
+
+**Performance on the 540-page book** (page 1): adding one stamp costs the same
+as a shape, 96–99 ms — the copy-and-adopt edit dominates, not the appearance —
+and so does re-applying it on the undo/redo path. The view side is one click:
+591 ms to apply the stamp including the page re-read, and 965 ms for the
+first repaint of the re-rasterised page (later repaints 6–21 ms with no edit).
+A save of the book with the stamps is 3.1 s for 23.6 MB, the same rewrite
+every save pays.
+
+**What is not here**: custom stamps — a text caption or an image file as the
+stamp's appearance — which is F10-3o next; dragging to size a stamp instead of
+clicking its standard size; and replacing the appearance of a stamp placed by
+another program.
 
 ---
 
