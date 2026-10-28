@@ -32,7 +32,8 @@ from PyQt6.QtWidgets import (
 
 from . import APP_NAME, __version__
 from .annotations import (
-    INK_COLORS, INK_WIDTH, INK_WIDTHS, MEASURE_DEFAULT_SCALE, MEASURE_SCALES,
+    INK_COLORS, INK_WIDTH, INK_WIDTHS, MEASURE_DEFAULT_SCALE,
+    MEASURE_KIND_LABELS, MEASURE_KINDS, MEASURE_SCALES,
     SHAPE_LABELS, STAMP_LABELS, MeasurementScale, checked_measure_scale,
 )
 from .bookmarks import settings_key_for
@@ -59,6 +60,12 @@ ZOOM_STEP_PRESETS = (0.025, 0.05, 0.075, 0.10, 0.125,
 DEFAULT_ZOOM_STEP = 0.10
 
 HIGHLIGHT_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+
+MEASURE_KIND_TIPS = {
+    "distance": "Measure the straight distance between two points",
+    "perimeter": "Measure the length along a path of corners",
+    "area": "Measure the area a polygon encloses",
+}
 
 
 def view_state_key(path: str) -> str:
@@ -302,6 +309,7 @@ class MainWindow(QMainWindow):
         self._last_selection = "text"
         self._shape_kind = "rect"
         self._stamp_name = "Draft"
+        self._measure_kind = "distance"
         self._measure_scale = MEASURE_DEFAULT_SCALE
         self._start_maximized = True
         self._was_maximized = False
@@ -550,12 +558,21 @@ class MainWindow(QMainWindow):
             setattr(self, f"act_stamp_custom_{kind}", action)
             self._custom_stamp_actions[kind] = action
 
-        # Measurement: a distance in units the user chooses.
+        # Measurement: a distance, perimeter or area in units the user chooses.
         self.act_measure = QAction("Measure", self)
         self.act_measure.setCheckable(True)
         self.act_measure.setToolTip(self._measure_tip(self._measure_scale))
         self.act_measure.triggered.connect(
             lambda: self._set_tool_mode("measure"))
+        self._measure_kind_actions = {}
+        for kind in MEASURE_KINDS:
+            action = QAction(MEASURE_KIND_LABELS[kind], self)
+            action.setCheckable(True)
+            action.setChecked(kind == self._measure_kind)
+            action.setToolTip(MEASURE_KIND_TIPS[kind])
+            action.triggered.connect(
+                lambda _checked=False, k=kind: self._choose_measure_kind(k))
+            self._measure_kind_actions[kind] = action
         self._measure_scale_actions = {}
         for label, scale in MEASURE_SCALES:
             action = QAction(label, self)
@@ -912,6 +929,9 @@ class MainWindow(QMainWindow):
             Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.measure_split.setAutoRaise(True)
         measure_menu = QMenu(self.measure_split)
+        for action in self._measure_kind_actions.values():
+            measure_menu.addAction(action)
+        measure_menu.addSeparator()
         for action in self._measure_scale_actions.values():
             measure_menu.addAction(action)
         measure_menu.addSeparator()
@@ -2654,9 +2674,13 @@ class MainWindow(QMainWindow):
         }[mode]
 
     def _measure_tip(self, scale: MeasurementScale) -> str:
-        """What the measure tool will read in, and how to drag it."""
-        return (f"Measure: 1 pt = {scale.units_per_point:g} {scale.unit} — "
-                f"drag from one end to the other")
+        """What the measure tool will draw and read in, and how."""
+        label = MEASURE_KIND_LABELS[self._measure_kind]
+        how = ("drag from one end to the other"
+               if self._measure_kind == "distance"
+               else "click each point, then double-click or press Enter")
+        return (f"Measure {label.lower()}: 1 pt = "
+                f"{scale.units_per_point:g} {scale.unit} — {how}")
 
     def _set_tool_mode(self, mode: str) -> None:
         """Activate a mouse tool and apply it to the current view."""
@@ -2689,6 +2713,7 @@ class MainWindow(QMainWindow):
                 else:
                     view.set_stamp_name(self._stamp_name)
             elif mode == "measure":
+                view.set_measure_kind(self._measure_kind)
                 view.set_measure_scale(self._measure_scale)
             view.set_tool_mode(mode)
         self._sync_pen_options()
@@ -2775,6 +2800,15 @@ class MainWindow(QMainWindow):
             return
         self._set_custom_stamp({"kind": "image", "caption": "", "image": path})
 
+    def _choose_measure_kind(self, kind: str) -> None:
+        """Pick what the measure button draws and switch to that tool."""
+        if kind not in self._measure_kind_actions:
+            return
+        self._measure_kind = kind
+        self._measure_kind_actions[kind].setChecked(True)
+        self._sync_measure_scale()
+        self._set_tool_mode("measure")
+
     def _choose_measure_scale(self, scale: MeasurementScale) -> None:
         """Pick the units the measure tool reads in and switch to that tool."""
         self._measure_scale = scale
@@ -2782,8 +2816,10 @@ class MainWindow(QMainWindow):
         self._set_tool_mode("measure")
 
     def _sync_measure_scale(self) -> None:
-        """Show the active scale on the tool and in its menu's check marks."""
+        """Show the active kind and scale on the tool and in its menu."""
         self.act_measure.setToolTip(self._measure_tip(self._measure_scale))
+        for kind, action in self._measure_kind_actions.items():
+            action.setChecked(kind == self._measure_kind)
         for label, scale in MEASURE_SCALES:
             action = self._measure_scale_actions[label]
             action.setChecked(scale == self._measure_scale)
@@ -2891,6 +2927,8 @@ class MainWindow(QMainWindow):
             action.setEnabled(selection_ok)
         for action in self._custom_stamp_actions.values():
             action.setEnabled(selection_ok)
+        for action in self._measure_kind_actions.values():
+            action.setEnabled(selection_ok)
         self.act_measure.setEnabled(selection_ok)
         split = getattr(self, "tool_split", None)
         if split is None:
@@ -2920,6 +2958,7 @@ class MainWindow(QMainWindow):
             if view.stamp_name in self._stamp_actions:
                 self._stamp_name = view.stamp_name
             self._measure_scale = view.measure_scale
+            self._measure_kind = view.measure_kind
             if self._tool_mode == "shape":
                 # The kind is viewer state, like the pen's colour, so the tab
                 # the user switched to keeps the shape it was drawing.

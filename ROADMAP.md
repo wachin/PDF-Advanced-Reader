@@ -900,8 +900,8 @@ highlight that stays on its words however the page is turned (F10-3g), a list
 that re-reads the pages an edit touched (F10-3h), freehand ink in the
 document (F10-3i), the pen tool and its style pickers (F10-3j/3k), the
 shape tool (F10-3l/3m), the standard rubber stamps with their tool
-(F10-3n), custom caption/image stamps (F10-3o) and measurement annotations
-with a chosen scale (F10-3p) done.
+(F10-3n), custom caption/image stamps (F10-3o), measurement annotations
+with a chosen scale (F10-3p), and perimeter/area measurements (F10-3q) done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1292,8 +1292,19 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       that comes from the page geometry and follows the pointer under any
       zoom or view rotation. The scale is viewer state, so two tabs can
       measure in two units, and reflow disables the tool.)
-- [ ] Perimeter and area measurements (`/IT /PolygonDimension`, a polygon's
+- [x] Perimeter and area measurements (`/IT /PolygonDimension`, a polygon's
       `/Measure` and the area number format it needs)
+      (**F10-3q.** A perimeter is a real `/PolyLine` annotation with
+      `/IT /PolyLineDimension`, and an area a real `/Polygon` with
+      `/IT /PolygonDimension`; both carry the same rectilinear `/Measure`
+      dictionary as a distance, plus an `/A` number format for the square
+      unit, so another editor computes the same perimeter and area from the
+      file. The perimeter is the open path between the corners; the area is
+      the shoelace, with a repeated closing corner dropped and a
+      self-intersecting outline refused. Both are drawn from clicks — each
+      corner, an area closing on its first corner or a double-click/Enter —
+      with a live rubber band and one edit per finished outline, and PDFAR
+      writes the path, the corner marks and the reading into `/AP/N` itself.)
 - [ ] Scale calibration: derive the scale from a line of known length instead
       of typing the factor
 - [ ] Appearance streams, so other readers show the same thing without
@@ -1421,9 +1432,11 @@ tool drags all five kinds with a live preview (F10-3m); the 14 standard rubber
 stamps are real `/Stamp` annotations with a click-to-place tool (F10-3n), and a
 custom stamp can be a typed caption or an image file whose appearance PDFAR
 writes itself (F10-3o); a measurement is a real `/LineDimension` with its own
-`/Measure` scale, a live reading and a split button for the units (F10-3p).
-Next, in order: perimeter/area and calibration, appearance streams so other
-readers show what PDFAR wrote, and XFDF import/export.
+`/Measure` scale, a live reading and a split button for the units (F10-3p); a
+perimeter and an area are real `/PolyLineDimension` and `/PolygonDimension`
+annotations with the square-unit format their reading needs (F10-3q).
+Next, in order: scale calibration, appearance streams so other readers show
+what PDFAR wrote, and XFDF import/export.
 
 Goal:
 
@@ -3221,7 +3234,8 @@ restarts — a definition is given each time the tool is armed; a colour or font
 choice for a caption (the caption is red Helvetica-Bold like the standard
 stamps); multi-line captions; and editing the appearance of a stamp already
 placed (its note can be changed, but the mark is what was drawn). Distance
-measurement is F10-3p; perimeter/area and scale calibration are still open.
+measurement is F10-3p, perimeter and area F10-3q; scale calibration is still
+open.
 
 ---
 
@@ -3333,10 +3347,114 @@ the dimension in 260 ms including the page re-read, the re-rasterised page
 paints in 307 ms and a no-edit repaint is 2.9 ms. Saving the book with the
 measurement is 2.05 s for 24 MB.
 
-**What is not here**: perimeter and area (a polygon's `/PolygonDimension`),
-scale calibration from a known length, snapping to geometry or existing
+**What is not here**: perimeter and area measurements (F10-3q), scale
+calibration from a known length, snapping to geometry or existing
 dimensions, and moving or editing the endpoints of a placed measurement —
 undo and redo are the only ways to change it.
+
+---
+
+### F10-3q Measuring perimeters and areas — [x] Implemented
+
+**Completed**: 2026-10-27
+
+**What landed**: a measurement is now one of three kinds, and each is a real
+PDF dimension: a distance stays a `/Line` with `/IT /LineDimension` (F10-3p),
+a perimeter is a `/PolyLine` with `/IT /PolyLineDimension`, and an area is a
+`/Polygon` with `/IT /PolygonDimension`. All three carry the same rectilinear
+`/Measure` dictionary — `/Subtype /RL`, `/R (1 pt = …)`, the unit in `/X` —
+and the multi-point kinds add an `/A` array with a `^2` unit (e.g.
+`mm^2`) and the same precision, so an editor that understands dimensions
+computes the number PDFAR shows. `MeasurementAnnotation` gained `kind` and a
+list of `points`; `measurement_reading()` is the one place that turns a kind
+and its geometry into text.
+
+**The geometry.** A perimeter is the open path between the corners: the run
+from the last corner back to the first is not part of the reading, so a
+100 × 50 pt rectangle is 250 pt, not 300. An area closes implicitly and is the
+shoelace about the first vertex; a corner repeated at the end (a user clicking
+the first corner) is dropped first, so the same outline gives one number
+whether or not it was closed by hand. Before the document is touched,
+`_checked_measurement_points()` refuses a distance that is not two distinct
+points, a perimeter shorter than two, an area with fewer than three, adjacent
+duplicate corners (division by zero in the normal), a zero-area or
+self-intersecting outline (a bow tie would give a meaningless number), any
+non-finite coordinate, more than 2048 points, and an unknown kind. A valid
+area must be positive.
+
+**The appearance.** MuPDF paints polylines and polygons bare, so the whole mark
+is PDFAR's own form XObject in `/AP/N`: the path (with `h` for an area), a
+3 × 3 square at every corner, and a Helvetica reading above the topmost
+geometry (below it near the page top), in `MEASURE_COLOR` and the pen's width.
+As with a distance, `/Rect` is written directly into the PDF in bottom-up
+space after `update()`, and `/IT`, `/Measure`, `/Subj` (the kind's label),
+`/Contents` and `/AP` go on in that order. The reader maps the intent name
+back to the kind; a polyline with no usable `/Measure` is skipped like any
+other unknown measurement, while a polygon without one is still a plain
+`/Polygon` shape and is read as `ShapeAnnotation(kind="polygon")`.
+
+**The tool.** Measure gained a kind: Distance still draws with one drag;
+Perimeter and Area are click-to-place — each click adds a corner, a double-click
+or Enter finishes, and an area also closes when a click lands within 6 screen
+pixels of its first corner. The segment from the last corner follows the
+pointer with no button held, the area preview shows its closing edge dashed,
+and Enter accepts the live pointer position as a final corner. Too few corners
+place nothing; Escape, a tool change, a kind change or a view-mode change
+cancel the draft. The split button lists Distance, Perimeter and Area above
+the units, the scale and kind are viewer state kept per tab, and the tooltips
+spell out the interaction for the chosen kind. Reflow still disables it.
+
+**Files changed**: `src/pdfar/annotations.py` (`MEASURE_KINDS`,
+`MEASURE_KIND_LABELS`, `MEASURE_INTENTS`, `MEASURE_MAX_POINTS`,
+`MeasurementScale.area_unit`/`area_reading`, `open_polygon`,
+`measure_length`, `measure_area`, `measurement_reading`,
+`_checked_measurement_points`, the kind-aware `MeasurementAnnotation`,
+`_measure_dictionary`, `_measurement_appearance`, `_measurement_model`,
+`AddMeasurement.kind`, the `/PolyLineDimension` and `/PolygonDimension`
+branches of `_read_page`), `src/pdfar/viewer.py` (`measure_kind`,
+`set_measure_kind`, `_add_measure_corner`, `_finish_measure`, the multi-point
+drag paths, the kind-aware `_paint_measure`), `src/pdfar/main.py`
+(`MEASURE_KIND_TIPS`, the kind actions and their menu entries,
+`_choose_measure_kind`, the kind-aware tooltips and per-tab sync),
+`tests/test_measurements.py`.
+
+**Verified by eye** (headless): on a 400 × 300 page, a rectangle 100 × 50 pt
+in millimetres read 88.2 mm around and 622.3 mm² inside, drawn with its corner
+squares and label; a 200 pt polygon in points read 200.0 pt / 5,000.0 pt²;
+save and reopen brought the kind, vertices, scale and reading back from
+`/IT` and `/Measure`. The real window, armed on Area, showed the live
+"970.7 mm²" rubber band mid-draft and a dirty tab with the rectangle after
+Enter. Screenshots `/tmp/f103q/page.png`, `/tmp/f103q/ui_preview.png`,
+`/tmp/f103q/ui_placed.png`.
+
+**Tests**: 862 passed. `tests/test_measurements.py` grew from 55 to 85 cases:
+a perimeter is a `/PolyLine` with `/IT /PolyLineDimension`, the `Perimeter`
+subject and an `/A` format; an area is a `/Polygon` with
+`/IT /PolygonDimension` and the `Area` subject; the readings follow the
+distance, each preset scale and the squared unit (mm², cm², pt²); the repeated
+closing corner and the open perimeter are pinned; the mark paints; save and
+reopen keep each kind; a `/Polygon` with no `/Measure` still reads as a
+polygon shape; and seven refusals (too few corners, only repeated ends, a
+bow tie, a collinear outline, a one-point perimeter, adjacent duplicates and
+an unknown kind) leave the version, dirty flag and history untouched. On the
+tool side: a kind arms the tool and its tooltip; clicks plus Enter, a live
+Enter corner, closing on the first corner, a double-click, too few corners,
+Escape, a kind change, the preview, per-tab kind, pen colour/width and a 90°
+view all behave as with a distance.
+
+**Performance on the 540-page book** (page 1): the edit is the same
+copy-and-adopt path — 63.6 ms median for a perimeter and 65.4 ms for an area
+(distance was 59.2 ms), undo and redo 11.2 ms and 9.5 ms including the
+one-page re-read. Through a real `PDFView`, a 60 pt draft preview costs 2.0 ms,
+the release applies with the page re-read in 441.9 ms against 1.4 ms for a
+no-edit repaint, and saving the book with the new mark is 1.99 s for 24.7 MB.
+Peak RSS of the UI run was 319 MB.
+
+**What is not here**: scale calibration from a known length, snapping to
+geometry or existing dimensions, moving or editing the corners of a placed
+measurement, a superscript `mm²` in the label (the unit is written as `mm^2`),
+holes/subpaths in an area, appearance streams written separately from the
+annotation's own `/AP`, and XFDF.
 
 ---
 

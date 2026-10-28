@@ -39,6 +39,10 @@ from pdfar.annotations import (
     MeasurementScale,
     ShapeAnnotation,
     checked_measure_scale,
+    measure_area,
+    measure_length,
+    measurement_reading,
+    open_polygon,
 )
 from pdfar.edits import EditError, Scope
 from pdfar.geometry import map_point
@@ -50,6 +54,7 @@ INCHES = MEASURE_SCALES[2][1]
 POINTS = MEASURE_SCALES[3][1]
 
 HORIZONTAL = ((20.0, 50.0), (120.0, 50.0))
+RECTANGLE = ((20.0, 20.0), (120.0, 20.0), (120.0, 70.0), (20.0, 70.0))
 
 
 def same_scale(actual, expected):
@@ -71,6 +76,14 @@ def sole_line(doc, page_idx=0):
     """The page and its only annotation, kept alive by the caller's locals."""
     page = doc.load_page(page_idx)
     annots = list(page.annots())
+    assert len(annots) == 1
+    return page, annots[0]
+
+
+def sole_annot(doc, subtype, page_idx=0):
+    """The page and its only annotation of *subtype*, kept alive by the caller."""
+    page = doc.load_page(page_idx)
+    annots = [a for a in page.annots() if a.type[0] == subtype]
     assert len(annots) == 1
     return page, annots[0]
 
@@ -290,6 +303,146 @@ def test_a_note_replaces_the_text_but_not_the_drawing(manager):
     bare = paint(page, False)
     painted = paint(page, True)
     assert changed_pixels(bare, painted) > 100
+
+
+# ------------------------------------------------------- perimeter and area
+def test_a_perimeter_is_a_real_poly_line_dimension(manager):
+    made = manager.add_measurement(0, RECTANGLE, kind="perimeter")
+
+    assert isinstance(made, MeasurementAnnotation)
+    assert made.kind == "perimeter"
+    assert made.points == list(RECTANGLE)
+    assert made.reading == "88.2 mm"
+    _page, annot = sole_annot(manager.doc, fitz.PDF_ANNOT_POLY_LINE)
+    assert manager.doc.xref_get_key(annot.xref, "IT") == (
+        "name", "/PolyLineDimension")
+    assert manager.doc.xref_get_key(annot.xref, "Subj") == (
+        "string", "Perimeter")
+    kind, value = manager.doc.xref_get_key(annot.xref, "Measure")
+    assert kind == "dict"
+    assert "/Subtype/RL" in value
+    assert "/A[" in value and "mm^2" in value
+    assert manager.doc.xref_get_key(annot.xref, "AP")[0] == "dict"
+    assert manager.session.history.undo_label == "Measurement"
+
+
+def test_an_area_is_a_real_polygon_dimension(manager):
+    made = manager.add_measurement(0, RECTANGLE, kind="area")
+
+    assert isinstance(made, MeasurementAnnotation)
+    assert made.kind == "area"
+    assert made.reading == "622.3 mm^2"
+    _page, annot = sole_annot(manager.doc, fitz.PDF_ANNOT_POLYGON)
+    assert manager.doc.xref_get_key(annot.xref, "IT") == (
+        "name", "/PolygonDimension")
+    assert manager.doc.xref_get_key(annot.xref, "Subj") == ("string", "Area")
+    kind, value = manager.doc.xref_get_key(annot.xref, "Measure")
+    assert kind == "dict"
+    assert "mm^2" in value
+    assert manager.session.history.undo_label == "Measurement"
+
+
+@pytest.mark.parametrize("kind,scale,reading", [
+    ("perimeter", CM, "8.82 cm"),
+    ("area", CM, "6.22 cm^2"),
+    ("perimeter", POINTS, "250.0 pt"),
+    ("area", POINTS, "5000.0 pt^2"),
+])
+def test_perimeter_and_area_read_in_the_chosen_units(
+        manager, kind, scale, reading):
+    made = manager.add_measurement(0, RECTANGLE, scale=scale, kind=kind)
+
+    assert made.reading == reading
+    same_scale(made.scale, scale)
+
+
+def test_an_area_accepts_a_repeated_closing_corner(manager):
+    made = manager.add_measurement(
+        0, RECTANGLE + (RECTANGLE[0],), kind="area")
+
+    assert made.points == list(RECTANGLE)
+    assert made.reading == "622.3 mm^2"
+
+
+def test_the_area_helpers_drop_the_repeat_and_find_the_space():
+    corners = open_polygon(RECTANGLE + (RECTANGLE[0],))
+    assert corners == list(RECTANGLE)
+    assert measure_area(corners) == pytest.approx(5000.0)
+    assert measure_length(corners + [corners[0]]) == pytest.approx(300.0)
+    assert measurement_reading("area", RECTANGLE, MM) == "622.3 mm^2"
+    assert measurement_reading("perimeter", RECTANGLE, MM) == "88.2 mm"
+
+
+def test_the_area_reading_is_drawn_on_the_page(manager):
+    manager.add_measurement(0, RECTANGLE, kind="area")
+
+    page = manager.doc.load_page(0)
+    bare = paint(page, False)
+    painted = paint(page, True)
+    assert changed_pixels(bare, painted) > 100
+    assert red_pixels(painted) > 100
+
+
+@pytest.mark.parametrize("kind", ["perimeter", "area"])
+def test_perimeter_and_area_survive_save_and_reopen(tmp_path, manager, kind):
+    made = manager.add_measurement(0, RECTANGLE, kind=kind, scale=INCHES)
+    path = str(tmp_path / f"{kind}.pdf")
+    assert save_document(manager.session, path) is not None
+
+    session = make_session(path)
+    try:
+        listed = AnnotationManager(session)
+        back = listed.get_annotation(made.id)
+        assert isinstance(back, MeasurementAnnotation)
+        assert back.kind == kind
+        near_points(back.points, made.points, tol=0.01)
+        same_scale(back.scale, INCHES)
+        assert back.reading == made.reading
+    finally:
+        session.close()
+
+
+def test_a_polygon_without_a_measure_is_still_a_shape(tmp_path, manager):
+    manager.add_measurement(0, RECTANGLE, kind="area")
+    _page, annot = sole_annot(manager.doc, fitz.PDF_ANNOT_POLYGON)
+    manager.doc.xref_set_key(annot.xref, "Measure", "null")
+    path = str(tmp_path / "area.pdf")
+    assert save_document(manager.session, path) is not None
+
+    session = make_session(path)
+    try:
+        listed = AnnotationManager(session)
+        made = listed.get_annotations(page=0)
+        assert len(made) == 1
+        assert isinstance(made[0], ShapeAnnotation)
+        assert made[0].kind == "polygon"
+        near_points(made[0].points, RECTANGLE, tol=0.01)
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("kind,points,message", [
+    ("area", ((20.0, 20.0), (120.0, 20.0)), "at least three"),
+    ("area", ((20.0, 20.0), (120.0, 20.0), (20.0, 20.0)), "at least three"),
+    ("area", ((20.0, 20.0), (120.0, 70.0),
+              (120.0, 20.0), (20.0, 70.0)), "cross itself"),
+    ("area", ((20.0, 20.0), (70.0, 20.0), (120.0, 20.0)),
+     "shape with area"),
+    ("perimeter", ((20.0, 20.0),), "at least two"),
+    ("perimeter", ((20.0, 20.0), (20.0, 20.0)), "different adjacent"),
+    ("volume", ((20.0, 20.0), (120.0, 20.0), (120.0, 70.0)),
+     "not a measurement"),
+])
+def test_geometry_that_does_not_fit_the_kind_is_refused(
+        manager, kind, points, message):
+    failures = []
+    manager.annotation_edit_failed.connect(failures.append)
+
+    assert manager.add_measurement(0, points, kind=kind) is None
+    assert manager.session.version == 0
+    assert manager.session.dirty is False
+    assert len(manager.session.history) == 0
+    assert failures and message in failures[0]
 
 
 # --------------------------------------------------------- refused measurements
@@ -542,15 +695,207 @@ def test_choosing_a_scale_arms_the_measure_tool(qapp, win, view):
     assert "1 pt = 1 pt" in win.measure_split.toolTip()
 
 
-def test_the_menu_offers_each_scale_and_a_custom_one(win, view):
+def test_the_menu_offers_each_kind_scale_and_a_custom_one(win, view):
     actions = win.measure_split.menu().actions()
     entries = [action.text() for action in actions]
 
-    assert entries == ["Millimetres", "Centimetres", "Inches", "Points",
+    assert entries == ["Distance", "Perimeter", "Area", "",
+                       "Millimetres", "Centimetres", "Inches", "Points",
                        "", "Custom Scale…"]
-    assert actions[4].isSeparator()
+    assert actions[3].isSeparator()
+    assert actions[8].isSeparator()
     assert actions[0].isChecked()
-    assert actions[0].data() == MM
+    assert actions[4].isChecked() and actions[4].data() == MM
+
+
+def double_click(view, spot):
+    """The first click of a double click, then its event, as Qt delivers them."""
+    click(view, spot)
+    mouse(view, QEvent.Type.MouseButtonDblClick, spot, False)
+    QApplication.processEvents()
+
+
+def test_choosing_area_arms_the_measure_tool(qapp, win, view):
+    win._measure_kind_actions["area"].trigger()
+    qapp.processEvents()
+
+    assert win._measure_kind == "area"
+    assert view.measure_kind == "area"
+    assert view.tool_mode == "measure"
+    assert win.act_measure.isChecked()
+    assert win._measure_kind_actions["area"].isChecked()
+    assert not win._measure_kind_actions["distance"].isChecked()
+    assert "Measure area" in win.act_measure.toolTip()
+    assert "double-click" in win.measure_split.toolTip()
+
+
+def test_clicking_corners_and_enter_places_an_area(qapp, win, view):
+    win._measure_kind_actions["area"].trigger()
+    win._measure_scale_actions["Millimetres"].trigger()
+    qapp.processEvents()
+
+    for corner in RECTANGLE:
+        click(view, widget_pos_for(view, 0, *corner))
+    assert len(view._measure_drag["points"]) == 4
+
+    QTest.keyClick(view.viewport(), Qt.Key.Key_Return)
+    qapp.processEvents()
+
+    made = made_measurements(view)
+    assert len(made) == 1
+    assert made[0].kind == "area"
+    near_points(made[0].points, RECTANGLE)
+    assert made[0].reading == made[0].scale.area_reading(
+        measure_area(made[0].points))
+    assert made[0].reading.endswith(" mm^2")
+    assert view._measure_drag is None
+    assert len(view.annotation_manager.session.history) == 1
+
+
+def test_enter_accepts_the_corner_under_the_pointer(qapp, win, view):
+    win._measure_kind_actions["area"].trigger()
+    qapp.processEvents()
+    for corner in RECTANGLE[:3]:
+        click(view, widget_pos_for(view, 0, *corner))
+
+    move(view, widget_pos_for(view, 0, *RECTANGLE[3]))
+    QTest.keyClick(view.viewport(), Qt.Key.Key_Return)
+    qapp.processEvents()
+
+    made = made_measurements(view)
+    assert len(made) == 1
+    near_points(made[0].points, RECTANGLE)
+
+
+def test_clicking_the_first_corner_closes_an_area(qapp, win, view):
+    win._measure_kind_actions["area"].trigger()
+    qapp.processEvents()
+    for corner in RECTANGLE:
+        click(view, widget_pos_for(view, 0, *corner))
+
+    click(view, widget_pos_for(view, 0, *RECTANGLE[0]))
+
+    made = made_measurements(view)
+    assert len(made) == 1 and made[0].kind == "area"
+    near_points(made[0].points, RECTANGLE)
+    assert view._measure_drag is None
+
+
+def test_a_double_click_finishes_a_perimeter(qapp, win, view):
+    win._measure_kind_actions["perimeter"].trigger()
+    qapp.processEvents()
+    for corner in RECTANGLE[:3]:
+        click(view, widget_pos_for(view, 0, *corner))
+
+    double_click(view, widget_pos_for(view, 0, *RECTANGLE[3]))
+
+    made = made_measurements(view)
+    assert len(made) == 1 and made[0].kind == "perimeter"
+    near_points(made[0].points, RECTANGLE)
+    assert made[0].reading == made[0].scale.reading(
+        measure_length(made[0].points))
+    assert made[0].reading.endswith(" mm")
+
+
+def test_enter_with_too_few_corners_places_nothing(qapp, win, view):
+    win._measure_kind_actions["area"].trigger()
+    qapp.processEvents()
+    click(view, widget_pos_for(view, 0, 50.0, 20.0))
+
+    QTest.keyClick(view.viewport(), Qt.Key.Key_Return)
+
+    assert view._measure_drag is None
+    assert made_measurements(view) == []
+    assert len(view.annotation_manager.session.history) == 0
+
+
+def test_escape_cancels_an_area_path(qapp, win, view):
+    win._measure_kind_actions["area"].trigger()
+    qapp.processEvents()
+    for corner in RECTANGLE[:3]:
+        click(view, widget_pos_for(view, 0, *corner))
+    assert view._measure_drag is not None
+
+    QTest.keyClick(view.viewport(), Qt.Key.Key_Escape)
+
+    assert view._measure_drag is None
+    assert made_measurements(view) == []
+
+
+def test_changing_the_kind_cancels_the_path(qapp, win, view):
+    win._measure_kind_actions["perimeter"].trigger()
+    qapp.processEvents()
+    click(view, widget_pos_for(view, 0, 50.0, 20.0))
+    assert view._measure_drag is not None
+
+    win._measure_kind_actions["area"].trigger()
+    qapp.processEvents()
+
+    assert view._measure_drag is None
+    assert made_measurements(view) == []
+
+
+def test_the_area_preview_follows_the_pointer_between_clicks(qapp, win, view):
+    win._measure_kind_actions["area"].trigger()
+    qapp.processEvents()
+    click(view, widget_pos_for(view, 0, 50.0, 50.0))
+    click(view, widget_pos_for(view, 0, 150.0, 50.0))
+
+    move(view, widget_pos_for(view, 0, 150.0, 90.0))
+
+    assert len(view._measure_drag["points"]) == 2
+    assert view._measure_drag["current"] == pytest.approx(
+        (150.0, 90.0), abs=1.0)
+    assert not view.viewport().grab().isNull()
+
+    QTest.keyClick(view.viewport(), Qt.Key.Key_Escape)
+
+
+def test_each_tab_keeps_its_own_measure_kind(qapp, win, tmp_path):
+    first = str(build_sample_pdf(tmp_path / "first.pdf", pages=1,
+                                 width=200, height=100))
+    second = str(build_sample_pdf(tmp_path / "second.pdf", pages=1,
+                                  width=200, height=100))
+    assert win.open_document(first)
+    win._measure_kind_actions["perimeter"].trigger()
+    view_a = win.view
+
+    assert win.open_document(second)
+    qapp.processEvents()
+    win._measure_kind_actions["area"].trigger()
+    view_b = win.view
+
+    win.tabs.setCurrentIndex(0)
+    qapp.processEvents()
+    assert win.view is view_a
+    assert view_a.measure_kind == "perimeter"
+    assert win._measure_kind == "perimeter"
+    assert win._measure_kind_actions["perimeter"].isChecked()
+
+    win.tabs.setCurrentIndex(1)
+    qapp.processEvents()
+    assert win.view is view_b
+    assert view_b.measure_kind == "area"
+    assert win._measure_kind == "area"
+    assert win._measure_kind_actions["area"].isChecked()
+
+
+def test_a_perimeter_takes_the_pen_colour_and_width(qapp, win, view):
+    blue = dict(INK_COLORS)["Blue"]
+    win._set_ink_color(blue)
+    win.pen_width_combo.setCurrentIndex(win.pen_width_combo.findData(4.0))
+    win._measure_kind_actions["perimeter"].trigger()
+    qapp.processEvents()
+
+    for corner in RECTANGLE[:2]:
+        click(view, widget_pos_for(view, 0, *corner))
+    QTest.keyClick(view.viewport(), Qt.Key.Key_Return)
+    qapp.processEvents()
+
+    made = made_measurements(view)[0]
+    assert made.kind == "perimeter"
+    assert made.color == blue
+    assert made.width == pytest.approx(4.0)
 
 
 def test_a_drag_places_a_measurement(qapp, win, view):

@@ -113,14 +113,34 @@ STAMP_CAPTION_PADDING = 10.0
 STAMP_WIDTH = 190.0
 STAMP_ASPECT = 3.8
 
-#: What a dimension line is drawn with: red, one point thick, with end ticks
-#: and the reading above it.  The caption is written into the appearance
-#: stream, because MuPDF draws a measurement line as a plain line.
+#: What a measurement is drawn with: red, one point thick, with end ticks at a
+#: distance or vertex marks on a path, and the reading beside it.  The caption
+#: is written into the appearance stream, because MuPDF draws the geometry
+#: without one.
 MEASURE_COLOR = "#D32F2F"
 MEASURE_WIDTH = 1.0
 MEASURE_FONT = 9.0
 MEASURE_TICK = 4.0
 MEASURE_LABEL_GAP = 4.0
+
+#: The measurements the tool draws.  Each is a different PDF subtype and
+#: measurement intent: a ``/Line`` with ``/LineDimension``, a ``/PolyLine``
+#: with ``/PolyLineDimension`` and a ``/Polygon`` with ``/PolygonDimension``.
+MEASURE_KINDS = ("distance", "perimeter", "area")
+MEASURE_KIND_LABELS = {
+    "distance": "Distance",
+    "perimeter": "Perimeter",
+    "area": "Area",
+}
+MEASURE_INTENTS = {
+    "distance": "/LineDimension",
+    "perimeter": "/PolyLineDimension",
+    "area": "/PolygonDimension",
+}
+
+#: A path longer than this is refused: the reading and appearance are drawn
+#: from it, and no hand-drawn measurement needs thousands of vertices.
+MEASURE_MAX_POINTS = 2048
 
 #: What a damaged annotation can raise while the list is being read.  MuPDF
 #: signals its failures through these; asking for less than ``Exception`` means a
@@ -291,6 +311,20 @@ class MeasurementScale:
         """A page-space *length* in this scale, e.g. ``63.5 mm``."""
         return f"{length * self.units_per_point:.{self.precision}f} {self.unit}"
 
+    @property
+    def area_unit(self) -> str:
+        """The unit an area is read in, e.g. ``mm^2``.
+
+        A caret keeps the label inside Latin-1, which is what a PDF literal
+        string can hold without an embedded font.
+        """
+        return f"{self.unit}^2"
+
+    def area_reading(self, area: float) -> str:
+        """A page-space *area* in this scale's square unit, e.g. ``1250.0 mm^2``."""
+        factor = self.units_per_point ** 2
+        return f"{area * factor:.{self.precision}f} {self.area_unit}"
+
 
 #: The scales the measure tool offers.  A point is 1/72 inch, so each factor is
 #: that many real units; the first is the default because plans and drawings
@@ -327,26 +361,175 @@ def checked_measure_scale(scale: MeasurementScale) -> MeasurementScale:
     return MeasurementScale(scale.units_per_point, unit, scale.precision)
 
 
+def open_polygon(points: Sequence[tuple]) -> List[tuple]:
+    """A polygon's vertices without a repeated closing point.
+
+    Some writers repeat the first vertex at the end to draw the closing edge;
+    a ``/Polygon`` closes itself, so the repeat is only noise.  The caller's
+    list is not changed.
+    """
+    cleaned = [(float(x), float(y)) for x, y in points]
+    if len(cleaned) >= 3 and math.dist(cleaned[0], cleaned[-1]) < 1e-6:
+        return cleaned[:-1]
+    return cleaned
+
+
+def measure_length(points: Sequence[tuple]) -> float:
+    """The length of an open path through *points*, in page points."""
+    return sum(math.dist(a, b) for a, b in zip(points, points[1:]))
+
+
+def measure_area(points: Sequence[tuple]) -> float:
+    """The area a polygon encloses, in square page points.
+
+    The shoelace sum is taken about the first vertex, which keeps the
+    products small wherever the drawing sits on the page, and the sign is
+    dropped because a path drawn either way round encloses the same area.
+    """
+    corners = open_polygon(points)
+    if len(corners) < 3:
+        return 0.0
+    origin = corners[0]
+    total = 0.0
+    for (ax, ay), (bx, by) in zip(corners, corners[1:] + corners[:1]):
+        total += (ax - origin[0]) * (by - origin[1]) \
+            - (bx - origin[0]) * (ay - origin[1])
+    return abs(total) / 2.0
+
+
+def measurement_reading(kind: str, points: Sequence[tuple],
+                        scale: MeasurementScale) -> str:
+    """The label *kind*'s geometry gets in *scale*.
+
+    A distance reads the straight line between its ends, a perimeter the sum
+    of its segments and an area the space it encloses.  ``""`` when there is
+    not enough geometry to read yet, which is what a live preview shows.
+    """
+    cleaned = [(float(x), float(y)) for x, y in points]
+    if kind == "distance":
+        if len(cleaned) != 2:
+            return ""
+        return scale.reading(math.dist(cleaned[0], cleaned[1]))
+    if kind == "perimeter":
+        if len(cleaned) < 2:
+            return ""
+        return scale.reading(measure_length(cleaned))
+    if kind == "area":
+        if len(open_polygon(cleaned)) < 3:
+            return ""
+        return scale.area_reading(measure_area(cleaned))
+    return ""
+
+
+def _orientation(a: tuple, b: tuple, c: tuple) -> float:
+    return ((b[0] - a[0]) * (c[1] - a[1])
+            - (b[1] - a[1]) * (c[0] - a[0]))
+
+
+def _on_segment(a: tuple, b: tuple, p: tuple) -> bool:
+    return (min(a[0], b[0]) - 1e-9 <= p[0] <= max(a[0], b[0]) + 1e-9
+            and min(a[1], b[1]) - 1e-9 <= p[1] <= max(a[1], b[1]) + 1e-9)
+
+
+def _segments_intersect(a: tuple, b: tuple,
+                        c: tuple, d: tuple) -> bool:
+    """Whether ``ab`` and ``cd`` cross or touch."""
+    o1, o2 = _orientation(a, b, c), _orientation(a, b, d)
+    o3, o4 = _orientation(c, d, a), _orientation(c, d, b)
+    if ((o1 > 0) != (o2 > 0)) and ((o3 > 0) != (o4 > 0)):
+        return True
+    if abs(o1) <= 1e-9 and _on_segment(a, b, c):
+        return True
+    if abs(o2) <= 1e-9 and _on_segment(a, b, d):
+        return True
+    if abs(o3) <= 1e-9 and _on_segment(c, d, a):
+        return True
+    if abs(o4) <= 1e-9 and _on_segment(c, d, b):
+        return True
+    return False
+
+
+def _self_intersects(points: Sequence[tuple]) -> bool:
+    """Whether a closed polygon's boundary crosses itself."""
+    count = len(points)
+    for i in range(count):
+        a, b = points[i], points[(i + 1) % count]
+        for j in range(i + 2, count):
+            # The first and last edges share their corner by construction.
+            if i == 0 and j == count - 1:
+                continue
+            c, d = points[j], points[(j + 1) % count]
+            if _segments_intersect(a, b, c, d):
+                return True
+    return False
+
+
+def _checked_measurement_points(kind: str,
+                                points: Sequence[tuple]) -> List[tuple]:
+    """The geometry a measurement of *kind* can store, or an edit that refuses.
+
+    A distance is two distinct ends; a perimeter is a path of two or more
+    corners; an area is a closed polygon of three or more that does not cross
+    itself.  Adjacent corners must differ, because a zero-length segment has
+    no direction to draw and no length to add.
+    """
+    if kind not in MEASURE_KINDS:
+        raise EditError(f"“{kind}” is not a measurement")
+    cleaned = [(float(x), float(y)) for x, y in points]
+    if len(cleaned) > MEASURE_MAX_POINTS:
+        raise EditError("That measurement has too many points")
+    if any(not math.isfinite(x) or not math.isfinite(y)
+           for x, y in cleaned):
+        raise EditError("A measurement needs points on the page")
+    if kind == "area":
+        cleaned = open_polygon(cleaned)
+    if kind == "distance":
+        if len(cleaned) != 2:
+            raise EditError("A measurement needs two points")
+        if math.dist(cleaned[0], cleaned[1]) < 0.01:
+            raise EditError("A measurement needs two different points")
+        return cleaned
+    if kind == "perimeter":
+        if len(cleaned) < 2:
+            raise EditError("A perimeter needs at least two points")
+        minimum = "A perimeter"
+    else:
+        if len(cleaned) < 3:
+            raise EditError("An area needs at least three points")
+        minimum = "An area"
+    edges = list(zip(cleaned, cleaned[1:]))
+    if kind == "area":
+        edges.append((cleaned[-1], cleaned[0]))
+    if any(math.dist(a, b) < 0.01 for a, b in edges):
+        raise EditError(f"{minimum} needs different adjacent points")
+    if kind == "area" and _self_intersects(cleaned):
+        raise EditError("An area cannot cross itself")
+    if kind == "area" and measure_area(cleaned) < 0.01:
+        raise EditError("An area needs a shape with area")
+    return cleaned
+
+
 @dataclass
 class MeasurementAnnotation(Annotation):
-    """A measured distance: a PDF ``/Line`` with ``/IT /LineDimension``.
+    """A measured distance, perimeter or area.
 
-    ``points`` are the two ends in page space.  ``scale`` is the ``/Measure``
-    dictionary's scale, so the reading is a property of the file, not of the
-    viewer that made it; ``reading`` turns the page-space distance into the
-    text drawn above the line and kept in ``/Contents``.
+    ``points`` are the geometry in page space: two ends for a distance, the
+    corners of an open path for a perimeter and the corners of a closed
+    polygon for an area.  ``scale`` is the ``/Measure`` dictionary's scale, so
+    the reading is a property of the file, not of the viewer that made it;
+    ``reading`` turns the page-space geometry into the text drawn beside it
+    and kept in ``/Contents``.
     """
     type: AnnotationType = AnnotationType.MEASUREMENT
+    kind: str = "distance"
     points: List[tuple] = field(default_factory=list)
     scale: MeasurementScale = field(default_factory=lambda: MEASURE_DEFAULT_SCALE)
     width: float = MEASURE_WIDTH
 
     @property
     def reading(self) -> str:
-        """The measured distance in the scale the annotation carries."""
-        if len(self.points) != 2:
-            return ""
-        return self.scale.reading(math.dist(self.points[0], self.points[1]))
+        """The measured value in the scale the annotation carries."""
+        return measurement_reading(self.kind, self.points, self.scale)
 
 
 def stamp_box(width: float, height: float,
@@ -520,43 +703,55 @@ def _pdf_number(value: float, places: int = 3) -> str:
 def _measure_dictionary(scale: MeasurementScale) -> str:
     """The rectilinear ``/Measure`` dictionary a measurement annotation carries.
 
-    ``/X`` converts page-space x to real units, and ``/D`` is the distance
-    format (a factor relative to ``/X``).  The precision is the denominator of
-    the number format, which is how the PDF specification says how many
-    decimals to show.
+    ``/X`` converts page-space x to real units, ``/D`` is the distance format
+    (a factor relative to ``/X``) and ``/A`` the area format, whose unit is
+    the square of the linear one.  The precision is the denominator of the
+    number format, which is how the PDF specification says how many decimals
+    to show.
     """
     unit = _pdf_string(scale.unit)
     denominator = 10 ** scale.precision
     distance = (f"<< /Type /NumberFormat /U ({unit}) "
                 f"/C 1 /F /D /D {denominator} /FD true >>")
+    area = (f"<< /Type /NumberFormat "
+            f"/U ({_pdf_string(scale.area_unit)}) "
+            f"/C 1 /F /D /D {denominator} /FD true >>")
     return (f"<< /Type /Measure /Subtype /RL /R ({_pdf_string(scale.ratio)}) "
             f"/X [ << /Type /NumberFormat /U ({unit}) "
             f"/C {_pdf_number(scale.units_per_point, 6)} /F /D "
-            f"/D {denominator} /FD true >> ] /D [ {distance} ] >>")
+            f"/D {denominator} /FD true >> ] "
+            f"/D [ {distance} ] /A [ {area} ] >>")
 
 
-def _measurement_appearance(doc: fitz.Document, points: Sequence[tuple],
+def _measurement_appearance(doc: fitz.Document, kind: str,
+                            points: Sequence[tuple],
                             scale: MeasurementScale,
                             color: Tuple[float, float, float],
                             width: float, page_width: float,
                             page_height: float) -> Tuple[int, tuple, str]:
-    """The form XObject that draws a dimension line, its ticks and reading.
+    """The form XObject that draws a measurement and its reading.
 
-    The appearance is PDFAR's own because MuPDF paints a measurement line as a
-    plain line: without it neither PDFAR nor another viewer would show the
-    number.  The box has to make room for the label above (or, at the top of
-    the page, below) the line, and a Line annotation cannot be given that box
-    through ``set_rect()`` — the caller writes ``/Rect`` directly.
+    The appearance is PDFAR's own because MuPDF paints the bare geometry
+    without a caption: without it neither PDFAR nor another viewer would show
+    the number.  The box has to make room for the label above (or, at the top
+    of the page, below) the geometry, and a Line annotation cannot be given
+    that box through ``set_rect()`` — the caller writes ``/Rect`` directly.
     """
-    (px0, py0), (px1, py1) = points
-    label = scale.reading(math.dist(points[0], points[1]))
+    label = measurement_reading(kind, points, scale)
     text_width = fitz.get_text_length(label, fontname="helv",
                                       fontsize=MEASURE_FONT)
     if text_width + 2.0 > page_width:
         raise EditError("The measurement reading is too wide for this page")
-    left = min(max((px0 + px1) / 2.0 - text_width / 2.0, 1.0),
+    xs = [x for x, _y in points]
+    ys = [y for _x, y in points]
+    if kind == "distance":
+        (px0, py0), (px1, py1) = points
+        center_x = (px0 + px1) / 2.0
+    else:
+        center_x = (min(xs) + max(xs)) / 2.0
+    left = min(max(center_x - text_width / 2.0, 1.0),
                page_width - text_width - 1.0)
-    top, bottom = min(py0, py1), max(py0, py1)
+    top, bottom = min(ys), max(ys)
     if top - MEASURE_LABEL_GAP - MEASURE_FONT >= 1.0:
         baseline = top - MEASURE_LABEL_GAP
     elif bottom + MEASURE_LABEL_GAP + MEASURE_FONT <= page_height - 1.0:
@@ -564,8 +759,8 @@ def _measurement_appearance(doc: fitz.Document, points: Sequence[tuple],
     else:
         baseline = top - MEASURE_LABEL_GAP
     pad = MEASURE_TICK / 2.0 + max(1.0, width) + 0.5
-    x0 = max(0.0, min(px0, px1, left) - pad)
-    x1 = min(page_width, max(px0, px1, left + text_width) + pad)
+    x0 = max(0.0, min(min(xs), left) - pad)
+    x1 = min(page_width, max(max(xs), left + text_width) + pad)
     y0 = max(0.0, min(top, baseline - MEASURE_FONT) - pad)
     y1 = min(page_height, max(bottom, baseline) + pad)
     box = (x0, y0, x1, y1)
@@ -578,18 +773,31 @@ def _measurement_appearance(doc: fitz.Document, points: Sequence[tuple],
         # Form space grows upwards; the page grows downwards.
         return _pdf_number(y1 - y)
 
-    dx, dy = px1 - px0, py1 - py0
-    length = math.hypot(dx, dy)
-    half = MEASURE_TICK / 2.0
-    nx, ny = -dy / length * half, dx / length * half
     red, green, blue = color
     ink = f"{_pdf_number(red)} {_pdf_number(green)} {_pdf_number(blue)}"
+    if kind == "distance":
+        (px0, py0), (px1, py1) = points
+        dx, dy = px1 - px0, py1 - py0
+        length = math.hypot(dx, dy)
+        half = MEASURE_TICK / 2.0
+        nx, ny = -dy / length * half, dx / length * half
+        drawing = (
+            f"{fx(px0)} {fy(py0)} m {fx(px1)} {fy(py1)} l S "
+            f"{fx(px0 - nx)} {fy(py0 - ny)} m "
+            f"{fx(px0 + nx)} {fy(py0 + ny)} l S "
+            f"{fx(px1 - nx)} {fy(py1 - ny)} m "
+            f"{fx(px1 + nx)} {fy(py1 + ny)} l S")
+    else:
+        path = " ".join(f"{fx(x)} {fy(y)} l" for x, y in points[1:])
+        drawing = (f"{fx(points[0][0])} {fy(points[0][1])} m {path} "
+                   f"{'h ' if kind == 'area' else ''}S ")
+        # A corner marker, so a perimeter reads as a path and an area as a
+        # closed shape even where a segment crosses other page content.
+        drawing += " ".join(
+            f"{fx(x - 1.5)} {fy(y + 1.5)} 3 3 re f" for x, y in points)
     content = (
         f"q {ink} RG {ink} rg {_pdf_number(width)} w 1 J 0 J "
-        f"{fx(px0)} {fy(py0)} m {fx(px1)} {fy(py1)} l S "
-        f"{fx(px0 - nx)} {fy(py0 - ny)} m {fx(px0 + nx)} {fy(py0 + ny)} l S "
-        f"{fx(px1 - nx)} {fy(py1 - ny)} m {fx(px1 + nx)} {fy(py1 + ny)} l S "
-        f"BT /F1 {_pdf_number(MEASURE_FONT)} Tf "
+        f"{drawing} BT /F1 {_pdf_number(MEASURE_FONT)} Tf "
         f"{fx(left)} {fy(baseline)} Td ({_pdf_string(label)}) Tj ET Q"
     ).encode("latin-1")
     font = doc.get_new_xref()
@@ -898,17 +1106,27 @@ def _stamp_model(annot: fitz.Annot, page_idx: int) -> StampAnnotation:
 
 def _measurement_model(doc: fitz.Document, annot: fitz.Annot,
                        page_idx: int) -> Optional[MeasurementAnnotation]:
-    """Read one dimension line into the model, or ``None`` if it is not one.
+    """Read one measurement into the model, or ``None`` if it is not one.
 
-    A ``/Line`` is only a measurement when its ``/IT`` says so and a
-    rectilinear ``/Measure`` scale can be read; a line with an unfamiliar
-    measure dictionary is still a line, and the caller reads it as one.
+    The ``/IT`` name says which kind it is and a rectilinear ``/Measure``
+    scale is needed to read it.  A line or polygon with an unfamiliar measure
+    dictionary, or with geometry that does not fit its kind, is still the
+    shape it also is, and the caller reads it as one.
     """
-    if doc.xref_get_key(annot.xref, "IT") != ("name", "/LineDimension"):
+    intent_kind, intent = doc.xref_get_key(annot.xref, "IT")
+    if intent_kind != "name":
+        return None
+    kinds = {value: key for key, value in MEASURE_INTENTS.items()}
+    kind = kinds.get(intent)
+    if kind is None:
         return None
     scale = _read_measurement_scale(doc, annot.xref)
-    points = [(float(x), float(y)) for x, y in (annot.vertices or [])]
-    if scale is None or len(points) != 2:
+    if scale is None:
+        return None
+    try:
+        points = _checked_measurement_points(
+            kind, [(float(x), float(y)) for x, y in (annot.vertices or [])])
+    except EditError:
         return None
     info = annot.info
     rect = annot.rect
@@ -925,6 +1143,7 @@ def _measurement_model(doc: fitz.Document, annot: fitz.Annot,
         created=info.get("creationDate") or "",
         modified=info.get("modDate") or "",
         content=info.get("content") or "",
+        kind=kind,
         points=points,
         scale=scale,
         width=MEASURE_WIDTH if width is None else float(width),
@@ -1279,17 +1498,20 @@ class AddCustomStamp(SinglePageEdit):
 
 @dataclass(frozen=True)
 class AddMeasurement(SinglePageEdit):
-    """Measure the distance between two page points — a ``/LineDimension``.
+    """Measure a distance, a perimeter or an area on a page.
 
-    The annotation is a real measurement: ``/IT /LineDimension`` tells a reader
-    what it is and ``/Measure`` says how the page distance becomes the reading.
-    Its appearance is PDFAR's own, because MuPDF draws only the bare line; the
-    ticks and the number live in ``/AP/N`` like a custom stamp's caption.
+    ``kind`` picks the PDF geometry and intent: a two-point line with
+    ``/IT /LineDimension``, an open polyline with ``/PolyLineDimension`` or a
+    closed polygon with ``/PolygonDimension``.  ``/Measure`` says how page
+    geometry becomes the reading.  Its appearance is PDFAR's own, because
+    MuPDF draws only the bare geometry; the ticks, corner marks and the
+    number live in ``/AP/N`` like a custom stamp's caption.
     """
 
     ann_id: str
     page: int
     points: Tuple[tuple, ...]
+    kind: str = "distance"
     units_per_point: float = MEASURE_DEFAULT_SCALE.units_per_point
     unit: str = MEASURE_DEFAULT_SCALE.unit
     precision: int = MEASURE_DEFAULT_SCALE.precision
@@ -1305,11 +1527,8 @@ class AddMeasurement(SinglePageEdit):
         return "Measurement"
 
     def apply(self, doc: fitz.Document) -> None:
-        points = [(float(x), float(y)) for x, y in self.points]
-        if len(points) != 2:
-            raise EditError("A measurement needs two points")
-        if math.dist(points[0], points[1]) < 0.01:
-            raise EditError("A measurement needs two different points")
+        kind = str(self.kind)
+        points = _checked_measurement_points(kind, self.points)
         scale = checked_measure_scale(MeasurementScale(
             float(self.units_per_point), str(self.unit), int(self.precision)))
         color = _hex_to_rgb(self.color)
@@ -1317,16 +1536,23 @@ class AddMeasurement(SinglePageEdit):
         # Annotation points are page-space (unrotated) coordinates, so the page
         # box is the mediabox even when the view is turned.
         form, box, label = _measurement_appearance(
-            doc, points, scale, color, float(self.width),
+            doc, kind, points, scale, color, float(self.width),
             page.mediabox.width, page.mediabox.height)
         x0, y0, x1, y1 = box
-        annot = page.add_line_annot(fitz.Point(*points[0]),
-                                    fitz.Point(*points[1]))
+        if kind == "distance":
+            annot = page.add_line_annot(fitz.Point(*points[0]),
+                                        fitz.Point(*points[1]))
+        elif kind == "perimeter":
+            annot = page.add_polyline_annot(
+                [fitz.Point(*point) for point in points])
+        else:
+            annot = page.add_polygon_annot(
+                [fitz.Point(*point) for point in points])
         annot.set_colors(stroke=color)
         annot.set_border(width=float(self.width))
         if self.author:
             annot.set_info(title=self.author)
-        # update() refits /Rect to the bare line and draws a plain line; the
+        # update() refits /Rect to the bare geometry and draws it plainly; the
         # measurement's own box and appearance go on afterwards.
         annot.update()
         # /Rect is stored in PDF space, whose y axis runs up from the mediabox
@@ -1336,9 +1562,10 @@ class AddMeasurement(SinglePageEdit):
             annot.xref, "Rect",
             f"[{_pdf_number(x0)} {_pdf_number(height - y1)} "
             f"{_pdf_number(x1)} {_pdf_number(height - y0)}]")
-        doc.xref_set_key(annot.xref, "IT", "/LineDimension")
+        doc.xref_set_key(annot.xref, "IT", MEASURE_INTENTS[kind])
         doc.xref_set_key(annot.xref, "Measure", _measure_dictionary(scale))
-        doc.xref_set_key(annot.xref, "Subj", "(Distance)")
+        doc.xref_set_key(
+            annot.xref, "Subj", f"({MEASURE_KIND_LABELS[kind]})")
         doc.xref_set_key(annot.xref, "Contents",
                          f"({_pdf_string(self.note or label)})")
         doc.xref_set_key(annot.xref, "AP", f"<< /N {form} 0 R >>")
@@ -1526,8 +1753,17 @@ class AnnotationManager(QObject):
                     # dimension is not shown as a plain line.
                     model = (_measurement_model(doc, annot, page_idx)
                              or _shape_model(annot, page_idx, "line"))
+                elif kind == fitz.PDF_ANNOT_POLY_LINE:
+                    # Only a measured polyline has a model of its own; a plain
+                    # one is not a shape PDFAR draws yet.
+                    model = _measurement_model(doc, annot, page_idx)
+                    if model is None:
+                        continue
                 elif kind == fitz.PDF_ANNOT_POLYGON:
-                    model = _shape_model(annot, page_idx, "polygon")
+                    # An area is a /Polygon with an /IT, so try the measurement
+                    # before reading it as a plain shape.
+                    model = (_measurement_model(doc, annot, page_idx)
+                             or _shape_model(annot, page_idx, "polygon"))
                 elif kind == fitz.PDF_ANNOT_STAMP:
                     model = _stamp_model(annot, page_idx)
                 else:
@@ -1699,17 +1935,20 @@ class AnnotationManager(QObject):
                         color: str = MEASURE_COLOR,
                         width: float = MEASURE_WIDTH,
                         author: str = "",
-                        note: str = "") -> Optional[MeasurementAnnotation]:
-        """Measure the distance between two page points, in *scale*.
+                        note: str = "",
+                        kind: str = "distance") -> Optional[MeasurementAnnotation]:
+        """Measure a distance, perimeter or area on *page*, in *scale*.
 
-        One measurement is one edit, so one Ctrl+Z takes the dimension away.
-        ``None`` if the edit was refused — two points that are the same, or a
-        scale or unit the file cannot describe.
+        One measurement is one edit, so one Ctrl+Z takes it away.  ``None`` if
+        the edit was refused — geometry that does not fit the kind (equal
+        ends, too few points, an area that crosses itself), or a scale or unit
+        the file cannot describe.
         """
         ann_id = str(uuid.uuid4())
         if not self._run(AddMeasurement(
                 ann_id=ann_id, page=int(page),
                 points=tuple((float(x), float(y)) for x, y in points),
+                kind=str(kind),
                 units_per_point=scale.units_per_point, unit=scale.unit,
                 precision=scale.precision, color=color, width=width,
                 author=author, note=note)):
