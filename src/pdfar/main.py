@@ -12,6 +12,7 @@ except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 import hashlib
 import html
+import math
 import time
 
 from PyQt6.QtCore import QEvent, QObject, QPoint, QSettings, QSize, QThread, QTimer, Qt
@@ -35,6 +36,7 @@ from .annotations import (
     INK_COLORS, INK_WIDTH, INK_WIDTHS, MEASURE_DEFAULT_SCALE,
     MEASURE_KIND_LABELS, MEASURE_KINDS, MEASURE_SCALES,
     SHAPE_LABELS, STAMP_LABELS, MeasurementScale, checked_measure_scale,
+    scale_from_reference,
 )
 from .bookmarks import settings_key_for
 from .edits import EditError
@@ -562,8 +564,7 @@ class MainWindow(QMainWindow):
         self.act_measure = QAction("Measure", self)
         self.act_measure.setCheckable(True)
         self.act_measure.setToolTip(self._measure_tip(self._measure_scale))
-        self.act_measure.triggered.connect(
-            lambda: self._set_tool_mode("measure"))
+        self.act_measure.triggered.connect(self._start_measure)
         self._measure_kind_actions = {}
         for kind in MEASURE_KINDS:
             action = QAction(MEASURE_KIND_LABELS[kind], self)
@@ -587,6 +588,10 @@ class MainWindow(QMainWindow):
         self.act_measure_custom.setToolTip(
             "Type how many real units one PDF point stands for")
         self.act_measure_custom.triggered.connect(self._choose_custom_scale)
+        self.act_measure_calibrate = QAction("Calibrate…", self)
+        self.act_measure_calibrate.setToolTip(
+            "Draw a line of known length to set the scale from it")
+        self.act_measure_calibrate.triggered.connect(self._start_calibration)
 
         for action in (self.act_explore, self.act_sel_text,
                        self.act_sel_area, self.act_sel_table, self.act_draw,
@@ -936,6 +941,7 @@ class MainWindow(QMainWindow):
             measure_menu.addAction(action)
         measure_menu.addSeparator()
         measure_menu.addAction(self.act_measure_custom)
+        measure_menu.addAction(self.act_measure_calibrate)
         self.measure_split.setMenu(measure_menu)
         self.measure_split.setDefaultAction(self.act_measure)
         tb.addWidget(self.measure_split)
@@ -2304,6 +2310,7 @@ class MainWindow(QMainWindow):
         tab.view.reflow_ready.connect(self._on_reflow_ready)
         tab.view.reflow_font_scale_changed.connect(self._on_reflow_font_scale_changed)
         tab.view.numbering_changed.connect(self._on_numbering_dragged)
+        tab.view.calibration_requested.connect(self._on_calibration_requested)
         tab.view.transient_message.connect(self._show_transient_message)
         tab.view.view_mode_changed.connect(self._on_view_mode_changed)
         tab.view.content_changed.connect(tab.sidebar.invalidate_thumbnails)
@@ -2327,6 +2334,8 @@ class MainWindow(QMainWindow):
             tab.view.reflow_ready.disconnect(self._on_reflow_ready)
             tab.view.reflow_font_scale_changed.disconnect(self._on_reflow_font_scale_changed)
             tab.view.numbering_changed.disconnect(self._on_numbering_dragged)
+            tab.view.calibration_requested.disconnect(
+                self._on_calibration_requested)
             tab.view.transient_message.disconnect(self._show_transient_message)
             tab.view.view_mode_changed.disconnect(self._on_view_mode_changed)
             tab.view.content_changed.disconnect(tab.sidebar.invalidate_thumbnails)
@@ -2337,6 +2346,7 @@ class MainWindow(QMainWindow):
         except TypeError:
             pass
         tab.view.clear_numbering_preview()
+        tab.view.set_measure_calibration(False)
         if self._connected_tab is tab:
             self._connected_tab = None
 
@@ -2800,10 +2810,64 @@ class MainWindow(QMainWindow):
             return
         self._set_custom_stamp({"kind": "image", "caption": "", "image": path})
 
+    def _start_measure(self) -> None:
+        """Use the measure tool normally, leaving any calibration behind."""
+        view = self.view
+        if view is not None:
+            view.set_measure_calibration(False)
+        self._set_tool_mode("measure")
+
+    def _start_calibration(self) -> None:
+        """Take the measure scale from a line of known real length."""
+        view = self.view
+        if view is None or view.reflow_mode:
+            return
+        self._set_tool_mode("measure")
+        view.set_measure_calibration(True)
+        self._sync_measure_scale()
+        self.statusBar().showMessage(
+            "Drag a line of known length to calibrate the measure scale",
+            5000)
+
+    def _on_calibration_requested(self, length: float) -> None:
+        """Ask how long the drawn line is and adopt the scale it implies."""
+        if not math.isfinite(length) or length <= 0.0:
+            return
+        default = self._measure_scale.reading(length)
+        text, ok = QInputDialog.getText(
+            self, "Calibrate Scale",
+            "How long is the line you drew? Type a number and a unit, "
+            "for example “250 mm”.",
+            text=default)
+        if not ok:
+            return
+        parts = text.split()
+        if len(parts) < 2:
+            QMessageBox.warning(self, "Calibrate Scale",
+                                "Give a number and a unit, for example "
+                                "“250 mm”.")
+            return
+        try:
+            known = float(parts[0])
+        except ValueError:
+            known = 0.0
+        try:
+            scale = scale_from_reference(
+                length, known, " ".join(parts[1:]), 2)
+        except EditError as exc:
+            QMessageBox.warning(self, "Calibrate Scale", str(exc))
+            return
+        self._choose_measure_scale(scale)
+        self.statusBar().showMessage(
+            f"Calibrated: {scale.ratio}", 5000)
+
     def _choose_measure_kind(self, kind: str) -> None:
         """Pick what the measure button draws and switch to that tool."""
         if kind not in self._measure_kind_actions:
             return
+        view = self.view
+        if view is not None:
+            view.set_measure_calibration(False)
         self._measure_kind = kind
         self._measure_kind_actions[kind].setChecked(True)
         self._sync_measure_scale()
@@ -2811,6 +2875,9 @@ class MainWindow(QMainWindow):
 
     def _choose_measure_scale(self, scale: MeasurementScale) -> None:
         """Pick the units the measure tool reads in and switch to that tool."""
+        view = self.view
+        if view is not None:
+            view.set_measure_calibration(False)
         self._measure_scale = scale
         self._sync_measure_scale()
         self._set_tool_mode("measure")
@@ -2930,6 +2997,8 @@ class MainWindow(QMainWindow):
         for action in self._measure_kind_actions.values():
             action.setEnabled(selection_ok)
         self.act_measure.setEnabled(selection_ok)
+        self.act_measure_custom.setEnabled(selection_ok)
+        self.act_measure_calibrate.setEnabled(selection_ok)
         split = getattr(self, "tool_split", None)
         if split is None:
             return

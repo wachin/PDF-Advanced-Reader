@@ -199,6 +199,7 @@ class PDFView(QAbstractScrollArea):
     reflow_ready = pyqtSignal(bool, int)    # (has_text, pages without content)
     reflow_font_scale_changed = pyqtSignal(float)  # text-size multiplier
     numbering_changed = pyqtSignal(object)  # settings after dragging
+    calibration_requested = pyqtSignal(float)  # drawn calibration length
     transient_message = pyqtSignal(str)     # short status-bar feedback
     view_mode_changed = pyqtSignal(str)     # page layout mode
     content_changed = pyqtSignal(int, int)  # (content version, Scope value)
@@ -322,6 +323,7 @@ class PDFView(QAbstractScrollArea):
         self.measure_kind = "distance"
         self.measure_scale: MeasurementScale = MEASURE_DEFAULT_SCALE
         self._measure_drag: Optional[dict] = None
+        self._measure_calibration = False
 
         # search
         self._hit_rects: Dict[int, List[Tuple[float, float, float, float]]] = {}
@@ -844,6 +846,24 @@ class PDFView(QAbstractScrollArea):
             self.measure_kind = kind
             self._cancel_measure()
 
+    def set_measure_calibration(self, calibrating: bool) -> None:
+        """Arm the next distance drag as a line of known length.
+
+        The drag places no annotation: the view reports its page-space length
+        through ``calibration_requested`` and the window asks what that length
+        really is.  Arming abandons any measurement in progress; disarming when
+        nothing is armed changes nothing.
+        """
+        if calibrating:
+            self._cancel_measure()
+            self._measure_calibration = True
+        elif self._measure_calibration:
+            self._measure_drag = None
+            self._measure_calibration = False
+        else:
+            return
+        self.viewport().update()
+
     def set_ink_color(self, color: str) -> None:
         """Choose the colour the pen writes into the annotation's ``/C``.
 
@@ -994,9 +1014,14 @@ class PDFView(QAbstractScrollArea):
                     color=color, width=width)
 
     def _cancel_measure(self) -> None:
-        """Give up the measurement in progress: it never reaches the document."""
-        if self._measure_drag is not None:
+        """Give up the measurement in progress: it never reaches the document.
+
+        A calibration waiting for its line is a draft too, so Escape or a tool
+        change puts it away with the drawing.
+        """
+        if self._measure_drag is not None or self._measure_calibration:
             self._measure_drag = None
+            self._measure_calibration = False
             self.viewport().update()
 
     def _extend_measure(self, pos: QPoint) -> None:
@@ -2136,7 +2161,7 @@ class PDFView(QAbstractScrollArea):
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
-        if kind == "distance":
+        if kind in ("distance", "calibrate"):
             start = spot(drag["start"])
             current = spot(drag["current"])
             painter.drawLine(start, current)
@@ -2172,7 +2197,8 @@ class PDFView(QAbstractScrollArea):
             middle = QPointF(
                 sum(point.x() for point in spots) / len(spots),
                 sum(point.y() for point in spots) / len(spots))
-        reading = measurement_reading(kind, geometry, self.measure_scale)
+        reading = ("Set known length…" if kind == "calibrate"
+                   else measurement_reading(kind, geometry, self.measure_scale))
         if not reading:
             return
         font = painter.font()
@@ -3215,12 +3241,14 @@ class PDFView(QAbstractScrollArea):
                 and self.tool_mode == "measure"):
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             self.clear_selection()
-            if self.measure_kind == "distance":
+            if self.measure_kind == "distance" or self._measure_calibration:
                 hit = self._pdf_point_at(event.position().toPoint())
                 if hit is not None:
                     page, x, y = hit
                     self._measure_drag = {
-                        "page": page, "kind": "distance",
+                        "page": page,
+                        "kind": ("calibrate" if self._measure_calibration
+                                 else "distance"),
                         "start": (x, y), "current": (x, y),
                     }
                     self.viewport().update()
@@ -3359,6 +3387,19 @@ class PDFView(QAbstractScrollArea):
             self._shape_drag = None
             self.viewport().update()
             self._commit_shape(drag)
+            event.accept()
+            return
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self._measure_drag is not None
+                and self._measure_drag.get("kind") == "calibrate"):
+            drag = self._measure_drag
+            self._extend_measure(event.position().toPoint())
+            self._measure_drag = None
+            self.viewport().update()
+            length = math.dist(drag["start"], drag["current"])
+            if length >= 0.01:
+                self._measure_calibration = False
+                self.calibration_requested.emit(length)
             event.accept()
             return
         if (event.button() == Qt.MouseButton.LeftButton

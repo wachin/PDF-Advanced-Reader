@@ -901,7 +901,8 @@ that re-reads the pages an edit touched (F10-3h), freehand ink in the
 document (F10-3i), the pen tool and its style pickers (F10-3j/3k), the
 shape tool (F10-3l/3m), the standard rubber stamps with their tool
 (F10-3n), custom caption/image stamps (F10-3o), measurement annotations
-with a chosen scale (F10-3p), and perimeter/area measurements (F10-3q) done.
+with a chosen scale (F10-3p), perimeter/area measurements (F10-3q) and
+calibration from a line of known length (F10-3r) done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1305,8 +1306,17 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       corner, an area closing on its first corner or a double-click/Enter —
       with a live rubber band and one edit per finished outline, and PDFAR
       writes the path, the corner marks and the reading into `/AP/N` itself.)
-- [ ] Scale calibration: derive the scale from a line of known length instead
+- [x] Scale calibration: derive the scale from a line of known length instead
       of typing the factor
+      (**F10-3r.** "Calibrate…" in the Measure menu arms the tool so the next
+      drag is a reference line, not an annotation.  When the drag ends, the
+      window asks how long that line really is and one page point becomes
+      `known length / drawn length` units.  The drawn length is captured in
+      page space, so a turned view calibrates against the same paper; the
+      resulting factor is held to what a PDF number format can write, and the
+      dialog starts with the line's current reading, so it can be corrected
+      rather than retyped.  Nothing is written to the document: the scale is
+      viewer state like the units, and Ctrl+Z has nothing to undo.)
 - [ ] Appearance streams, so other readers show the same thing without
       regenerating them
 - [ ] XFDF import/export
@@ -1434,9 +1444,11 @@ custom stamp can be a typed caption or an image file whose appearance PDFAR
 writes itself (F10-3o); a measurement is a real `/LineDimension` with its own
 `/Measure` scale, a live reading and a split button for the units (F10-3p); a
 perimeter and an area are real `/PolyLineDimension` and `/PolygonDimension`
-annotations with the square-unit format their reading needs (F10-3q).
-Next, in order: scale calibration, appearance streams so other readers show
-what PDFAR wrote, and XFDF import/export.
+annotations with the square-unit format their reading needs (F10-3q), and a
+reference line of known length sets the scale instead of a typed factor
+(F10-3r).
+Next, in order: appearance streams so other readers show what PDFAR wrote,
+and XFDF import/export.
 
 Goal:
 
@@ -3234,8 +3246,8 @@ restarts — a definition is given each time the tool is armed; a colour or font
 choice for a caption (the caption is red Helvetica-Bold like the standard
 stamps); multi-line captions; and editing the appearance of a stamp already
 placed (its note can be changed, but the mark is what was drawn). Distance
-measurement is F10-3p, perimeter and area F10-3q; scale calibration is still
-open.
+measurement is F10-3p, perimeter and area F10-3q, and calibration from a
+known length F10-3r.
 
 ---
 
@@ -3347,10 +3359,10 @@ the dimension in 260 ms including the page re-read, the re-rasterised page
 paints in 307 ms and a no-edit repaint is 2.9 ms. Saving the book with the
 measurement is 2.05 s for 24 MB.
 
-**What is not here**: perimeter and area measurements (F10-3q), scale
-calibration from a known length, snapping to geometry or existing
-dimensions, and moving or editing the endpoints of a placed measurement —
-undo and redo are the only ways to change it.
+**What is not here**: snapping to geometry or existing dimensions, moving or
+editing the endpoints of a placed measurement, and scale calibration from a
+known length (F10-3r) — undo and redo are the only ways to change a placed
+distance.
 
 ---
 
@@ -3450,11 +3462,91 @@ the release applies with the page re-read in 441.9 ms against 1.4 ms for a
 no-edit repaint, and saving the book with the new mark is 1.99 s for 24.7 MB.
 Peak RSS of the UI run was 319 MB.
 
-**What is not here**: scale calibration from a known length, snapping to
-geometry or existing dimensions, moving or editing the corners of a placed
-measurement, a superscript `mm²` in the label (the unit is written as `mm^2`),
-holes/subpaths in an area, appearance streams written separately from the
-annotation's own `/AP`, and XFDF.
+**What is not here**: snapping to geometry or existing dimensions, moving or
+editing the corners of a placed measurement, a superscript `mm²` in the label
+(the unit is written as `mm^2`), holes/subpaths in an area, appearance streams
+written separately from the annotation's own `/AP`, XFDF, and scale
+calibration from a known length (F10-3r).
+
+---
+
+### F10-3r Calibrating the scale from a known length — [x] Implemented
+
+**Completed**: 2026-10-27
+
+**What landed**: "Calibrate…" in the Measure split menu derives the scale from
+a line the user draws and declares. `scale_from_reference()` in
+`annotations.py` is the whole arithmetic — one page point becomes
+`known_length / page_length` units — and it returns a `MeasurementScale`
+through `checked_measure_scale()`, so a calibration can only set a scale the
+file can describe. The viewer gained a calibration mode and a
+`calibration_requested(float)` signal; the window asks for the real length and
+adopts the implied scale. Nothing is written to the document: calibration is
+viewer state, like the units themselves, so the tab does not become dirty and
+there is no edit to undo.
+
+**The gesture.** Calibrate arms the measure tool and makes the next drag a
+reference line, whatever kind is selected. The preview is the familiar
+distance line with its end ticks, labelled "Set known length…" instead of a
+reading. On release the view emits the length it captured in **page space**,
+so a turned view calibrates against the same paper the line lies on; a press
+and release with no extent emits nothing and leaves the calibration armed, so
+a stray click does not open a dialog. The dialog's default text is the line's
+current reading (e.g. "3.53 cm"), which the user edits to the known length, so
+a near-miss is corrected rather than retyped. Escape, another tool, another
+kind, another scale, switching tabs and entering Reflow all put the pending
+calibration away; leaving the dialog unchanged or cancelling it keeps the old
+scale.
+
+**Validation.** `scale_from_reference()` refuses a drawn length that is not
+finite and positive, a line shorter than one millionth of a point, and a known
+length that is not finite and positive; the factor then has to fall inside the
+1e-6 … 1e6 range a PDF number format can store, the unit has to be 1–16
+printable Latin-1 characters, and the precision 0–4. In the window, a text
+without a number and a unit, a zero or negative length and an unusable unit
+produce a warning with the old scale intact. The calibration keeps two
+decimals, like "Custom Scale…", independent of the preset's own precision.
+
+**Files changed**: `src/pdfar/annotations.py` (`scale_from_reference`),
+`src/pdfar/viewer.py` (`calibration_requested`, `_measure_calibration`,
+`set_measure_calibration`, the calibration branches of the measure press,
+release and preview, and `_cancel_measure` putting the armed calibration
+away), `src/pdfar/main.py` (`act_measure_calibrate`, the menu entry,
+`_start_measure`, `_start_calibration`, `_on_calibration_requested`, the
+signal connection and its tab cleanup, the tab-change disarm, and the
+calibrate action's enablement), `tests/test_measurements.py`.
+
+**Verified by eye** (headless): a 400 × 300 plan drew a reference line
+between 150 and 250 pt; the declared 250 mm made one point 2.5436 mm, and the
+plan's 299.4 pt top edge then read **761.63 mm** in the saved file. The preview
+showed "Set known length…" above its ticks, and the placed dimension carried
+its reading above the line. Screenshots `/tmp/f103r/ui_preview.png`,
+`/tmp/f103r/ui_placed.png`, `/tmp/f103r/page.png`.
+
+**Tests**: 890 passed. `tests/test_measurements.py` grew from 85 to 112
+cases: the factor is `known / drawn` and its reading and area reading follow;
+a calibrated scale gets into `/Measure` as `/R (1 pt = 0.02 m)`; twelve
+malformed calibrations (zero, negative, NaN or infinite lengths, a
+sub-millionth line, empty and non-Latin-1 units, a factor beyond the file's
+range) are refused by `scale_from_reference`; the menu lists "Calibrate…"; and
+in the window: a drag sets the per-tab scale and places no annotation or
+history, the dialog is prefilled with the current reading, the preview is a
+calibration line, a click keeps waiting, cancelling keeps the old scale, a bad
+length warns, Escape and a scale, measure or tool change disarm it, a 90° view
+still calibrates on the dragged page length, and two tabs keep two calibrated
+scales. Three consecutive full runs.
+
+**Performance on the 540-page book** (page 1): calibration writes nothing, so
+a complete arm → drag → adopt cycle costs **5.24 ms median** (20 cycles,
+4.72–31.68 ms, including Qt event processing) and leaves the document clean
+and the history empty. Measuring in the calibrated scale afterwards is the
+same path as F10-3p: the distance applied in 373.1 ms through a real
+`PDFView`, including the page re-read.
+
+**What is not here**: calibrating from an existing measurement instead of a
+fresh line, plan ratios ("1 mm on paper = 50 mm"), recalibrating an
+already-placed measurement, snapping the reference line to geometry, and
+honouring a PDF `/UserUnit` other than 1.
 
 ---
 

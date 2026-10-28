@@ -361,6 +361,25 @@ def checked_measure_scale(scale: MeasurementScale) -> MeasurementScale:
     return MeasurementScale(scale.units_per_point, unit, scale.precision)
 
 
+def scale_from_reference(page_length: float, known_length: float,
+                         unit: str, precision: int = 2) -> MeasurementScale:
+    """The scale implied by a known length drawn on the page.
+
+    A user draws a line and says how long it really is; one page point is
+    ``known_length / page_length`` units.  Both lengths have to be finite and
+    positive, because either zero would make the scale meaningless, and the
+    result is then held to what a PDF number format can write.
+    """
+    if not math.isfinite(page_length) or page_length <= 0.0:
+        raise EditError("A calibration line needs a positive length")
+    if page_length < 1e-6:
+        raise EditError("A calibration line needs two distinct points")
+    if not math.isfinite(known_length) or known_length <= 0.0:
+        raise EditError("A calibration length must be a positive number")
+    return checked_measure_scale(
+        MeasurementScale(known_length / page_length, unit, precision))
+
+
 def open_polygon(points: Sequence[tuple]) -> List[tuple]:
     """A polygon's vertices without a repeated closing point.
 

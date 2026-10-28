@@ -43,6 +43,7 @@ from pdfar.annotations import (
     measure_length,
     measurement_reading,
     open_polygon,
+    scale_from_reference,
 )
 from pdfar.edits import EditError, Scope
 from pdfar.geometry import map_point
@@ -535,6 +536,44 @@ def test_a_scale_the_file_cannot_describe_is_refused(scale):
         checked_measure_scale(scale)
 
 
+def test_calibration_derives_the_factor_from_a_known_length():
+    scale = scale_from_reference(100.0, 250.0, "mm")
+
+    assert scale == MeasurementScale(2.5, "mm", 2)
+    assert scale.ratio == "1 pt = 2.5 mm"
+    assert scale.reading(100.0) == "250.00 mm"
+    assert scale.area_reading(100.0) == "625.00 mm^2"
+
+
+def test_a_calibrated_scale_lands_in_the_file(manager):
+    scale = scale_from_reference(100.0, 2.0, "m")
+
+    made = manager.add_measurement(0, HORIZONTAL, scale=scale)
+
+    assert made.reading == "2.00 m"
+    assert "(1 pt = 0.02 m)" in line_annots(manager.doc)[0]["measure"][1]
+
+
+@pytest.mark.parametrize("page_length,known,unit", [
+    (0.0, 10.0, "mm"),
+    (-5.0, 10.0, "mm"),
+    (float("nan"), 10.0, "mm"),
+    (float("inf"), 10.0, "mm"),
+    (1e-9, 10.0, "mm"),
+    (100.0, 0.0, "mm"),
+    (100.0, -2.0, "mm"),
+    (100.0, float("nan"), "mm"),
+    (100.0, float("inf"), "mm"),
+    (100.0, 10.0, ""),
+    (100.0, 10.0, "\u03bcm"),
+    (1e-6, 10.0, "mm"),
+])
+def test_a_calibration_the_file_cannot_describe_is_refused(
+        page_length, known, unit):
+    with pytest.raises(EditError):
+        scale_from_reference(page_length, known, unit)
+
+
 # ------------------------------------------------------ reading foreign files
 def build_foreign(tmp_path, mutate):
     """A sample page with one line annotation *mutate* edits, as a session."""
@@ -671,6 +710,22 @@ def drag(view, page, points):
     release(view, spots[-1])
 
 
+def drag_measured(view, page, points):
+    """Drag like :func:`drag` and return the page-space length it captured.
+
+    Widget positions are whole pixels, so the captured length is the truth a
+    calibration must divide by; the requested page coordinates are not.
+    """
+    spots = [widget_pos_for(view, page, x, y) for x, y in points]
+    press(view, spots[0])
+    for spot in spots[1:]:
+        move(view, spot)
+    length = math.dist(view._measure_drag["start"],
+                       view._measure_drag["current"])
+    release(view, spots[-1])
+    return length
+
+
 def click(view, spot):
     press(view, spot)
     release(view, spot)
@@ -701,7 +756,7 @@ def test_the_menu_offers_each_kind_scale_and_a_custom_one(win, view):
 
     assert entries == ["Distance", "Perimeter", "Area", "",
                        "Millimetres", "Centimetres", "Inches", "Points",
-                       "", "Custom Scale…"]
+                       "", "Custom Scale…", "Calibrate…"]
     assert actions[3].isSeparator()
     assert actions[8].isSeparator()
     assert actions[0].isChecked()
@@ -975,6 +1030,7 @@ def test_the_measure_tool_is_off_in_reflow(qapp, win, view):
     qapp.processEvents()
 
     assert win.act_measure.isEnabled() is False
+    assert win.act_measure_calibrate.isEnabled() is False
     assert view.tool_mode != "measure"
 
 
@@ -1109,3 +1165,220 @@ def test_a_measurement_lands_under_a_turned_view(qapp, win, view):
     near_points(made[0].points, [(50.0, 50.0), (150.0, 50.0)])
     same_scale(made[0].scale, CM)
     view.set_rotation(0)
+
+
+# ------------------------------------------------- calibration from a length
+def test_calibrating_sets_the_scale_from_a_dragged_line(qapp, win, view,
+                                                        monkeypatch):
+    monkeypatch.setattr(QInputDialog, "getText",
+                        staticmethod(lambda *a, **k: ("250 mm", True)))
+
+    win.act_measure_calibrate.trigger()
+    qapp.processEvents()
+    assert view._measure_calibration is True
+    assert view.tool_mode == "measure"
+
+    drag_len = drag_measured(view, 0, [(50.0, 50.0), (150.0, 50.0)])
+
+    scale = MeasurementScale(250.0 / drag_len, "mm", 2)
+    assert view._measure_calibration is False
+    same_scale(win._measure_scale, scale)
+    same_scale(view.measure_scale, scale)
+    assert f"1 pt = {scale.units_per_point:g} mm" in win.act_measure.toolTip()
+    assert made_measurements(view) == []
+    assert view.annotation_manager.session.dirty is False
+    assert len(view.annotation_manager.session.history) == 0
+
+
+def test_the_calibration_asks_with_the_length_in_the_current_scale(
+        qapp, win, view, monkeypatch):
+    asked = []
+
+    def fake_dialog(*args, **kwargs):
+        asked.append(kwargs.get("text"))
+        return ("250 mm", True)
+
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(fake_dialog))
+    win._measure_scale_actions["Centimetres"].trigger()
+    qapp.processEvents()
+    win.act_measure_calibrate.trigger()
+    qapp.processEvents()
+
+    drag_len = drag_measured(view, 0, [(50.0, 50.0), (150.0, 50.0)])
+
+    assert asked == [CM.reading(drag_len)]
+    assert view.measure_scale.units_per_point == pytest.approx(
+        250.0 / drag_len)
+
+
+def test_the_calibration_preview_marks_the_line(qapp, win, view, monkeypatch):
+    monkeypatch.setattr(QInputDialog, "getText",
+                        staticmethod(lambda *a, **k: ("", False)))
+    win.act_measure_calibrate.trigger()
+    qapp.processEvents()
+    press(view, widget_pos_for(view, 0, 50.0, 50.0))
+    move(view, widget_pos_for(view, 0, 150.0, 50.0))
+
+    assert view._measure_drag["kind"] == "calibrate"
+    assert not view.viewport().grab().isNull()
+
+    release(view, widget_pos_for(view, 0, 150.0, 50.0))
+    assert view._measure_calibration is False
+
+
+def test_a_calibration_click_keeps_waiting_for_a_line(qapp, win, view,
+                                                      monkeypatch):
+    asked = []
+    monkeypatch.setattr(
+        QInputDialog, "getText",
+        staticmethod(lambda *a, **k: asked.append(True) or ("250 mm", True)))
+    win.act_measure_calibrate.trigger()
+    qapp.processEvents()
+
+    click(view, widget_pos_for(view, 0, 100.0, 50.0))
+
+    assert view._measure_calibration is True
+    assert view._measure_drag is None
+    assert asked == []
+
+    drag_len = drag_measured(view, 0, [(50.0, 50.0), (150.0, 50.0)])
+
+    assert asked == [True]
+    assert view.measure_scale.units_per_point == pytest.approx(
+        250.0 / drag_len)
+
+
+def test_cancelling_the_calibration_keeps_the_old_scale(qapp, win, view,
+                                                        monkeypatch):
+    win._measure_scale_actions["Inches"].trigger()
+    qapp.processEvents()
+    monkeypatch.setattr(QInputDialog, "getText",
+                        staticmethod(lambda *a, **k: ("", False)))
+
+    win.act_measure_calibrate.trigger()
+    qapp.processEvents()
+    drag(view, 0, [(50.0, 50.0), (150.0, 50.0)])
+
+    assert win._measure_scale == INCHES
+    assert view.measure_scale == INCHES
+    assert view._measure_calibration is False
+    assert made_measurements(view) == []
+
+
+@pytest.mark.parametrize("answer,fragment", [
+    ("0 mm", "positive number"),
+    ("", "number and a unit"),
+])
+def test_a_bad_calibration_length_is_refused(qapp, win, view, monkeypatch,
+                                             answer, fragment):
+    win._measure_scale_actions["Points"].trigger()
+    qapp.processEvents()
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning",
+                        staticmethod(lambda *a, **k: warnings.append(a[2])
+                                     or QMessageBox.StandardButton.Ok))
+    monkeypatch.setattr(QInputDialog, "getText",
+                        staticmethod(lambda *a, **k: (answer, True)))
+
+    win.act_measure_calibrate.trigger()
+    qapp.processEvents()
+    drag(view, 0, [(50.0, 50.0), (150.0, 50.0)])
+
+    assert win._measure_scale == POINTS
+    assert view.measure_scale == POINTS
+    assert warnings and fragment in warnings[-1]
+    assert made_measurements(view) == []
+
+
+def test_escape_ends_a_pending_calibration(qapp, win, view):
+    win.act_measure_calibrate.trigger()
+    qapp.processEvents()
+    press(view, widget_pos_for(view, 0, 50.0, 50.0))
+    move(view, widget_pos_for(view, 0, 150.0, 50.0))
+    assert view._measure_drag is not None
+
+    QTest.keyClick(view.viewport(), Qt.Key.Key_Escape)
+
+    assert view._measure_drag is None
+    assert view._measure_calibration is False
+    release(view, widget_pos_for(view, 0, 150.0, 50.0))
+    assert made_measurements(view) == []
+
+
+def test_choosing_another_measure_scale_ends_a_calibration(qapp, win, view):
+    win.act_measure_calibrate.trigger()
+    qapp.processEvents()
+    assert view._measure_calibration is True
+
+    win._measure_scale_actions["Points"].trigger()
+    qapp.processEvents()
+
+    assert view._measure_calibration is False
+    assert view.measure_scale == POINTS
+
+
+def test_choosing_the_plain_measure_ends_a_calibration(qapp, win, view):
+    win.act_measure_calibrate.trigger()
+    qapp.processEvents()
+
+    win.act_measure.trigger()
+    qapp.processEvents()
+
+    assert view._measure_calibration is False
+
+
+def test_leaving_the_measure_tool_ends_a_calibration(qapp, win, view):
+    win.act_measure_calibrate.trigger()
+    qapp.processEvents()
+
+    win.act_explore.trigger()
+    qapp.processEvents()
+
+    assert view._measure_calibration is False
+    assert view.tool_mode == "browse"
+
+
+def test_a_calibration_lands_under_a_turned_view(qapp, win, view, monkeypatch):
+    monkeypatch.setattr(QInputDialog, "getText",
+                        staticmethod(lambda *a, **k: ("250 mm", True)))
+    view.set_rotation(90)
+    qapp.processEvents()
+    win.act_measure_calibrate.trigger()
+    qapp.processEvents()
+
+    drag_len = drag_measured(view, 0, [(50.0, 50.0), (150.0, 50.0)])
+
+    assert view.measure_scale.units_per_point == pytest.approx(
+        250.0 / drag_len)
+    assert view.measure_scale.unit == "mm"
+    view.set_rotation(0)
+
+
+def test_each_tab_keeps_its_calibrated_scale(qapp, win, tmp_path,
+                                             monkeypatch):
+    first = str(build_sample_pdf(tmp_path / "first.pdf", pages=1,
+                                 width=200, height=100))
+    second = str(build_sample_pdf(tmp_path / "second.pdf", pages=1,
+                                  width=200, height=100))
+    monkeypatch.setattr(QInputDialog, "getText",
+                        staticmethod(lambda *a, **k: ("250 mm", True)))
+    assert win.open_document(first)
+    win.act_measure_calibrate.trigger()
+    qapp.processEvents()
+    drag_len = drag_measured(win.view, 0, [(50.0, 50.0), (150.0, 50.0)])
+    view_a = win.view
+    assert view_a.measure_scale.units_per_point == pytest.approx(
+        250.0 / drag_len)
+
+    assert win.open_document(second)
+    qapp.processEvents()
+    view_b = win.view
+    assert view_b.measure_scale == MEASURE_DEFAULT_SCALE
+
+    win.tabs.setCurrentIndex(0)
+    qapp.processEvents()
+    assert win.view is view_a
+    assert view_a.measure_scale.units_per_point == pytest.approx(
+        250.0 / drag_len)
+    assert f"1 pt = {view_a.measure_scale.units_per_point:g} mm" in \
+        win.measure_split.toolTip()
