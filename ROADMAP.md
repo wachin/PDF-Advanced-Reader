@@ -903,8 +903,9 @@ shape tool (F10-3l/3m), the standard rubber stamps with their tool
 (F10-3n), custom caption/image stamps (F10-3o), measurement annotations
 with a chosen scale (F10-3p), perimeter/area measurements (F10-3q),
 calibration from a line of known length (F10-3r), self-contained
-appearance streams on every mark a save writes (F10-3s) and XFDF export of
-the document's comments (F10-3t) done.
+appearance streams on every mark a save writes (F10-3s), XFDF export of
+the document's comments (F10-3t) and the reader that turns another program's
+XFDF into a plan of edits (F10-3u) done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1354,12 +1355,25 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       `<fields/>`, no timestamp: the same document writes the same file.)
 - [ ] XFDF import: another reader's comments as marks in the document, as one
       undoable edit that refuses the file or takes all of it
+      (**F10-3u** has landed the reading: `parse_xfdf(text, page_anchors(doc),
+      taken)` returns an `ImportPlan` of ready-to-apply `Add*` edits and the list
+      of marks it left out, each with the reason the user will be shown. It stays
+      unchecked until the plan becomes one undoable `Scope.COMMENTS` edit
+      (F10-3v) and a menu command reaches it (F10-3w) — a parser no user can
+      invoke is not yet the feature.)
 - [ ] The File-menu commands that reach the two halves
 - [ ] Marks that arrive without a name of their own are listed as **one** mark
       (found by F10-3t: PyMuPDF writes `/NM (fitz-A0)` for every annotation it
       adds without a name, and the counter restarts per page, so a document made
       by another PyMuPDF-based program carries the same name on every page and
       the id-keyed list keeps one of 540. See the report.)
+- [ ] A square or a circle grows **1 pt on every side** each time it is read back
+      (found by F10-3u: MuPDF writes a shape's `/Rect` a point larger than the box
+      it was given, whatever `/BS /W` says, so the box an export states is a point
+      wider than the box the mark was drawn into and an import takes the file's
+      word for it. Two cycles measured: every other kind returns to the numbers it
+      left with. The fix belongs to the shape model or its appearance, not to
+      XFDF — subtracting a MuPDF constant would misread every other reader's file.)
 
 ## F10-4 Page manipulation (was F6) — [ ]
 
@@ -1488,11 +1502,13 @@ annotations with the square-unit format their reading needs (F10-3q), and a
 reference line of known length sets the scale instead of a typed factor
 (F10-3r); a save now gives every annotation in the file, including marks
 another program left without one, the appearance stream that lets any reader
-paint it (F10-3s); and the document's comments write out as XFDF, in the
+paint it (F10-3s); the document's comments write out as XFDF, in the
 file's own coordinates and with the scale a measurement was taken at
-(F10-3t).
-Next, in order: XFDF import, then the File-menu commands that reach both
-halves.
+(F10-3t); and another program's XFDF reads back as a plan of the edits that
+would put its marks on the page, refusing the file or naming every mark it
+left out (F10-3u).
+Next, in order: applying that plan as one undoable edit (F10-3v), then the
+File-menu commands that reach both halves (F10-3w).
 
 Goal:
 
@@ -3801,6 +3817,137 @@ no model for; page-number labels and `page` attributes in the `/Pages`-relative
 form Adobe's own writers sometimes emit (PDFAR addresses a page by index, which is
 what the format's `page` attribute carries); XFA and form fields, which are not
 comments; and the identity fix the finding above asks for.
+
+---
+
+### F10-3u XFDF import: another reader's file becomes a plan of edits — [x] Implemented
+
+**Completed**: 2026-10-28
+
+**What landed**: the reading half of `src/pdfar/xfdf.py` —
+`parse_xfdf(text, anchors, taken)` and `page_anchors(doc)` — and
+`tests/test_xfdf_import.py` (new). A file of text goes in; an `ImportPlan` of
+ready-to-apply `Add*` edits comes out, together with the marks that were left out
+and the reason beside each. **Nothing here opens a PDF or changes one**: the
+function is pure, the page anchors are handed to it, and the names the document
+already holds are handed to it, so the decision about what an import would do is
+separable from the decision to do it. That separation is why the roadmap's XFDF
+import item stays open: applying the plan as one undoable edit is F10-3v, and the
+menu that reaches it is F10-3w.
+
+**Two errors, because a file can fail in two places.** `XfdfError` refuses the
+whole document — it is not XML, it is not XFDF, its root is somebody else's
+namespace, it is too big or built in a way no reader should attempt — and nothing
+is applied. `_Skip` refuses *one element*, and the plan carries on without it and
+says so: `"13 marks, 7 not taken"`, each with a label and a reason a dialog can
+show. The difference matters because the second is the common case: a file from
+another program contains marks PDFAR has no model for, and a reader that throws
+them all away for that reason teaches the user nothing about their own comments.
+
+**The bounds are checked before anything is parsed**, against the raw text: 32 MB
+of characters, no `<!DOCTYPE` or `<!ENTITY` at all, at most 200 000 elements, no
+nesting past 24 levels, and at most 10 000 marks in a plan. Counting tags as text
+is deliberate — the scan decides nothing about what an element *means*, so a file
+built to exhaust a reader is refused rather than attempted. What it refuses is the
+one thing Python's own XML reader cannot be blamed for missing: an external entity
+it would fetch, and an internal one that expands until the machine stops. The
+parse itself is left to that reader, which fetches nothing outside the document
+and refuses an entity no definition inside it provides.
+
+**The coordinates are the export's rule run backwards**, through the same
+function: `page_anchors` calls the `_anchor` that F10-3t wrote, so the crop box a
+mark was measured from on the way out is the crop box it is measured back against
+on the way in, and a round trip cannot move a mark. Checked on a page whose
+`CropBox` starts at (36, 36) and whose `MediaBox` starts at (10, 20) — the numbers
+come back where they went out, which is the claim the shared anchor makes and not
+something either half could prove alone.
+
+**The edits' own validators do the accepting.** `_clean_shape`,
+`_checked_measurement_points` and `checked_measure_scale` are called at parse
+time, so a mark whose geometry the edit would refuse is left out of the plan with
+the edit's own words as the reason, and every edit in a plan is an edit that
+works. That is what makes F10-3v's job small: it applies a list and cannot be
+partway through a failure.
+
+**Identity, because a name is an identity.** A `/NM` is written into the file as a
+PDF literal string by `_name()`, which escapes nothing, so an importable name is
+one whose characters that string can hold — `[A-Za-z0-9._:-]`, at most 128 of them
+— and anything else gets a UUID of PDFAR's own. A name the document already holds
+claims no new mark, and a name the file repeats claims nothing the second time:
+the first copy wins. That is what makes *importing the same file twice be
+importing it once*, which is the property a user who clicks the menu item twice
+deserves.
+
+**Nothing is invented.** An open `polyline` is not closed into a polygon — closing
+it would draw the edge the file did not. A `Custom` stamp is taken as a caption
+when it carries one and refused when its picture is the whole mark, because
+redrawing a picture as text is a different comment. A measurement whose scale is
+not in PDFAR's namespace becomes a plain line: the geometry is the file's and is
+taken, the number is not the file's and is not printed. A note's `icon` and a
+mark's `intent`, `subject`, `popup` and `<template>` are ignored, because they
+say how to label a mark rather than what to draw. A `<contents>` that merely
+repeats the reading the dimension computes is not stored as a note on top of it.
+Three-digit colours expand, `opacity` outside 0…1 is no opacity, and a colour the
+file never states stays PDFAR's default instead of becoming black by accident.
+
+**Found by the hand-written file: a gesture that holds its points in an
+attribute.** Adobe's own example writes an ink stroke's numbers as the
+`<gesture>` element's *content*, which is what PDFAR writes; a file that puts them
+in the `vertices` attribute the format uses for a polygon says the same drawing in
+another punctuation. Both are read now — losing a sketch over how its pen was
+lifted is the worse reading. (The same check is what found the 1 pt growth of a
+square's and a circle's `/Rect`, recorded above as a task of its own: the box the
+file states is a point wider on each side than the box PDFAR drew, MuPDF's doing
+whatever `/BS /W` says, and the import believes the file.)
+
+**Files changed**: `src/pdfar/xfdf.py`, `tests/test_xfdf_import.py` (new),
+`ROADMAP.md`, `docs/pdfcraft-editing-analysis.md`.
+
+**Verified by eye**: a **foreign** file — twenty elements over the four pages of a
+plain Letter document, every number written by hand in the file's own space
+measured *up* from the bottom-left, none of it produced by PDFAR's export — was
+read, applied and saved, and the result was rendered by **Poppler**
+(`pdftoppm`, `/tmp/f103u/visual/sheet-*.png`). The highlight lay on the second
+line; the two sticky notes sat at the top of the right margin; the dimension
+spanned the fifth line and read `750.00 cm` at the 2.5 cm/pt the namespace
+carried; the green two-stroke sketch and the brown single stroke — the first
+written Adobe's way, the second in the attribute form — lay across the text; the
+red rectangle and the blue ellipse filled their boxes; the arrow ran from
+(60, 100) to (300, 220) with its open head at the far end; the teal polygon held
+its four vertices; `APPROVED` sat centred on the rect that named it and
+`Verified by import` above it; the area triangle read `3.658 m²`. The seven
+refusals each said which element and why: the name the document already held, the
+`strikeout`, the open `polyline`, the `freetext`, the page the document does not
+have, the five-number `coords`, the `Paste` stamp.
+
+**Tests**: 973 passed, three consecutive full runs. `tests/test_xfdf_import.py`
+adds 52 cases, most of them on hand-written files rather than on PDFAR's own
+output — the point of an exchange is that the other reader is not you. The
+envelope (not XML, not XFDF, a foreign namespace, an empty file that is valid);
+the four bounds and the mark ceiling; the numbers (the offset crop box round
+trip, `coords` becoming one box per line, the `rect`-only fallback, malformed and
+non-numeric lists, a 3-digit colour, an out-of-range opacity leaving the default);
+every kind in both directions it can arrive in; the refusals and their exact
+reasons; identity (a held name, a repeated name, importing twice, an unnameable
+mark becoming a UUID, three nameless marks being three marks); pages out of range
+in four spellings; a plan that counts what it left out and labels it; that
+reading a file changes nothing; and one case that reads thirteen marks of every
+kind PDFAR draws, applies every edit in the plan, re-reads the pages and finds
+exactly what the plan asked for.
+
+**Performance**: about **20–28 µs per mark** — 1 000 marks on one page in
+28–47 ms, 10 000 (the ceiling) in 200 ms, 1 620 marks spread over 540 pages in
+39 ms. The per-page anchor lookup is outside the parse and costs **57–78 ms** for
+the whole 540-page GS262 book, once per import; that book with one mark on every
+page reads in **10 ms**. An import is therefore the same order as the export
+F10-3t measured, and both are dominated by the document work that follows.
+
+**What is not here**: applying the plan (F10-3v) and the menu commands that would
+reach either half (F10-3w), so no user action can yet produce or consume an XFDF
+file; FDF and the `<f href>` form of an exchange, where the comments live in
+another file; `<fields>` and anything to do with form values; page labels; XFA;
+`<trails>`, `<popup>` geometry, `MK`/`RA` and the rest of the vocabulary PDFAR has
+no model for; and the two identity and geometry findings recorded above.
 
 ---
 

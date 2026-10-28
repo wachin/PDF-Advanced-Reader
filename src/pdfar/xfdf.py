@@ -5,7 +5,8 @@ does not change one: it is the list of marks — where each sits, what it looks
 like, what it says — so another reader's comment system can be given PDFAR's
 marks and PDFAR can be given another reader's.
 
-This module writes it.  Three rules decide every value in the output.
+This module writes it, and reads it back.  Three rules decide every value that
+goes out, and a fourth says what may come in.
 
 **The numbers are the file's, not the view's.**  An element's ``rect`` is the
 annotation's ``/Rect``, measured upwards from the bottom-left of the page's media
@@ -31,23 +32,42 @@ namespace may trust the number.  An image stamp is the case that cannot travel �
 its mark is a picture, not a name — so it goes out as a stamp carrying its note,
 and the caption of a text stamp goes out as its note for the same reason: the
 appearance is the thing an exchange file has no place for.
+
+**A file is read as a plan, never as a document.**  Nothing here opens a PDF or
+changes one: :func:`parse_xfdf` turns the text into the edits that would put its
+marks on the page, against page anchors handed in and the names the document
+already holds.  A file that is not XFDF, is too big or is built in a way no reader
+should attempt is refused entire, before anything is applied; a mark inside it
+that PDFAR cannot describe is left out and counted, because another reader's
+comments are not required to be only the kinds this one has words for.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Sequence, Tuple
+import re
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from uuid import uuid4
 
 try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
 except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 
-from .annotations import (ANNOT_READ_ERRORS, CUSTOM_STAMP_NAME, Annotation,
+from .annotations import (ANNOT_READ_ERRORS, CUSTOM_STAMP_NAME,
+                          MEASURE_KINDS, STAMP_VALUES,
+                          AddCustomStamp, AddHighlight, AddInk, AddMeasurement,
+                          AddNote, AddShape, AddStamp, Annotation,
                           AnnotationManager, HighlightAnnotation,
-                          InkAnnotation, MEASURE_INTENTS, MEASURE_KIND_LABELS,
-                          MeasurementAnnotation, NoteAnnotation,
-                          ShapeAnnotation, StampAnnotation)
+                          HighlightSpec, InkAnnotation, MEASURE_INTENTS,
+                          MEASURE_KIND_LABELS, MeasurementAnnotation,
+                          MeasurementScale, NoteAnnotation, ShapeAnnotation,
+                          StampAnnotation, _checked_measurement_points,
+                          _clean_shape, checked_measure_scale,
+                          measurement_reading)
+from .edits import Edit, EditError
 
 #: XFDF's own namespace; a file without it is not XFDF.
 XFDF_NAMESPACE = "http://ns.adobe.com/xfdf/"
@@ -470,3 +490,711 @@ def export_xfdf(manager: AnnotationManager) -> str:
              ' xml:space="preserve">',
              "<annots>", *elements, "</annots>", "</xfdf>"]
     return "\n".join(lines) + "\n"
+
+
+# ==================================================================== reading
+# -------------------------------------------------------------------- bounds
+#: How much text PDFAR will read.  The count happens before the parse because a
+#: parser is the worst place to find out that a file is not what it said; here the
+#: characters are still only characters.
+MAX_INPUT_CHARS = 32_000_000
+
+#: How deep tags may nest and how many of them a file may hold.  Twenty-four
+#: levels is far above the four a real XFDF uses — ``xfdf``, ``annots``, a mark,
+#: its ``contents`` — and both numbers are checked against the raw text, so a file
+#: built to exhaust a reader is refused instead of attempted.
+MAX_DEPTH = 24
+MAX_ELEMENTS = 200_000
+
+#: Marks a file may carry.  An import is one edit, and a file that claims a
+#: hundred thousand of them is not a comment exchange about this document.
+MAX_MARKS = 10_000
+
+
+class XfdfError(Exception):
+    """A file PDFAR will not read at all, so none of it is applied.
+
+    Raised for a file that is not XFDF, is too big, or is built in a way a reader
+    should not attempt.  A mark that merely cannot be described is not this
+    error's business: it is left out and counted.
+    """
+
+
+class _Skip(Exception):
+    """This element does not become a mark.
+
+    Carries the reason the user is shown beside the element's own description, so
+    "3 marks not taken" can also say which three and why.
+    """
+
+
+_TAG = re.compile(r"<[^>]*", re.S)
+_BANNED = re.compile(r"<!\s*(doctype|entity)", re.I)
+_SEPARATOR = re.compile(r"[,;\s]+")
+_HEX = re.compile(r"#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{3})")
+_NAME = re.compile(r"[A-Za-z0-9._:-]+")
+
+#: The shape elements and the kind PDFAR draws each as.  ``polyline`` is not in
+#: the table because an open path is none of PDFAR's five shapes: closing it would
+#: invent the edge the file did not draw, and leaving it open needs a shape kind
+#: the model does not have.
+_SHAPE_KINDS = {"square": "rect", "circle": "ellipse", "line": "line",
+                "polygon": "polygon"}
+
+
+def _guard(text: str) -> None:
+    """Refuse a file that is too big, too deep, or carries definitions.
+
+    A bound rather than a parse: tags are counted as they are found without
+    deciding what they mean — an instruction or a comment is neither opened nor
+    closed, a closing tag backs the count out, a self-closing tag does nothing.
+    What the scan exists for are the two things no reader should be allowed to
+    reach.  A document type declaration can define an entity that expands until
+    the machine stops, and a nesting depth past what the format uses kills a
+    parser that recurses through it rather than reporting the file.
+
+    The parse itself is left to Python's XML reader, which fetches nothing outside
+    the document and refuses an entity no definition inside it provides; that is
+    why the definitions are what this function denies, and why a file whose marks
+    expand into each other never reaches a tree at all.
+    """
+    if len(text) > MAX_INPUT_CHARS:
+        raise XfdfError("That file is too large to read.")
+    if _BANNED.search(text):
+        raise XfdfError("That file declares document types or entities, "
+                        "which PDFAR does not read.")
+    depth = 0
+    elements = 0
+    for match in _TAG.finditer(text):
+        tag = match.group(0)[1:]
+        if tag.startswith(("?", "!")):
+            continue
+        if tag.startswith("/"):
+            depth -= 1
+            continue
+        elements += 1
+        if elements > MAX_ELEMENTS:
+            raise XfdfError("That file holds too many elements to read.")
+        if tag.endswith("/"):
+            continue
+        depth += 1
+        if depth > MAX_DEPTH:
+            raise XfdfError("That file nests its marks too deeply to read.")
+
+
+# -------------------------------------------------------------------- reading
+def _local(element: ET.Element) -> str:
+    """A tag without its namespace: ``{http://…xfdf/}highlight`` is a highlight.
+
+    A namespace qualifies a name, it does not change its meaning, and a file that
+    writes its marks inside the one XFDF defines should not be read differently
+    for doing it properly.
+    """
+    return element.tag.rpartition("}")[2]
+
+
+def _namespace(tag: str) -> str:
+    """The namespace a tag carries, or ``""`` for a file that declares none."""
+    head, brace, _rest = tag.partition("}")
+    return head[1:] if brace and head.startswith("{") else ""
+
+
+def _child(element: ET.Element, name: str) -> Optional[ET.Element]:
+    """The first child called *name*, whichever namespace it came in."""
+    for child in element:
+        if _local(child) == name:
+            return child
+    return None
+
+
+def _children(element: ET.Element, name: str) -> List[ET.Element]:
+    return [child for child in element if _local(child) == name]
+
+
+def _extension(element: ET.Element, name: str) -> str:
+    """One of PDFAR's own attributes, in PDFAR's own namespace only.
+
+    An unprefixed ``measure`` is some other vendor's attribute.  Trusting it would
+    be the mirror image of the mistake the export guards: it would read a number
+    as a scale when no namespace ever promised that it was one.
+    """
+    return (element.get(f"{{{PDFAR_NAMESPACE}}}{name}") or "").strip()
+
+
+def _split_numbers(text: str) -> Optional[List[float]]:
+    """The numbers in *text*, separated the way XFDF separates them.
+
+    ``None`` when a value in the list is not a number: one bad number makes the
+    geometry it belongs to meaningless, and a mark placed at a guess is a mark in
+    the wrong place.
+    """
+    values: List[float] = []
+    for part in _SEPARATOR.split(text.strip()):
+        if not part:
+            continue
+        try:
+            value = float(part)
+        except ValueError:
+            return None
+        if not math.isfinite(value):
+            return None
+        values.append(value)
+    return values or None
+
+
+def _list(element: ET.Element, name: str) -> Optional[List[float]]:
+    """A number list held in an attribute: ``rect``, ``coords``, ``start``."""
+    return _split_numbers(element.get(name) or "")
+
+
+def _number_in(text: Optional[str]) -> Optional[float]:
+    """One number, or ``None`` for anything that is not a finite one."""
+    try:
+        value = float((text or "").strip())
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _color(text: Optional[str]) -> str:
+    """A colour as the model holds it: ``#RRGGBB`` in upper case, or ``""``."""
+    match = _HEX.fullmatch((text or "").strip())
+    if match is None:
+        return ""
+    digits = match.group(1)
+    if len(digits) == 3:
+        digits = "".join(digit + digit for digit in digits)
+    return "#" + digits.upper()
+
+
+def _opacity(text: Optional[str]) -> Optional[float]:
+    """How solid a mark is — only for a file that says between nothing and all."""
+    value = _number_in(text)
+    return value if value is not None and 0.0 <= value <= 1.0 else None
+
+
+def _thickness(text: Optional[str]) -> Optional[float]:
+    """A line thickness, or ``None``: only a positive one draws anything."""
+    value = _number_in(text)
+    return value if value is not None and value > 0.0 else None
+
+
+def _contents_of(element: ET.Element) -> str:
+    """The note a mark carries, exactly as the file wrote it.
+
+    Not stripped and not folded: XFDF says the whitespace inside ``contents`` is
+    part of the text, which is why the export puts ``xml:space="preserve"`` on the
+    document, and a reader that honoured that deserves the same honour.
+    """
+    child = _child(element, "contents")
+    if child is None:
+        return ""
+    return child.text or ""
+
+
+# ------------------------------------------------------------------ geometry
+def _point_at(numbers: Optional[Sequence[float]], index: int,
+              anchor: Tuple[float, float]) -> Optional[tuple]:
+    """The *index*-th point of *numbers*, turned back into page space.
+
+    The export's flip is its own inverse: x measured from the crop box's left, y
+    counted down from the top edge the anchor names.  A point off the end of the
+    list is no point at all, which is how a truncated ``coords`` is refused.
+    """
+    if numbers is None or index + 1 >= len(numbers):
+        return None
+    return (numbers[index] - anchor[0], anchor[1] - numbers[index + 1])
+
+
+def _corner(a: tuple, b: tuple) -> tuple:
+    """Two opposite corners of a box, ordered the way the model orders them."""
+    return (min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1]))
+
+
+def _page_point(numbers: Optional[Sequence[float]],
+                anchor: Tuple[float, float]) -> Optional[tuple]:
+    """A lone ``x,y`` pair from the file as a page-space point."""
+    if numbers is None or len(numbers) != 2:
+        return None
+    return _point_at(numbers, 0, anchor)
+
+
+def _page_points(numbers: Optional[Sequence[float]],
+                 anchor: Tuple[float, float]) -> Optional[List[tuple]]:
+    """A whole list of ``x,y`` pairs as page-space points."""
+    if numbers is None or len(numbers) % 2:
+        return None
+    return [(x - anchor[0], anchor[1] - y)
+            for x, y in zip(numbers[0::2], numbers[1::2])]
+
+
+def _page_box(numbers: Optional[Sequence[float]],
+              anchor: Tuple[float, float]) -> Optional[tuple]:
+    """A ``rect`` from the file as a box in page space."""
+    if numbers is None or len(numbers) != 4:
+        return None
+    return _corner((numbers[0] - anchor[0], anchor[1] - numbers[1]),
+                   (numbers[2] - anchor[0], anchor[1] - numbers[3]))
+
+
+def _page_quads(numbers: Optional[Sequence[float]],
+                anchor: Tuple[float, float]) -> Optional[List[tuple]]:
+    """A ``coords`` list as one box per highlighted line.
+
+    Eight numbers to a quadrilateral, in the order the specification asks for —
+    upper left, upper right, lower left, lower right.  All four corners are boxed
+    instead of pairing two of them: what PDFAR stores for a selection is the
+    rectangle around it, a quad drawn skewed has no opposite corners to pair, and
+    the union is the box the export started from either way.
+    """
+    if numbers is None or len(numbers) % 8:
+        return None
+    boxes = []
+    for start in range(0, len(numbers), 8):
+        corners = [_point_at(numbers, start + offset, anchor)
+                   for offset in (0, 2, 4, 6)]
+        found = [corner for corner in corners if corner is not None]
+        if len(found) != 4:
+            return None
+        xs = [corner[0] for corner in found]
+        ys = [corner[1] for corner in found]
+        boxes.append((min(xs), min(ys), max(xs), max(ys)))
+    return boxes or None
+
+
+def _strokes(element: ET.Element) -> List[Optional[List[float]]]:
+    """The number lists of an ``ink`` mark's gestures.
+
+    Adobe writes the numbers as a ``gesture``'s content, and nests the gestures in
+    an ``inklist``; a file that hands them straight to the mark, or holds them in
+    the ``vertices`` attribute the format uses for a polygon elsewhere, says the
+    same drawing in a punctuation another writer chose.  Either is read, because
+    losing a sketch over how its pen was lifted is a worse reading than taking it.
+    """
+    found: List[ET.Element] = []
+    for child in element:
+        name = _local(child)
+        if name == "gesture":
+            found.append(child)
+        elif name == "inklist":
+            found.extend(_children(child, "gesture"))
+    lists = []
+    for gesture in found:
+        numbers = _split_numbers(gesture.text or "")
+        lists.append(numbers if numbers is not None
+                     else _list(gesture, "vertices"))
+    return lists
+
+
+def _ends_points(element: ET.Element,
+                 anchor: Tuple[float, float]) -> Optional[List[tuple]]:
+    """A ``line`` mark's two ends."""
+    start = _page_point(_list(element, "start"), anchor)
+    end = _page_point(_list(element, "end"), anchor)
+    return [start, end] if start is not None and end is not None else None
+
+
+# ------------------------------------------------------------------- identity
+def _claim(name: str, taken: Set[str]) -> Optional[str]:
+    """The ``/NM`` a mark may arrive with, or ``None`` if it may not arrive.
+
+    A name is an identity, and two marks with one name are one mark to PDFAR: the
+    panel lists them together and one delete takes both.  So a name the document
+    already holds claims no new mark, and a name a file repeats claims nothing the
+    second time either — the first copy wins, which is also what makes importing
+    the same file twice leave the document as the first import left it.
+
+    ``""`` says the mark has no usable name and gets an id of its own.  Usable
+    means the characters a PDF literal string can hold, because that is where the
+    id goes: :func:`pdfar.annotations._name` writes it between parentheses without
+    escaping, and a ``)`` in another reader's name would end the string and break
+    the object that holds every mark in the file.
+    """
+    if not name or len(name) > 128 or not _NAME.fullmatch(name):
+        return ""
+    if name in taken:
+        return None
+    taken.add(name)
+    return name
+
+
+@dataclass(frozen=True)
+class _Arrival:
+    """What every kind of mark has in common: where, who, what it says."""
+
+    page: int
+    name: str
+    author: str = ""
+    note: str = ""
+    color: str = ""
+    width: Optional[float] = None
+    opacity: Optional[float] = None
+
+
+class _Reader:
+    """The state a file is read against: the pages it may point at, the names taken."""
+
+    def __init__(self, anchors: Sequence[Optional[Tuple[float, float]]],
+                 taken: Iterable[str]):
+        self.anchors = list(anchors)
+        self.claimed: Set[str] = set(taken)
+
+    def anchor(self, element: ET.Element) -> Tuple[int, tuple]:
+        """The page a mark names, and the anchor that turns its numbers.
+
+        A page outside the document is not a mark, and neither is one this reader
+        cannot measure: putting a mark by a page whose crop box is unknown would
+        place it where the file did not say.
+        """
+        page = _number_in(element.get("page"))
+        if page is None or page != int(page):
+            raise _Skip("does not say which page it is on")
+        index = int(page)
+        if not 0 <= index < len(self.anchors):
+            raise _Skip("names a page this document does not have")
+        anchor = self.anchors[index]
+        if anchor is None:
+            raise _Skip("names a page this document cannot read")
+        return index, anchor
+
+
+def _arrival(reader: _Reader,
+             element: ET.Element) -> Tuple[_Arrival, tuple]:
+    """The attributes every mark shares, in the model's own shapes."""
+    page, anchor = reader.anchor(element)
+    name = _claim((element.get("name") or "").strip(), reader.claimed)
+    if name is None:
+        raise _Skip("carries a name the document already holds")
+    return (_Arrival(page=page,
+                     name=name or str(uuid4()),
+                     author=(element.get("title") or "").strip(),
+                     note=_contents_of(element),
+                     color=_color(element.get("color")),
+                     width=_thickness(element.get("width")),
+                     opacity=_opacity(element.get("opacity"))),
+            anchor)
+
+
+def _stroke_paint(arrival: _Arrival) -> Dict[str, Any]:
+    """Colour and thickness for a mark drawn with a pen.
+
+    Only what the file said is passed.  A mark the file describes without a colour
+    then arrives in the colour PDFAR's own tools use, which is honest about the one
+    thing the exchange did not state.
+    """
+    paint: Dict[str, Any] = {}
+    if arrival.color:
+        paint["color"] = arrival.color
+    if arrival.width is not None:
+        paint["width"] = arrival.width
+    return paint
+
+
+def _selection_paint(arrival: _Arrival) -> Dict[str, Any]:
+    """Colour and solidity for a mark laid over text."""
+    paint: Dict[str, Any] = {}
+    if arrival.color:
+        paint["color"] = arrival.color
+    if arrival.opacity is not None:
+        paint["opacity"] = arrival.opacity
+    return paint
+
+
+# ------------------------------------------------------------------- builders
+def _read_highlight(reader: _Reader, element: ET.Element) -> Edit:
+    arrival, anchor = _arrival(reader, element)
+    coords = _list(element, "coords")
+    if coords is None:
+        # A reader that wrote no quadrilaterals still said where the mark is, and
+        # the box it names is the best there is to work from: one line over the
+        # whole selection beats refusing a mark for geometry the file lacks.
+        box = _page_box(_list(element, "rect"), anchor)
+        boxes = [box] if box else []
+    else:
+        # Numbers that are there and do not add up to quads are not a file saying
+        # less: they are a file contradicting itself, and the box it also carries
+        # would merge every line of the selection into one mark wider than any of
+        # them.
+        boxes = _page_quads(coords, anchor) or []
+        if not boxes:
+            raise _Skip("writes its selection in pieces that do not make "
+                        "quadrilaterals")
+    if not boxes:
+        raise _Skip("does not say what it highlights")
+    return AddHighlight(
+        specs=(HighlightSpec(ann_id=arrival.name, page=arrival.page,
+                             rects=tuple(boxes)),),
+        author=arrival.author, note=arrival.note, **_selection_paint(arrival))
+
+
+def _read_note(reader: _Reader, element: ET.Element) -> Edit:
+    arrival, anchor = _arrival(reader, element)
+    box = _page_box(_list(element, "rect"), anchor)
+    if box is None:
+        raise _Skip("does not say where it sits")
+    # The icon is the mark and its top-left corner is where a click lands.  The
+    # file's ``icon`` is not read: PDFAR has one note shape, and another reader's
+    # preference for a key or a flag is not a different kind of comment.
+    return AddNote(ann_id=arrival.name, page=arrival.page,
+                   position=(box[0], box[1]), note=arrival.note,
+                   author=arrival.author)
+
+
+def _read_ink(reader: _Reader, element: ET.Element) -> Edit:
+    arrival, anchor = _arrival(reader, element)
+    strokes = []
+    for numbers in _strokes(element):
+        points = _page_points(numbers, anchor)
+        if points and len(points) > 1:
+            strokes.append(tuple(points))
+    if not strokes:
+        raise _Skip("has no stroke in it")
+    return AddInk(ann_id=arrival.name, page=arrival.page, paths=tuple(strokes),
+                  author=arrival.author, note=arrival.note,
+                  **_stroke_paint(arrival))
+
+
+def _read_shape(reader: _Reader, element: ET.Element) -> Edit:
+    """A ``square``, ``circle``, ``line`` or ``polygon`` as PDFAR draws it.
+
+    A box is taken the size the file states it, which for a square or a circle is
+    a point wider than the box PDFAR first drew: a shape's ``/Rect`` holds the room
+    its stroke needs, and a mark read back is measured from there.  Nothing is
+    subtracted for it, because that room is MuPDF's own and another reader's is
+    another matter — believing the file is the one rule that works for both.
+    """
+    arrival, anchor = _arrival(reader, element)
+    tag = _local(element)
+    box: Optional[tuple] = None
+    points: Tuple[tuple, ...] = ()
+    if tag == "line":
+        ends = _ends_points(element, anchor)
+        if ends is None:
+            raise _Skip("does not say where its ends are")
+        # Only the arrowhead PDFAR writes is read back as an arrow.  A mark with
+        # its head on the other end keeps its geometry and loses the decoration,
+        # because an arrowhead moved to the far end would point somewhere the
+        # file did not draw it.
+        kind = ("arrow" if (element.get("tail") or "").strip() == ARROW_TAIL
+                else "line")
+        points = tuple(ends)
+    elif tag in ("square", "circle"):
+        kind = _SHAPE_KINDS[tag]
+        box = _page_box(_list(element, "rect"), anchor)
+        if box is None:
+            raise _Skip("does not say where it sits")
+    else:
+        kind = "polygon"
+        vertices = _child(element, "vertices")
+        found = _page_points(_split_numbers(vertices.text or "")
+                             if vertices is not None else None, anchor)
+        if not found:
+            raise _Skip("does not say what it encloses")
+        points = tuple(found)
+    try:
+        geometry = _clean_shape(kind, box, points)
+    except EditError as exc:
+        raise _Skip(str(exc)) from None
+    if kind in ("rect", "ellipse"):
+        return AddShape(ann_id=arrival.name, page=arrival.page, kind=kind,
+                        rect=geometry, author=arrival.author,
+                        note=arrival.note, **_stroke_paint(arrival))
+    return AddShape(ann_id=arrival.name, page=arrival.page, kind=kind,
+                    points=geometry, author=arrival.author,
+                    note=arrival.note, **_stroke_paint(arrival))
+
+
+def _read_stamp(reader: _Reader, element: ET.Element) -> Edit:
+    """A stamp, taken by the appearance the file says it has.
+
+    The fourteen standard names arrive exactly: a reader draws ``Approved`` from
+    its own copy of the appearance, so the name is the whole mark.  ``Custom`` is
+    PDFAR's own, whose picture did not travel — what comes back is the word the
+    export carried, stamped again.  Anything else is another reader's art, and a
+    box of the wrong shape would claim to be it.
+    """
+    arrival, anchor = _arrival(reader, element)
+    box = _page_box(_list(element, "rect"), anchor)
+    if box is None:
+        raise _Skip("does not say where it sits")
+    # Where the mark sits is read as where it was clicked: its size is PDFAR's
+    # own, since the appearance the file describes is not in the exchange.
+    center = ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
+    icon = (element.get("icon") or "").strip()
+    if icon in STAMP_VALUES:
+        return AddStamp(ann_id=arrival.name, page=arrival.page, name=icon,
+                        center=center, author=arrival.author,
+                        note=arrival.note)
+    if icon == CUSTOM_STAMP_NAME:
+        if not arrival.note:
+            raise _Skip("is a stamp whose picture cannot travel")
+        return AddCustomStamp(ann_id=arrival.name, page=arrival.page,
+                              caption=arrival.note, center=center,
+                              author=arrival.author)
+    raise _Skip(f"is a “{icon or 'unnamed'}” stamp, "
+                "which is not one PDFAR draws")
+
+
+def _scale_of(element: ET.Element) -> MeasurementScale:
+    """The scale in PDFAR's own attributes, or a mark that is not a measurement.
+
+    XFDF has no word for the ``/Measure`` dictionary, which is why the export
+    invented these three attributes.  A file with the geometry and not the scale
+    cannot be given a number, and printing one from PDFAR's default would tell the
+    user a distance that no reader ever stated.
+    """
+    factor = _number_in(_extension(element, "scale") or None)
+    unit = _extension(element, "unit")
+    precision = _extension(element, "precision")
+    if factor is None or not unit or not precision.isdigit():
+        raise _Skip("is a measurement whose scale the file does not carry")
+    return MeasurementScale(factor, unit, int(precision))
+
+
+def _read_measurement(reader: _Reader, element: ET.Element,
+                      kind: str) -> Edit:
+    """A dimension, with the scale that makes its number mean something."""
+    if MEASURE_TAGS.get(kind) != _local(element):
+        raise _Skip("measures a shape PDFAR does not measure that way")
+    arrival, anchor = _arrival(reader, element)
+    if kind == "distance":
+        points = _ends_points(element, anchor)
+    else:
+        vertices = _child(element, "vertices")
+        points = _page_points(_split_numbers(vertices.text or "")
+                              if vertices is not None else None, anchor)
+    if not points:
+        raise _Skip("does not say what it measures")
+    scale = _scale_of(element)
+    try:
+        checked = _checked_measurement_points(kind, points)
+        scale = checked_measure_scale(scale)
+    except EditError as exc:
+        raise _Skip(str(exc)) from None
+    # A caption copied out of the geometry says nothing the edit will not write
+    # again, so it is dropped and the mark's own reading stands: that is how a
+    # measure comes back with the number it went out with, and still reads
+    # correctly after the user drags one of its points.
+    note = arrival.note
+    if note == measurement_reading(kind, checked, scale):
+        note = ""
+    return AddMeasurement(ann_id=arrival.name, page=arrival.page,
+                          points=tuple(checked), kind=kind,
+                          units_per_point=scale.units_per_point,
+                          unit=scale.unit, precision=scale.precision,
+                          author=arrival.author, note=note,
+                          **_stroke_paint(arrival))
+
+
+def _build(reader: _Reader, element: ET.Element) -> Edit:
+    """One element as the edit that would put its mark on the page."""
+    tag = _local(element)
+    kind = _extension(element, "measure")
+    if kind:
+        if kind not in MEASURE_KINDS:
+            raise _Skip(f"is measured as “{kind}”, which PDFAR does not measure")
+        return _read_measurement(reader, element, kind)
+    if tag == "highlight":
+        return _read_highlight(reader, element)
+    if tag == "text":
+        return _read_note(reader, element)
+    if tag == "ink":
+        return _read_ink(reader, element)
+    if tag == "stamp":
+        return _read_stamp(reader, element)
+    if tag == "polyline":
+        raise _Skip("draws an open path, which PDFAR has no shape for")
+    if tag in _SHAPE_KINDS:
+        return _read_shape(reader, element)
+    raise _Skip("is not a kind of mark PDFAR can draw")
+
+
+def _describe(tag: str, element: ET.Element) -> str:
+    """How a mark that was not taken is pointed out."""
+    page = _number_in(element.get("page"))
+    if page is None or page != int(page):
+        return tag
+    return f"{tag} on page {int(page) + 1}"
+
+
+# ---------------------------------------------------------------------- plan
+@dataclass(frozen=True)
+class ImportPlan:
+    """The edits a file asks for, and the marks it could not deliver.
+
+    Nothing here has touched a document: the plan is the whole of the decision, so
+    the code that applies it (F10-3v) has nothing left to interpret and nothing to
+    refuse for.
+    """
+
+    edits: Tuple[Edit, ...] = ()
+    skipped: Tuple[Tuple[str, str], ...] = ()
+
+    @property
+    def count(self) -> int:
+        return len(self.edits)
+
+    def summary(self) -> str:
+        """What the file gave, and what it did not, for the user to be told."""
+        taken = f"{self.count} mark" + ("" if self.count == 1 else "s")
+        if not self.skipped:
+            return taken
+        return f"{taken}, {len(self.skipped)} not taken"
+
+
+def page_anchors(doc: fitz.Document) -> List[Optional[Tuple[float, float]]]:
+    """Where each page's numbers begin, by the rule the export uses.
+
+    One entry per page, ``None`` for a page that cannot be read.  Import and
+    export have to flip the y axis through the same line or a mark that goes out
+    and comes back has moved, so the anchor is not worked out a second time: this
+    is :func:`_anchor` over every page of the document.
+    """
+    cache: Dict[int, Optional[Tuple[float, float]]] = {}
+    return [_anchor(doc, index, cache) for index in range(doc.page_count)]
+
+
+def parse_xfdf(text: str, anchors: Sequence[Optional[Tuple[float, float]]],
+               taken: Iterable[str] = ()) -> ImportPlan:
+    """An XFDF file as the edits that would put its marks on the page.
+
+    A pure function of the text, the per-page anchors and the names the document
+    already holds: no document is opened, no annotation is read, nothing is
+    written.  Every number is turned into page space here, every value PDFAR
+    cannot store is refused or left out here, and what comes back can be judged
+    before a page changes under it.
+
+    :class:`XfdfError` is the whole of the refusal — a file that is not XFDF, is
+    too big, or is built in a way no reader should attempt, none of it applied.
+    Everything else is read one element at a time, and an element that cannot
+    become a mark is left out with a reason rather than condemning the file: a
+    document type PDFAR does not model is somebody else's comment, not a corrupt
+    byte.  Marks the file repeats, or names a mark the document already has, are
+    left out too, so an import twice is the import once.
+    """
+    _guard(text)
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as exc:
+        raise XfdfError(f"That file is not XML PDFAR can read: {exc}") from exc
+    if _local(root) != "xfdf":
+        raise XfdfError("That file has no xfdf element, so it is not XFDF.")
+    namespace = _namespace(root.tag)
+    if namespace and namespace != XFDF_NAMESPACE:
+        raise XfdfError("That file is not XFDF: it says otherwise in its "
+                        f"namespace, “{namespace}”.")
+    annots = _child(root, "annots")
+    if annots is None:
+        return ImportPlan()
+    reader = _Reader(anchors, taken)
+    edits: List[Edit] = []
+    skipped: List[Tuple[str, str]] = []
+    for element in annots:
+        if len(edits) >= MAX_MARKS:
+            raise XfdfError("That file carries more marks than PDFAR will take "
+                            "in one edit.")
+        try:
+            edits.append(_build(reader, element))
+        except _Skip as skip:
+            skipped.append((_describe(_local(element), element), str(skip)))
+    return ImportPlan(edits=tuple(edits), skipped=tuple(skipped))
