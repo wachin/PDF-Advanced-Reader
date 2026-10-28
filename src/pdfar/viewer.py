@@ -216,18 +216,13 @@ class PDFView(QAbstractScrollArea):
         self.session = DocumentSession(doc, doc_path, password, authenticated)
         self._invalidated_version = self.session.version
 
-        self.page_count = doc.page_count
-        self.page_sizes: List[Tuple[float, float]] = []
-        for i in range(self.page_count):
-            r = doc[i].rect
-            self.page_sizes.append((r.width, r.height))
-
         self.zoom = 1.0
         self.zoom_step = 0.10           # additive step for buttons / shortcuts
         self.ctrl_wheel_step = True     # Ctrl+wheel uses zoom_step, not fluid zoom
         self.rotation = 0
         self.fit_mode = "none"          # 'none' | 'width' | 'page'
         self.current_page = 0
+        self._measure_pages(doc)
         self.memory_level = DEFAULT_MEMORY_LEVEL
         self.dark_mode = False
         self._numbering_preview: Optional[
@@ -468,13 +463,43 @@ class PDFView(QAbstractScrollArea):
     _PAINTED = Scope.STRUCTURE | Scope.CONTENT | Scope.COMMENTS | Scope.FORM
     _STALE_TEXT = Scope.STRUCTURE | Scope.CONTENT
 
-    def _refresh_page_geometry(self) -> None:
-        """Re-derive the page count and page sizes from the live document."""
-        self.page_count = self.doc.page_count
-        self.page_sizes = [(self.doc[i].rect.width, self.doc[i].rect.height)
-                           for i in range(self.page_count)]
+    def _measure_pages(self, doc: fitz.Document) -> None:
+        """Re-read the page count, both page sizes and each page's own turn.
+
+        ``page_sizes`` is the page as it is *painted* — MuPDF applies the page's
+        ``/Rotate`` before it hands over a bitmap, so a landscape sheet stored
+        upright is measured as it lies on the screen.  ``_sheet_sizes`` is the
+        same page on the sheet, before that turn, and is the space the file's own
+        numbers are counted in.
+        """
+        self.page_count = doc.page_count
+        self.page_sizes: List[Tuple[float, float]] = []
+        self._sheet_sizes: List[Tuple[float, float]] = []
+        self._sheet_turns: List[int] = []
+        for index in range(self.page_count):
+            page = doc[index]
+            self.page_sizes.append((page.rect.width, page.rect.height))
+            self._sheet_sizes.append((page.cropbox.width, page.cropbox.height))
+            self._sheet_turns.append(normalize_rotation(page.rotation))
         if self.current_page >= self.page_count:
             self.current_page = max(0, self.page_count - 1)
+
+    def _sheet_space(self, page: int) -> Tuple[float, float, int]:
+        """The size and the turn that put a number out of the file on the screen.
+
+        A mark's rectangle, a highlight's quad points and a word's box are all
+        counted on the sheet before it is turned — that is how PDF counts them and
+        how PyMuPDF reports them — while the picture the view paints is the sheet
+        after MuPDF's turn and the view's own.  One turn by the sum of the two puts
+        those numbers on the same pixels the two separate turns do, for every pair
+        of quarter turns.
+        """
+        w0, h0 = self._sheet_sizes[page]
+        return (w0, h0, self._sheet_turns[page] + self.rotation)
+
+    def _refresh_page_geometry(self) -> None:
+        """Re-derive the page count and page sizes from the live document."""
+        self._measure_pages(self.doc)
 
     def _on_annotation_edit(self, scope: int) -> None:
         """An annotation reached the document, so what it paints has to change.
@@ -595,11 +620,12 @@ class PDFView(QAbstractScrollArea):
     def _pdf_point_at(self, pos: QPoint) -> Optional[Tuple[int, float, float]]:
         """Widget coordinate -> ``(page, x, y)`` in PDF space, ``None`` if off-page.
 
-        The road from a click to a point on the page runs through the scroll
-        bars, the page layout, the zoom and the view rotation, and a note is
-        stored in the last space of those, so the click has to be walked all the
-        way back.  ``_numbering_hit_at()`` walks the same road, so the two tools
-        cannot disagree about where the cursor is.
+        The road from a click to a point on the page runs through the scroll bars,
+        the page layout, the zoom and the turns — the page's own and the view's.
+        A mark is stored in the space the sheet was measured in before any of that,
+        so the click has to be walked all the way back through both turns.
+        ``_numbering_hit_at()`` walks as far as the page and the screen, then stops
+        at the painted page instead, because that is where a number is placed.
         """
         if not self.page_count:
             return None
@@ -609,11 +635,11 @@ class PDFView(QAbstractScrollArea):
         if hit is None:
             return None
         page, u, v = hit
-        w0, h0 = self.page_sizes[page]
-        dw, dh = display_size(w0, h0, self.rotation)
+        w0, h0, turn = self._sheet_space(page)
+        dw, dh = display_size(w0, h0, turn)
         if not (0.0 <= u <= dw and 0.0 <= v <= dh):
             return None
-        x, y = unmap_point(u, v, w0, h0, self.rotation)
+        x, y = unmap_point(u, v, w0, h0, turn)
         return page, x, y
 
     def _note_at(self, page: int, x: float, y: float) -> Optional[NoteAnnotation]:
@@ -743,11 +769,11 @@ class PDFView(QAbstractScrollArea):
         px, py = self._page_origin(page)
         px -= self.horizontalScrollBar().value()
         py -= self.verticalScrollBar().value()
-        w0, h0 = self.page_sizes[page]
+        w0, h0, turn = self._sheet_space(page)
         z = self.zoom
         out = []
         for rect in ann.rects:
-            x0, y0, x1, y1 = map_rect(rect, w0, h0, self.rotation)
+            x0, y0, x1, y1 = map_rect(rect, w0, h0, turn)
             out.append(QRect(round(px + x0 * z), round(py + y0 * z),
                              max(1, round((x1 - x0) * z)),
                              max(1, round((y1 - y0) * z))))
@@ -2041,9 +2067,10 @@ class PDFView(QAbstractScrollArea):
     def _paint_stroke(self, painter: QPainter) -> None:
         """Draw the pen stroke in progress, in view coordinates.
 
-        The captured points are page space, so they are mapped the same way the
-        page is: a turned view has to carry the half-drawn line with the page
-        instead of leaving it under the mouse (F10-3g).
+        The captured points are the space the annotation will be stored in, so they
+        carry both turns — the page's own and the view's — and a turned view has to
+        carry the half-drawn line with the page instead of leaving it under the
+        mouse (F10-3g).
         """
         if self._stroke is None:
             return
@@ -2051,13 +2078,13 @@ class PDFView(QAbstractScrollArea):
         page = self._stroke["page"]
         if not points or page >= len(self.page_sizes):
             return
-        w0, h0 = self.page_sizes[page]
+        w0, h0, turn = self._sheet_space(page)
         ox, oy = self._page_origin(page)
         ox -= self.horizontalScrollBar().value()
         oy -= self.verticalScrollBar().value()
         mapped = []
         for x, y in points:
-            u, v = map_point(x, y, w0, h0, self.rotation)
+            u, v = map_point(x, y, w0, h0, turn)
             mapped.append(QPointF(ox + u * self.zoom, oy + v * self.zoom))
         pen = QPen(QColor(self.ink_color))
         pen.setWidthF(max(1.0, self.ink_width * self.zoom))
@@ -2085,13 +2112,13 @@ class PDFView(QAbstractScrollArea):
         if drag is None or drag["page"] >= len(self.page_sizes):
             return
         page = drag["page"]
-        w0, h0 = self.page_sizes[page]
+        w0, h0, turn = self._sheet_space(page)
         ox, oy = self._page_origin(page)
         ox -= self.horizontalScrollBar().value()
         oy -= self.verticalScrollBar().value()
 
         def spot(point):
-            u, v = map_point(point[0], point[1], w0, h0, self.rotation)
+            u, v = map_point(point[0], point[1], w0, h0, turn)
             return QPointF(ox + u * self.zoom, oy + v * self.zoom)
 
         pen = QPen(QColor(self.ink_color))
@@ -2144,13 +2171,13 @@ class PDFView(QAbstractScrollArea):
         if drag is None or drag["page"] >= len(self.page_sizes):
             return
         page = drag["page"]
-        w0, h0 = self.page_sizes[page]
+        w0, h0, turn = self._sheet_space(page)
         ox, oy = self._page_origin(page)
         ox -= self.horizontalScrollBar().value()
         oy -= self.verticalScrollBar().value()
 
         def spot(point):
-            u, v = map_point(point[0], point[1], w0, h0, self.rotation)
+            u, v = map_point(point[0], point[1], w0, h0, turn)
             return QPointF(ox + u * self.zoom, oy + v * self.zoom)
 
         kind = drag.get("kind", "distance")
@@ -2385,18 +2412,19 @@ class PDFView(QAbstractScrollArea):
 
     def _paint_overlays(self, painter: QPainter, page: int, x: float, y: float) -> None:
         z = self.zoom
+        w0, h0, turn = self._sheet_space(page)
         # Highlights are not painted here any more: they live in the document and
         # the renderer draws annotations, so an overlay would paint the band twice
         # (F10-3).
 
         # search hits
         for rect in self._hit_rects.get(page, ()):
-            x0, y0, x1, y1 = map_rect(rect, *self.page_sizes[page], self.rotation)
+            x0, y0, x1, y1 = map_rect(rect, w0, h0, turn)
             painter.fillRect(QRect(int(x + x0 * z), int(y + y0 * z),
                                    max(1, int((x1 - x0) * z)), max(1, int((y1 - y0) * z))), HIT_COLOR)
         cur = self._current_hit_rect()
         if cur is not None and cur[0] == page:
-            x0, y0, x1, y1 = map_rect(cur[1], *self.page_sizes[page], self.rotation)
+            x0, y0, x1, y1 = map_rect(cur[1], w0, h0, turn)
             r = QRect(int(x + x0 * z), int(y + y0 * z),
                       max(1, int((x1 - x0) * z)), max(1, int((y1 - y0) * z)))
             painter.fillRect(r, HIT_CURRENT)
@@ -2515,7 +2543,8 @@ class PDFView(QAbstractScrollArea):
         return words
 
     def _word_rect_view(self, page: int, word: Tuple[float, float, float, float, str]):
-        return map_rect(word[:4], *self.page_sizes[page], self.rotation)
+        w0, h0, turn = self._sheet_space(page)
+        return map_rect(word[:4], w0, h0, turn)
 
     def _content_to_page_view(self, cx: float, cy: float) -> Optional[Tuple[int, float, float]]:
         """Content coords -> (page index, view-space point within page, unzoomed)."""
@@ -2644,9 +2673,9 @@ class PDFView(QAbstractScrollArea):
             v0 = (inter.top() - py) / self.zoom
             u1 = (inter.right() - px) / self.zoom
             v1 = (inter.bottom() - py) / self.zoom
-            w0, h0 = self.page_sizes[page]
+            w0, h0, turn = self._sheet_space(page)
             clips.append(
-                (page, unmap_rect((u0, v0, u1, v1), w0, h0, self.rotation)))
+                (page, unmap_rect((u0, v0, u1, v1), w0, h0, turn)))
         return clips
 
     def _content_rect(self, view_rect: QRect) -> QRect:
@@ -2794,7 +2823,8 @@ class PDFView(QAbstractScrollArea):
             self._request_visible()
             self.viewport().update()
             return
-        x0, y0, x1, y1 = map_rect(rect, *self.page_sizes[page], self.rotation)
+        w0, h0, turn = self._sheet_space(page)
+        x0, y0, x1, y1 = map_rect(rect, w0, h0, turn)
         px, py = self._page_origin(page)
         target_y = py + (y0 + y1) / 2.0 * self.zoom - self.viewport().height() / 2.0
         target_x = px + (x0 + x1) / 2.0 * self.zoom - self.viewport().width() / 2.0

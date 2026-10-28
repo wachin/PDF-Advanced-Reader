@@ -1,11 +1,15 @@
 """Pure geometry helpers: page rotation and coordinate mapping.
 
-A PDF page has a *point* size ``(w0, h0)`` given by ``page.rect`` (this already
-respects the page's own /Rotate).  The viewer may apply an extra user rotation
-(0/90/180/270 clockwise).  All mapping helpers here convert between:
+The numbers these helpers move are the ones the file states: an annotation's
+``/Rect``, a highlight's quad points, a word's box.  All of them are counted on the
+sheet, which is ``(w0, h0)`` here — ``page.cropbox``, not ``page.rect``, because
+MuPDF has already turned the page by its own ``/Rotate`` before it reports a rect.
+``rotation`` is therefore every turn between the sheet and the screen: the page's
+own plus the viewer's, whose sum is the same place as the two turns in sequence.
+All mapping helpers here convert between:
 
-  * page space  : points, origin top-left, as returned by PyMuPDF text/rects
-  * view space  : the rotated, zoom-independent page space (origin top-left)
+  * sheet space : points, origin top-left, as PyMuPDF reports them
+  * view space  : that sheet turned, zoom-independent, origin top-left
 
 Zoom is a plain scalar multiplication applied by the caller on top of this.
 

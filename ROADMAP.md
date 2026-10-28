@@ -1417,7 +1417,17 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
 
 ## F10-4 Page manipulation (was F6) — [ ]
 
-- [ ] Rotate permanently
+- [x] One coordinate rule for a page that arrives turned: the numbers the file
+      states are counted on the sheet **before** the page's own `/Rotate`, so a
+      mark, a word box, a search hit, a click and a preview all map with the sheet
+      size and the *sum* of the two turns (**F10-4a**; measured against MuPDF's own
+      ink for all sixteen pairs of page turn and view turn, where the rule the view
+      had been using was wrong for twelve of them). This is the precondition of
+      rotating permanently — without it, turning a page with PDFAR's own tool would
+      jump every mark the user has on it a quarter of the page.
+- [ ] Rotate permanently: write `/Rotate` into each named page node as an undoable
+      `Scope.STRUCTURE` edit, never on a `/Pages` parent, reaching the view, the
+      thumbnails and the saved file (**F10-4b**)
 - [ ] Delete, extract, duplicate, move, reverse
 - [ ] Insert blank page
 - [ ] Split, merge/combine
@@ -1553,8 +1563,12 @@ Next, in order: the two defects that exchange found are
 now closed — marks that share a name are listed as the separate marks they
 are (F10-3x), and a square or a circle keeps the box it was drawn into
 instead of growing a point on every side each time the file is read
-(F10-3y). Next in order: F10-4's page
-manipulation.
+(F10-3y). F10-4's page manipulation has
+begun at the end that has to be true before a page can be turned for keeps: a page
+that carries its own `/Rotate` — the ordinary case in a scanned book, which is what
+PDFAR is being built for — now puts its marks, its words, its hits and its clicks
+on the pixels MuPDF actually paints them on (F10-4a). Next in order: the rotation
+edit itself, F10-4b.
 
 Goal:
 
@@ -4402,6 +4416,102 @@ the vertex kinds, whose boxes MuPDF derives from `/L` and `/Vertices` and which 
 left to it, and any attempt to make `/Rect` hold room for a border the way MuPDF's
 pad did — the border is now drawn inside the box the user dragged, which is what the
 selection ring and the scroll-to already assume.
+
+### F10-4a A page that arrives turned — [x] Implemented
+
+**Completed**: 2026-10-28
+
+**What landed**: `_sheet_space()` and `_measure_pages()` in `src/pdfar/viewer.py`, and
+the ten places that put a number out of the file on the screen now take their size and
+their turn from the first. `geometry.py`'s own docstring, which had been describing a
+rule the view did not follow, now describes the rule it does. This is the first item of
+F10-4 and the precondition of the rest: a page that carries its own `/Rotate` is drawn,
+hit, selected and clicked in one place rather than two.
+
+**The defect**: a PDF page can say *turn me 90° before you show me* without changing
+one number in its content stream, and PyMuPDF obeys that instruction unevenly across its
+own API. `page.rect` and the bitmap MuPDF hands back are already turned; an annotation's
+`/Rect`, a word box and a highlight's `/QuadPoints` are not — they are counted on the
+sheet as it lies in the file. The view mapped those numbers with the **painted** size and
+only its own turn, so on a page with `/Rotate 90` a mark sat a quarter of the page away
+from its own ink: the selection ring circled blank paper, a click on the mark selected
+nothing, a search hit underlined other words, and a highlight drawn over one line covered
+another. Nothing in the repo showed it, because nothing had ever asked the **view** where
+a mark goes on a turned page — every rotation test turns the view (`view.set_rotation`),
+and the two places a page is turned (`tests/test_page_numbers.py:144`,
+`tests/test_xfdf.py:306`) check the file's numbers, which are the half that was already
+right. Scanned books are the ordinary case: a landscape sheet stored upright with
+`/Rotate 90` is how a scanner writes it, and AGENTS.md names that document class as a
+goal.
+
+**Measured before anything was written** (`/tmp/f104a/probe.py`, `spaces.py`,
+`compose.py`):
+
+* the two spaces really are different: a 200×100 sheet at `/Rotate 90` reports
+  `page.rect` `(0, 0, 100, 200)` and `page.cropbox` `(0, 0, 200, 100)`, and its text
+  keeps the content stream's own `1 0 0 1 20 50 Tm` — the rendered ink moves when the
+  page is turned, the numbers do not;
+* **one turn of the sheet by `/Rotate` + the view's turn is the screen**.
+  `map_rect(rect, W_sheet, H_sheet, page_rot + view_rot)` equals the mark's ink box in
+  MuPDF's bitmap for **all sixteen** pairs of quarter turns, and `display_size()` on the
+  same sum equals the bitmap size. The rule the view had been using — the painted size
+  and the view's turn alone — was wrong in **twelve** of them, missing only the
+  `/Rotate 0` row, which is why four years of tests never saw it;
+* `rect * page.rotation_matrix` is that same turn of the sheet by the page's own angle,
+  which is what the numbering code already does — the two rules agree, which is why
+  numbering was never wrong either;
+* `page.set_rotation()` folds what it is given: 45→0, 100→0, −90→270, 360→0, 540→180.
+  F10-4b will state a resulting angle rather than assume a delta survives.
+
+**Why the mapping moved and the model did not**: the other way was to rotate every
+stored number into painted space on read and back on write. That is some fifteen
+boundaries — the annotation model, the import, the export, the search hits, the
+appearance streams — and it would drift two promises PDFAR has made in writing: that a
+mark reports *the numbers the file states*, and that an XFDF round trip carries the
+file's own coordinates the way Acrobat reads them. It is also not how PdfCraft thinks:
+its annotation geometry stays in unrotated page space and only the painted appearance is
+counter-rotated. One function that knows both turns keeps every promise and costs ten
+call sites.
+
+**Files changed**: `src/pdfar/viewer.py`, `src/pdfar/geometry.py`,
+`tests/test_page_rotation.py` (new), `ROADMAP.md`, `docs/pdfcraft-editing-analysis.md`.
+
+**Left in painted space, on purpose**: layout (`_unit_size`, `_relayout`), because a page
+is laid out as it lies on the screen; the tile grid and `tiles.clip_points`, because
+MuPDF clips a render in the space it is rendering into; the render cache and job keys,
+because they key on the view's turn and a page's own turn changes only under a
+`Scope.STRUCTURE` edit, which clears them anyway; and all of the numbering geometry,
+which derotates through `page.derotation_matrix` and was already correct.
+
+**Tests**: **21 new**, in six groups, with MuPDF's own pixels as the ground truth — a
+page is rendered with and without its annotations and the difference is the ink's box, so
+no case is checked against the rule it is meant to test: the view reads the sheet and the
+painted page apart (1); the page's turn is added to the view's (4); a mark is painted
+where the view puts it, centre within 1 pt and box within 2 pt (4); a click at a mark's
+painted centre is a click inside the box the file states (4); the words are where the view
+puts them, every mapped box inside the ink and their union within 24 pt of it (4); and a
+highlight made on a turned page covers the words it was made on (4), measured with 5 pt of
+slack because MuPDF paints a highlight band a few points wider than the quad it is handed
+— padding, not place. **All 21 fail** with `_sheet_space()` put back to the old rule.
+**1042 passed, three consecutive runs** (191.6 / 154.2 / 162.3 s). Ruff unchanged at the
+7 pre-existing errors; mypy unchanged at 545.
+
+**Verified by eye**: `/tmp/f104a/verified.py` draws, over MuPDF's own render of each
+page-turn × view-turn pair, both the rectangle the view computes now and the one the old
+rule gave. The new one sits on the mark in every cell; the old one sits on blank paper in
+twelve — up-left at 90, the opposite corner at 180, up-right at 270 — which is the exact
+shape of what a user would have seen.
+
+**Performance**: two extra reads per page (`cropbox`, `rotation`) at load and on a
+structural edit — 36 ms for 500 pages against the 23 ms the loop it replaces took, 26 µs
+a page, once per document rather than once per paint.
+
+**What is not here**: the edit. Nothing in PDFAR can yet write a `/Rotate` into a file;
+`RotatePages { pages, delta }` is F10-4b and *Rotate permanently* stays open on the
+checklist for it. Also not here: a page whose `/Rotate` is not a quarter turn — PDF
+requires a multiple of 90, PyMuPDF folds anything else to 0, and the view now follows
+that reading instead of guessing — and the offset crop box and `/UserUnit` questions that
+belong to the page-box item.
 
 ---
 
