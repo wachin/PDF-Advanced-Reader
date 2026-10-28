@@ -31,8 +31,12 @@ from PyQt6.QtWidgets import (
 )
 
 from . import APP_NAME, __version__
-from .annotations import INK_COLORS, INK_WIDTH, INK_WIDTHS, SHAPE_LABELS, STAMP_LABELS
+from .annotations import (
+    INK_COLORS, INK_WIDTH, INK_WIDTHS, MEASURE_DEFAULT_SCALE, MEASURE_SCALES,
+    SHAPE_LABELS, STAMP_LABELS, MeasurementScale, checked_measure_scale,
+)
 from .bookmarks import settings_key_for
+from .edits import EditError
 from .i18n import I18n
 from .icons import asset_path as _asset_path, tinted_icon
 from .page_numbers import (
@@ -298,6 +302,7 @@ class MainWindow(QMainWindow):
         self._last_selection = "text"
         self._shape_kind = "rect"
         self._stamp_name = "Draft"
+        self._measure_scale = MEASURE_DEFAULT_SCALE
         self._start_maximized = True
         self._was_maximized = False
         self._geometry_timer = QTimer(self)
@@ -545,11 +550,33 @@ class MainWindow(QMainWindow):
             setattr(self, f"act_stamp_custom_{kind}", action)
             self._custom_stamp_actions[kind] = action
 
+        # Measurement: a distance in units the user chooses.
+        self.act_measure = QAction("Measure", self)
+        self.act_measure.setCheckable(True)
+        self.act_measure.setToolTip(self._measure_tip(self._measure_scale))
+        self.act_measure.triggered.connect(
+            lambda: self._set_tool_mode("measure"))
+        self._measure_scale_actions = {}
+        for label, scale in MEASURE_SCALES:
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setData(scale)
+            action.setToolTip(f"Measure in {label.lower()} (1 pt = "
+                              f"{scale.units_per_point:g} {scale.unit})")
+            action.triggered.connect(
+                lambda _checked=False, s=scale: self._choose_measure_scale(s))
+            self._measure_scale_actions[label] = action
+        self.act_measure_custom = QAction("Custom Scale…", self)
+        self.act_measure_custom.setToolTip(
+            "Type how many real units one PDF point stands for")
+        self.act_measure_custom.triggered.connect(self._choose_custom_scale)
+
         for action in (self.act_explore, self.act_sel_text,
                        self.act_sel_area, self.act_sel_table, self.act_draw,
                        *self._shape_actions.values(),
                        *self._stamp_actions.values(),
-                       *self._custom_stamp_actions.values()):
+                       *self._custom_stamp_actions.values(),
+                       self.act_measure):
             self._tool_group.addAction(action)
 
         # Page view modes (Okular-inspired).  Per document; the active view
@@ -876,6 +903,22 @@ class MainWindow(QMainWindow):
         self.stamp_split.setMenu(stamp_menu)
         self.stamp_split.setDefaultAction(self._stamp_actions["Draft"])
         tb.addWidget(self.stamp_split)
+
+        # Measurement: the button draws a distance in the scale in its menu.
+        self.measure_split = QToolButton(tb)
+        self.measure_split.setPopupMode(
+            QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.measure_split.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.measure_split.setAutoRaise(True)
+        measure_menu = QMenu(self.measure_split)
+        for action in self._measure_scale_actions.values():
+            measure_menu.addAction(action)
+        measure_menu.addSeparator()
+        measure_menu.addAction(self.act_measure_custom)
+        self.measure_split.setMenu(measure_menu)
+        self.measure_split.setDefaultAction(self.act_measure)
+        tb.addWidget(self.measure_split)
 
         # Page view mode menu button (icon reflects the active mode)
         self.view_mode_button = QToolButton(tb)
@@ -2607,16 +2650,23 @@ class MainWindow(QMainWindow):
             "area": self.act_sel_area,
             "table": self.act_sel_table,
             "draw": self.act_draw,
+            "measure": self.act_measure,
         }[mode]
+
+    def _measure_tip(self, scale: MeasurementScale) -> str:
+        """What the measure tool will read in, and how to drag it."""
+        return (f"Measure: 1 pt = {scale.units_per_point:g} {scale.unit} — "
+                f"drag from one end to the other")
 
     def _set_tool_mode(self, mode: str) -> None:
         """Activate a mouse tool and apply it to the current view."""
         if mode not in ("browse", "text", "area", "table", "draw", "shape",
-                        "stamp"):
+                        "stamp", "measure"):
             return
         view = self.view
         if (view is not None and view.reflow_mode
-                and mode in ("area", "table", "draw", "shape", "stamp")):
+                and mode in ("area", "table", "draw", "shape", "stamp",
+                             "measure")):
             mode = "text"
         self._tool_mode = mode
         action = self._tool_action(mode)
@@ -2627,6 +2677,8 @@ class MainWindow(QMainWindow):
                 self.shape_split.setDefaultAction(action)
             elif mode == "stamp":
                 self.stamp_split.setDefaultAction(action)
+            elif mode == "measure":
+                self.measure_split.setDefaultAction(action)
             else:
                 self.tool_split.setDefaultAction(action)
         if view is not None:
@@ -2636,6 +2688,8 @@ class MainWindow(QMainWindow):
                     view.set_custom_stamp(**self._custom_stamp)
                 else:
                     view.set_stamp_name(self._stamp_name)
+            elif mode == "measure":
+                view.set_measure_scale(self._measure_scale)
             view.set_tool_mode(mode)
         self._sync_pen_options()
 
@@ -2721,6 +2775,49 @@ class MainWindow(QMainWindow):
             return
         self._set_custom_stamp({"kind": "image", "caption": "", "image": path})
 
+    def _choose_measure_scale(self, scale: MeasurementScale) -> None:
+        """Pick the units the measure tool reads in and switch to that tool."""
+        self._measure_scale = scale
+        self._sync_measure_scale()
+        self._set_tool_mode("measure")
+
+    def _sync_measure_scale(self) -> None:
+        """Show the active scale on the tool and in its menu's check marks."""
+        self.act_measure.setToolTip(self._measure_tip(self._measure_scale))
+        for label, scale in MEASURE_SCALES:
+            action = self._measure_scale_actions[label]
+            action.setChecked(scale == self._measure_scale)
+        self.measure_split.setToolTip(self._measure_tip(self._measure_scale))
+
+    def _choose_custom_scale(self) -> None:
+        """Ask for "how many real units one PDF point is" and use that scale."""
+        current = f"{self._measure_scale.units_per_point:g} " \
+                  f"{self._measure_scale.unit}"
+        text, ok = QInputDialog.getText(
+            self, "Measurement Scale",
+            "How many real units does one PDF point equal?", text=current)
+        if not ok:
+            return
+        parts = text.split()
+        if len(parts) < 2:
+            QMessageBox.warning(self, "Measurement Scale",
+                                "Give a number and a unit, for example "
+                                "“0.3528 mm”.")
+            return
+        try:
+            factor = float(parts[0])
+        except ValueError:
+            factor = 0.0
+        unit = " ".join(parts[1:])
+        try:
+            scale = checked_measure_scale(MeasurementScale(factor, unit, 2))
+        except EditError as exc:
+            QMessageBox.warning(self, "Measurement Scale", str(exc))
+            return
+        self._choose_measure_scale(scale)
+        self.statusBar().showMessage(
+            f"Measure in {scale.unit}: {scale.ratio}", 5000)
+
     def _set_view_mode(self, mode: str) -> None:
         """Apply a page view mode to the active document."""
         if mode not in VIEW_MODE_LABELS:
@@ -2794,6 +2891,7 @@ class MainWindow(QMainWindow):
             action.setEnabled(selection_ok)
         for action in self._custom_stamp_actions.values():
             action.setEnabled(selection_ok)
+        self.act_measure.setEnabled(selection_ok)
         split = getattr(self, "tool_split", None)
         if split is None:
             return
@@ -2804,12 +2902,15 @@ class MainWindow(QMainWindow):
         stamp_split = getattr(self, "stamp_split", None)
         if stamp_split is not None:
             stamp_split.setEnabled(has_doc)
+        measure_split = getattr(self, "measure_split", None)
+        if measure_split is not None:
+            measure_split.setEnabled(has_doc)
         if reflow and self._tool_mode in ("area", "table", "draw", "shape",
-                                          "stamp"):
+                                          "stamp", "measure"):
             self._set_tool_mode("text")
             self.statusBar().showMessage(
-                "Area, Table, Freehand, Shape and Stamp tools are unavailable "
-                "in Reflow", 5000)
+                "Area, Table, Freehand, Shape, Stamp and Measure tools are "
+                "unavailable in Reflow", 5000)
             return
         if view is not None:
             view.set_tool_mode(self._tool_mode)
@@ -2818,6 +2919,7 @@ class MainWindow(QMainWindow):
             self._custom_stamp = view.custom_stamp
             if view.stamp_name in self._stamp_actions:
                 self._stamp_name = view.stamp_name
+            self._measure_scale = view.measure_scale
             if self._tool_mode == "shape":
                 # The kind is viewer state, like the pen's colour, so the tab
                 # the user switched to keeps the shape it was drawing.
@@ -2833,7 +2935,10 @@ class MainWindow(QMainWindow):
                 else:
                     action = self._stamp_actions[self._stamp_name]
                 self.stamp_split.setDefaultAction(action)
+            elif self._tool_mode == "measure":
+                self.measure_split.setDefaultAction(self.act_measure)
         self._tool_action(self._tool_mode).setChecked(True)
+        self._sync_measure_scale()
         self._sync_pen_options()
 
     def _show_transient_message(self, message: str) -> None:
@@ -2906,7 +3011,8 @@ class MainWindow(QMainWindow):
         if toolbar is None:
             return
         view = self.view
-        visible = view is not None and self._tool_mode in ("draw", "shape")
+        visible = view is not None and self._tool_mode in ("draw", "shape",
+                                                           "measure")
         present = (self.pen_action is not None
                    and self.pen_action in toolbar.actions())
         if visible and not present:
@@ -2918,8 +3024,12 @@ class MainWindow(QMainWindow):
         if view is None:
             return
         color = view.ink_color
-        icon = (f"shape_{view.shape_kind}.svg" if self._tool_mode == "shape"
-                else "draw_freehand.svg")
+        if self._tool_mode == "shape":
+            icon = f"shape_{view.shape_kind}.svg"
+        elif self._tool_mode == "measure":
+            icon = "measure.svg"
+        else:
+            icon = "draw_freehand.svg"
         self.pen_color_button.setIcon(tinted_icon(icon, color))
         self.pen_color_button.setToolTip(f"Drawing colour: {color}")
         for action in self._pen_color_actions:
@@ -2973,6 +3083,7 @@ class MainWindow(QMainWindow):
             action.setIcon(stamp_icon)
         for action in self._custom_stamp_actions.values():
             action.setIcon(stamp_icon)
+        self.act_measure.setIcon(tinted_icon("measure.svg", ink))
         for mode in ("single", "facing", "facing_centered", "overview",
                      "continuous"):
             self._view_actions[mode].setIcon(

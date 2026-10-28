@@ -15,7 +15,9 @@ object all mean the same thing across an undo, a save and a reopen.
 
 from __future__ import annotations
 
+import math
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -111,6 +113,15 @@ STAMP_CAPTION_PADDING = 10.0
 STAMP_WIDTH = 190.0
 STAMP_ASPECT = 3.8
 
+#: What a dimension line is drawn with: red, one point thick, with end ticks
+#: and the reading above it.  The caption is written into the appearance
+#: stream, because MuPDF draws a measurement line as a plain line.
+MEASURE_COLOR = "#D32F2F"
+MEASURE_WIDTH = 1.0
+MEASURE_FONT = 9.0
+MEASURE_TICK = 4.0
+MEASURE_LABEL_GAP = 4.0
+
 #: What a damaged annotation can raise while the list is being read.  MuPDF
 #: signals its failures through these; asking for less than ``Exception`` means a
 #: mistake in :func:`_highlight_model` still surfaces instead of quietly
@@ -124,6 +135,7 @@ class AnnotationType(Enum):
     FREEHAND = "freehand"
     SHAPE = "shape"
     STAMP = "stamp"
+    MEASUREMENT = "measurement"
 
 
 @dataclass
@@ -256,6 +268,87 @@ class StampAnnotation(Annotation):
     name: str = "Draft"
 
 
+@dataclass(frozen=True)
+class MeasurementScale:
+    """How PDF points become real-world units for a measurement.
+
+    The scale is kept in the annotation's rectilinear ``/Measure`` dictionary
+    (``/Subtype /RL``), so the file itself says "1 pt = 0.353 mm" and a reader
+    that understands dimensions shows the same number PDFAR does.  ``precision``
+    is the number of decimals in the caption, stored as the number format's
+    denominator: ``/D 10`` means one decimal.
+    """
+    units_per_point: float = 1.0
+    unit: str = "pt"
+    precision: int = 2
+
+    @property
+    def ratio(self) -> str:
+        """The scale as the file writes it, e.g. ``1 pt = 0.352778 mm``."""
+        return f"1 pt = {self.units_per_point:g} {self.unit}"
+
+    def reading(self, length: float) -> str:
+        """A page-space *length* in this scale, e.g. ``63.5 mm``."""
+        return f"{length * self.units_per_point:.{self.precision}f} {self.unit}"
+
+
+#: The scales the measure tool offers.  A point is 1/72 inch, so each factor is
+#: that many real units; the first is the default because plans and drawings
+#: are usually read in millimetres.
+MEASURE_SCALES = (
+    ("Millimetres", MeasurementScale(25.4 / 72.0, "mm", 1)),
+    ("Centimetres", MeasurementScale(2.54 / 72.0, "cm", 2)),
+    ("Inches", MeasurementScale(1.0 / 72.0, "in", 2)),
+    ("Points", MeasurementScale(1.0, "pt", 1)),
+)
+MEASURE_DEFAULT_SCALE = MEASURE_SCALES[0][1]
+
+
+def checked_measure_scale(scale: MeasurementScale) -> MeasurementScale:
+    """The scale as the file can store it, or an edit that refuses.
+
+    The factors go into PDF number format dictionaries as plain decimals, and
+    the unit and ratio become literal strings; a scale outside these limits is
+    one the file could not describe honestly.
+    """
+    if not math.isfinite(scale.units_per_point) \
+            or not 1e-6 <= scale.units_per_point <= 1e6:
+        raise EditError("That measurement scale is not a usable number")
+    if not 0 <= scale.precision <= 4:
+        raise EditError("A measurement keeps at most four decimals")
+    unit = scale.unit.strip()
+    if not unit or len(unit) > 16 or any(ord(c) < 32 for c in unit):
+        raise EditError("That measurement unit cannot be written into a PDF")
+    try:
+        unit.encode("latin-1")
+    except UnicodeEncodeError:
+        raise EditError(
+            "That measurement unit cannot be written into a PDF") from None
+    return MeasurementScale(scale.units_per_point, unit, scale.precision)
+
+
+@dataclass
+class MeasurementAnnotation(Annotation):
+    """A measured distance: a PDF ``/Line`` with ``/IT /LineDimension``.
+
+    ``points`` are the two ends in page space.  ``scale`` is the ``/Measure``
+    dictionary's scale, so the reading is a property of the file, not of the
+    viewer that made it; ``reading`` turns the page-space distance into the
+    text drawn above the line and kept in ``/Contents``.
+    """
+    type: AnnotationType = AnnotationType.MEASUREMENT
+    points: List[tuple] = field(default_factory=list)
+    scale: MeasurementScale = field(default_factory=lambda: MEASURE_DEFAULT_SCALE)
+    width: float = MEASURE_WIDTH
+
+    @property
+    def reading(self) -> str:
+        """The measured distance in the scale the annotation carries."""
+        if len(self.points) != 2:
+            return ""
+        return self.scale.reading(math.dist(self.points[0], self.points[1]))
+
+
 def stamp_box(width: float, height: float,
               center: Sequence[float],
               aspect: float = STAMP_ASPECT) -> Tuple[float, float, float, float]:
@@ -308,7 +401,7 @@ def _caption_layout(caption: str,
     return text, width, size + 2 * STAMP_CAPTION_PADDING, size
 
 
-def _pdf_caption(text: str) -> str:
+def _pdf_string(text: str) -> str:
     """*text* as the bytes of a PDF literal string, escaped for WinAnsi."""
     out = []
     for byte in text.encode("latin-1"):
@@ -346,7 +439,7 @@ def _caption_appearance(doc: fitz.Document, text: str, width: float,
         f"q 1 0 0 RG 1 0 0 rg 2 w "
         f"0.5 0.5 {width - 1.0:.3f} {height - 1.0:.3f} re S "
         f"BT /F1 {size:.2f} Tf {STAMP_CAPTION_PADDING:.3f} {baseline:.3f} Td "
-        f"({_pdf_caption(text)}) Tj ET Q"
+        f"({_pdf_string(text)}) Tj ET Q"
     ).encode("latin-1")
     return _new_stream_object(
         doc,
@@ -416,6 +509,177 @@ def _place_custom_stamp(width: float, height: float, page_width: float,
     x0 = min(max(cx - box_width / 2.0, 0.0), page_width - box_width)
     y0 = min(max(cy - box_height / 2.0, 0.0), page_height - box_height)
     return (x0, y0, x0 + box_width, y0 + box_height)
+
+
+def _pdf_number(value: float, places: int = 3) -> str:
+    """*value* as a plain PDF number, with trailing zeros trimmed."""
+    text = f"{value:.{places}f}".rstrip("0").rstrip(".")
+    return text if text not in ("", "-0") else "0"
+
+
+def _measure_dictionary(scale: MeasurementScale) -> str:
+    """The rectilinear ``/Measure`` dictionary a measurement annotation carries.
+
+    ``/X`` converts page-space x to real units, and ``/D`` is the distance
+    format (a factor relative to ``/X``).  The precision is the denominator of
+    the number format, which is how the PDF specification says how many
+    decimals to show.
+    """
+    unit = _pdf_string(scale.unit)
+    denominator = 10 ** scale.precision
+    distance = (f"<< /Type /NumberFormat /U ({unit}) "
+                f"/C 1 /F /D /D {denominator} /FD true >>")
+    return (f"<< /Type /Measure /Subtype /RL /R ({_pdf_string(scale.ratio)}) "
+            f"/X [ << /Type /NumberFormat /U ({unit}) "
+            f"/C {_pdf_number(scale.units_per_point, 6)} /F /D "
+            f"/D {denominator} /FD true >> ] /D [ {distance} ] >>")
+
+
+def _measurement_appearance(doc: fitz.Document, points: Sequence[tuple],
+                            scale: MeasurementScale,
+                            color: Tuple[float, float, float],
+                            width: float, page_width: float,
+                            page_height: float) -> Tuple[int, tuple, str]:
+    """The form XObject that draws a dimension line, its ticks and reading.
+
+    The appearance is PDFAR's own because MuPDF paints a measurement line as a
+    plain line: without it neither PDFAR nor another viewer would show the
+    number.  The box has to make room for the label above (or, at the top of
+    the page, below) the line, and a Line annotation cannot be given that box
+    through ``set_rect()`` — the caller writes ``/Rect`` directly.
+    """
+    (px0, py0), (px1, py1) = points
+    label = scale.reading(math.dist(points[0], points[1]))
+    text_width = fitz.get_text_length(label, fontname="helv",
+                                      fontsize=MEASURE_FONT)
+    if text_width + 2.0 > page_width:
+        raise EditError("The measurement reading is too wide for this page")
+    left = min(max((px0 + px1) / 2.0 - text_width / 2.0, 1.0),
+               page_width - text_width - 1.0)
+    top, bottom = min(py0, py1), max(py0, py1)
+    if top - MEASURE_LABEL_GAP - MEASURE_FONT >= 1.0:
+        baseline = top - MEASURE_LABEL_GAP
+    elif bottom + MEASURE_LABEL_GAP + MEASURE_FONT <= page_height - 1.0:
+        baseline = bottom + MEASURE_LABEL_GAP + MEASURE_FONT
+    else:
+        baseline = top - MEASURE_LABEL_GAP
+    pad = MEASURE_TICK / 2.0 + max(1.0, width) + 0.5
+    x0 = max(0.0, min(px0, px1, left) - pad)
+    x1 = min(page_width, max(px0, px1, left + text_width) + pad)
+    y0 = max(0.0, min(top, baseline - MEASURE_FONT) - pad)
+    y1 = min(page_height, max(bottom, baseline) + pad)
+    box = (x0, y0, x1, y1)
+    box_width, box_height = x1 - x0, y1 - y0
+
+    def fx(x: float) -> str:
+        return _pdf_number(x - x0)
+
+    def fy(y: float) -> str:
+        # Form space grows upwards; the page grows downwards.
+        return _pdf_number(y1 - y)
+
+    dx, dy = px1 - px0, py1 - py0
+    length = math.hypot(dx, dy)
+    half = MEASURE_TICK / 2.0
+    nx, ny = -dy / length * half, dx / length * half
+    red, green, blue = color
+    ink = f"{_pdf_number(red)} {_pdf_number(green)} {_pdf_number(blue)}"
+    content = (
+        f"q {ink} RG {ink} rg {_pdf_number(width)} w 1 J 0 J "
+        f"{fx(px0)} {fy(py0)} m {fx(px1)} {fy(py1)} l S "
+        f"{fx(px0 - nx)} {fy(py0 - ny)} m {fx(px0 + nx)} {fy(py0 + ny)} l S "
+        f"{fx(px1 - nx)} {fy(py1 - ny)} m {fx(px1 + nx)} {fy(py1 + ny)} l S "
+        f"BT /F1 {_pdf_number(MEASURE_FONT)} Tf "
+        f"{fx(left)} {fy(baseline)} Td ({_pdf_string(label)}) Tj ET Q"
+    ).encode("latin-1")
+    font = doc.get_new_xref()
+    doc.update_object(
+        font, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica "
+              "/Encoding /WinAnsiEncoding >>")
+    form = _new_stream_object(
+        doc,
+        f"<< /Type /XObject /Subtype /Form /FormType 1 "
+        f"/BBox [0 0 {_pdf_number(box_width)} {_pdf_number(box_height)}] "
+        f"/Resources << /Font << /F1 {font} 0 R >> >> >>",
+        content)
+    return form, box, label
+
+
+_MEASURE_UNIT = re.compile(r"/U\s*\(((?:\\.|[^()\\])*)\)")
+_MEASURE_FACTOR = re.compile(r"/C\s+([-+]?(?:\d+\.?\d*|\.\d+))")
+_MEASURE_DECIMALS = re.compile(r"/D\s+(\d+)")
+
+
+def _unescape_pdf_string(text: str) -> str:
+    """The text inside a PDF literal string, with its escapes resolved."""
+    out = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text):
+            following = text[index + 1]
+            if following in "()\\":
+                out.append(following)
+                index += 2
+                continue
+            if following in "01234567":
+                end = index + 1
+                while (end < min(index + 4, len(text))
+                       and text[end] in "01234567"):
+                    end += 1
+                out.append(chr(int(text[index + 1:end], 8)))
+                index = end
+                continue
+            index += 2
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _read_measurement_scale(doc: fitz.Document,
+                            annot_xref: int) -> Optional[MeasurementScale]:
+    """The scale an annotation's ``/Measure`` dictionary holds, if usable.
+
+    A measurement from another program may use a compound or geospatial
+    measure dictionary; only the rectilinear scale PDFAR writes is understood,
+    and anything else is left to be read as the line it also is.
+    """
+    kind, value = doc.xref_get_key(annot_xref, "Measure")
+    if kind == "xref":
+        try:
+            target = int(value.split()[0])
+        except (ValueError, IndexError):
+            return None
+        if doc.xref_get_key(target, "Subtype") != ("name", "/RL"):
+            return None
+        kind, value = doc.xref_get_key(target, "X")
+    elif kind == "dict":
+        if doc.xref_get_key(annot_xref, "Measure/Subtype") != ("name", "/RL"):
+            return None
+        kind, value = doc.xref_get_key(annot_xref, "Measure/X")
+    else:
+        return None
+    if kind != "array":
+        return None
+    unit_match = _MEASURE_UNIT.search(value)
+    factor_match = _MEASURE_FACTOR.search(value)
+    if unit_match is None or factor_match is None:
+        return None
+    try:
+        factor = float(factor_match.group(1))
+    except ValueError:
+        return None
+    precision = 2
+    decimals = _MEASURE_DECIMALS.search(value)
+    if decimals is not None:
+        precision = {1: 0, 10: 1, 100: 2, 1000: 3, 10000: 4}.get(
+            int(decimals.group(1)), 2)
+    try:
+        return checked_measure_scale(MeasurementScale(
+            factor, _unescape_pdf_string(unit_match.group(1)), precision))
+    except EditError:
+        return None
 
 
 # -------------------------------------------------------------------------- color
@@ -629,6 +893,41 @@ def _stamp_model(annot: fitz.Annot, page_idx: int) -> StampAnnotation:
         modified=info.get("modDate") or "",
         content=content,
         name=name,
+    )
+
+
+def _measurement_model(doc: fitz.Document, annot: fitz.Annot,
+                       page_idx: int) -> Optional[MeasurementAnnotation]:
+    """Read one dimension line into the model, or ``None`` if it is not one.
+
+    A ``/Line`` is only a measurement when its ``/IT`` says so and a
+    rectilinear ``/Measure`` scale can be read; a line with an unfamiliar
+    measure dictionary is still a line, and the caller reads it as one.
+    """
+    if doc.xref_get_key(annot.xref, "IT") != ("name", "/LineDimension"):
+        return None
+    scale = _read_measurement_scale(doc, annot.xref)
+    points = [(float(x), float(y)) for x, y in (annot.vertices or [])]
+    if scale is None or len(points) != 2:
+        return None
+    info = annot.info
+    rect = annot.rect
+    opacity = annot.opacity
+    width = (annot.border or {}).get("width")
+    return MeasurementAnnotation(
+        id=annot_key(annot),
+        page=page_idx,
+        rects=[(rect.x0, rect.y0, rect.x1, rect.y1)],
+        color=_rgb_to_hex(annot.colors.get("stroke") or (0.0, 0.0, 0.0)),
+        # A measurement with no /CA paints solid, and -1 is "unset".
+        opacity=1.0 if opacity is None or opacity < 0 else opacity,
+        author=info.get("title") or "",
+        created=info.get("creationDate") or "",
+        modified=info.get("modDate") or "",
+        content=info.get("content") or "",
+        points=points,
+        scale=scale,
+        width=MEASURE_WIDTH if width is None else float(width),
     )
 
 
@@ -979,6 +1278,74 @@ class AddCustomStamp(SinglePageEdit):
 
 
 @dataclass(frozen=True)
+class AddMeasurement(SinglePageEdit):
+    """Measure the distance between two page points — a ``/LineDimension``.
+
+    The annotation is a real measurement: ``/IT /LineDimension`` tells a reader
+    what it is and ``/Measure`` says how the page distance becomes the reading.
+    Its appearance is PDFAR's own, because MuPDF draws only the bare line; the
+    ticks and the number live in ``/AP/N`` like a custom stamp's caption.
+    """
+
+    ann_id: str
+    page: int
+    points: Tuple[tuple, ...]
+    units_per_point: float = MEASURE_DEFAULT_SCALE.units_per_point
+    unit: str = MEASURE_DEFAULT_SCALE.unit
+    precision: int = MEASURE_DEFAULT_SCALE.precision
+    color: str = MEASURE_COLOR
+    width: float = MEASURE_WIDTH
+    author: str = ""
+    note: str = ""
+
+    scope = Scope.COMMENTS
+
+    @property
+    def label(self) -> str:
+        return "Measurement"
+
+    def apply(self, doc: fitz.Document) -> None:
+        points = [(float(x), float(y)) for x, y in self.points]
+        if len(points) != 2:
+            raise EditError("A measurement needs two points")
+        if math.dist(points[0], points[1]) < 0.01:
+            raise EditError("A measurement needs two different points")
+        scale = checked_measure_scale(MeasurementScale(
+            float(self.units_per_point), str(self.unit), int(self.precision)))
+        color = _hex_to_rgb(self.color)
+        page = doc.load_page(self.page)
+        # Annotation points are page-space (unrotated) coordinates, so the page
+        # box is the mediabox even when the view is turned.
+        form, box, label = _measurement_appearance(
+            doc, points, scale, color, float(self.width),
+            page.mediabox.width, page.mediabox.height)
+        x0, y0, x1, y1 = box
+        annot = page.add_line_annot(fitz.Point(*points[0]),
+                                    fitz.Point(*points[1]))
+        annot.set_colors(stroke=color)
+        annot.set_border(width=float(self.width))
+        if self.author:
+            annot.set_info(title=self.author)
+        # update() refits /Rect to the bare line and draws a plain line; the
+        # measurement's own box and appearance go on afterwards.
+        annot.update()
+        # /Rect is stored in PDF space, whose y axis runs up from the mediabox
+        # bottom; a Line annotation refuses set_rect(), so it is written here.
+        height = page.mediabox.height
+        doc.xref_set_key(
+            annot.xref, "Rect",
+            f"[{_pdf_number(x0)} {_pdf_number(height - y1)} "
+            f"{_pdf_number(x1)} {_pdf_number(height - y0)}]")
+        doc.xref_set_key(annot.xref, "IT", "/LineDimension")
+        doc.xref_set_key(annot.xref, "Measure", _measure_dictionary(scale))
+        doc.xref_set_key(annot.xref, "Subj", "(Distance)")
+        doc.xref_set_key(annot.xref, "Contents",
+                         f"({_pdf_string(self.note or label)})")
+        doc.xref_set_key(annot.xref, "AP", f"<< /N {form} 0 R >>")
+        _name(doc, annot, self.ann_id)
+
+
+@dataclass(frozen=True)
 class RemoveAnnotation(SinglePageEdit):
     """Delete the annotation *ann_id* names."""
 
@@ -1155,7 +1522,10 @@ class AnnotationManager(QObject):
                 elif kind == fitz.PDF_ANNOT_CIRCLE:
                     model = _shape_model(annot, page_idx, "ellipse")
                 elif kind == fitz.PDF_ANNOT_LINE:
-                    model = _shape_model(annot, page_idx, "line")
+                    # A measurement is a /Line with an /IT; read it first so a
+                    # dimension is not shown as a plain line.
+                    model = (_measurement_model(doc, annot, page_idx)
+                             or _shape_model(annot, page_idx, "line"))
                 elif kind == fitz.PDF_ANNOT_POLYGON:
                     model = _shape_model(annot, page_idx, "polygon")
                 elif kind == fitz.PDF_ANNOT_STAMP:
@@ -1322,6 +1692,30 @@ class AnnotationManager(QObject):
             return None
         made = self.get_annotation(ann_id)
         return made if isinstance(made, StampAnnotation) else None
+
+    def add_measurement(self, page: int,
+                        points: Sequence[tuple],
+                        scale: MeasurementScale = MEASURE_DEFAULT_SCALE,
+                        color: str = MEASURE_COLOR,
+                        width: float = MEASURE_WIDTH,
+                        author: str = "",
+                        note: str = "") -> Optional[MeasurementAnnotation]:
+        """Measure the distance between two page points, in *scale*.
+
+        One measurement is one edit, so one Ctrl+Z takes the dimension away.
+        ``None`` if the edit was refused — two points that are the same, or a
+        scale or unit the file cannot describe.
+        """
+        ann_id = str(uuid.uuid4())
+        if not self._run(AddMeasurement(
+                ann_id=ann_id, page=int(page),
+                points=tuple((float(x), float(y)) for x, y in points),
+                units_per_point=scale.units_per_point, unit=scale.unit,
+                precision=scale.precision, color=color, width=width,
+                author=author, note=note)):
+            return None
+        made = self.get_annotation(ann_id)
+        return made if isinstance(made, MeasurementAnnotation) else None
 
     def remove_annotation(self, annotation_id: str) -> bool:
         """Remove an annotation by ID."""

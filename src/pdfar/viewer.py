@@ -59,8 +59,10 @@ from .search import SearchHit
 from .session import DocumentSession
 from .tiles import Tile, TileGrid, TILE_SIZE
 from .annotations import (
-    CUSTOM_STAMP_NAME, INK_COLOR, INK_WIDTH, SHAPE_LABELS, STAMP_LABELS,
+    CUSTOM_STAMP_NAME, INK_COLOR, INK_WIDTH, MEASURE_DEFAULT_SCALE,
+    MEASURE_FONT, SHAPE_LABELS, STAMP_LABELS,
     Annotation, AnnotationManager, HIGHLIGHT_COLORS, NoteAnnotation,
+    MeasurementScale,
 )
 
 #: How far apart two captured points of a pen stroke have to be, in screen
@@ -313,6 +315,10 @@ class PDFView(QAbstractScrollArea):
         #: A stamp of PDFAR's own making, which takes the click instead:
         #: ``{"kind": "text"|"image", "caption": ..., "image": ...}``.
         self.custom_stamp: Optional[dict] = None
+        #: The scale the measure tool reads in, and the drag in progress:
+        #: ``{"page", "start", "current"}`` in page space.
+        self.measure_scale: MeasurementScale = MEASURE_DEFAULT_SCALE
+        self._measure_drag: Optional[dict] = None
 
         # search
         self._hit_rects: Dict[int, List[Tuple[float, float, float, float]]] = {}
@@ -751,14 +757,15 @@ class PDFView(QAbstractScrollArea):
         self.viewport().update()
 
     # ---------------------------------------------------------- mouse tools
-    TOOL_MODES = ("browse", "text", "area", "table", "draw", "shape", "stamp")
+    TOOL_MODES = ("browse", "text", "area", "table", "draw", "shape",
+                  "stamp", "measure")
 
     #: Tools that need the page geometry reflow does not have.
-    _PAGE_ONLY_TOOLS = ("area", "table", "draw", "shape", "stamp")
+    _PAGE_ONLY_TOOLS = ("area", "table", "draw", "shape", "stamp", "measure")
 
     def set_tool_mode(self, mode: str) -> None:
-        """Switch the left-button tool: browse, text, area, table, pen, shape
-        or stamp."""
+        """Switch the left-button tool: browse, text, area, table, pen, shape,
+        stamp or measure."""
         if mode not in self.TOOL_MODES:
             return
         if self.reflow_mode and mode in self._PAGE_ONLY_TOOLS:
@@ -770,6 +777,7 @@ class PDFView(QAbstractScrollArea):
         self._cancel_marquee()
         self._cancel_stroke()
         self._cancel_shape()
+        self._cancel_measure()
         self._panning = False
         if mode != "text":
             self.clear_selection()
@@ -807,6 +815,17 @@ class PDFView(QAbstractScrollArea):
             return
         self.custom_stamp = {"kind": kind, "caption": caption, "image": image}
         self.stamp_name = CUSTOM_STAMP_NAME
+
+    def set_measure_scale(self, scale: MeasurementScale) -> None:
+        """Choose the units the measure tool reads in.
+
+        The scale belongs to the view, like the pen's colour, so two tabs can
+        measure in two units; the next measurement the user draws takes it.
+        """
+        if not isinstance(scale, MeasurementScale):
+            return
+        self.measure_scale = scale
+        self.viewport().update()
 
     def set_ink_color(self, color: str) -> None:
         """Choose the colour the pen writes into the annotation's ``/C``.
@@ -956,6 +975,41 @@ class PDFView(QAbstractScrollArea):
                 self.annotation_manager.add_shape(
                     drag["page"], "polygon", points=tuple(points),
                     color=color, width=width)
+
+    def _cancel_measure(self) -> None:
+        """Give up the measurement in progress: it never reaches the document."""
+        if self._measure_drag is not None:
+            self._measure_drag = None
+            self.viewport().update()
+
+    def _extend_measure(self, pos: QPoint) -> None:
+        """Move the far end of the measurement to the point under the cursor.
+
+        The endpoints are captured in page space, so the dimension is where the
+        user dragged it under any zoom or view rotation (F10-3g).  A point off
+        the page stops the end at the paper rather than beyond it.
+        """
+        drag = self._measure_drag
+        hit = self._pdf_point_at(pos)
+        if hit is None or hit[0] != drag["page"]:
+            return
+        _page, x, y = hit
+        drag["current"] = (x, y)
+        self.viewport().update()
+
+    def _commit_measure(self, drag: dict) -> None:
+        """Hand the finished dimension to the document as one edit.
+
+        One drag is one measurement and one Ctrl+Z.  A drag with no extent is
+        dropped: the edit would refuse it anyway, and a click is not a distance
+        the user meant to measure.
+        """
+        start, current = drag["start"], drag["current"]
+        if math.dist(start, current) < 0.01:
+            return
+        self.annotation_manager.add_measurement(
+            drag["page"], (start, current), self.measure_scale,
+            color=self.ink_color, width=self.ink_width)
 
     # ------------------------------------------------------ numbering preview
     def set_numbering_preview(
@@ -1485,6 +1539,7 @@ class PDFView(QAbstractScrollArea):
         self.view_mode = mode
         self._cancel_marquee()
         self._cancel_stroke()
+        self._cancel_measure()
         if not self.reflow_mode:
             self._relayout()
             if self.fit_mode != "none":
@@ -1878,6 +1933,7 @@ class PDFView(QAbstractScrollArea):
         self._paint_marquee(painter)
         self._paint_stroke(painter)
         self._paint_shape(painter)
+        self._paint_measure(painter)
         painter.end()
 
     def _paint_stroke(self, painter: QPainter) -> None:
@@ -1973,6 +2029,61 @@ class PDFView(QAbstractScrollArea):
             wing = angle + spread
             painter.drawLine(head, QPointF(head.x() + math.cos(wing) * size,
                                            head.y() + math.sin(wing) * size))
+
+    def _paint_measure(self, painter: QPainter) -> None:
+        """Draw the dimension being dragged, with the reading it will get.
+
+        The endpoints are page space and are mapped on every paint, so zoom and
+        a turned view carry the preview with the page (F10-3g).  The reading is
+        the one the annotation will carry: it comes from the view's scale, not
+        from the pixels under the cursor.
+        """
+        drag = self._measure_drag
+        if drag is None or drag["page"] >= len(self.page_sizes):
+            return
+        page = drag["page"]
+        w0, h0 = self.page_sizes[page]
+        ox, oy = self._page_origin(page)
+        ox -= self.horizontalScrollBar().value()
+        oy -= self.verticalScrollBar().value()
+
+        def spot(point):
+            u, v = map_point(point[0], point[1], w0, h0, self.rotation)
+            return QPointF(ox + u * self.zoom, oy + v * self.zoom)
+
+        start = spot(drag["start"])
+        current = spot(drag["current"])
+        ink = QColor(self.ink_color)
+        pen = QPen(ink)
+        pen.setWidthF(max(1.0, self.ink_width * self.zoom))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawLine(start, current)
+        dx = current.x() - start.x()
+        dy = current.y() - start.y()
+        length = math.hypot(dx, dy)
+        if length >= 0.5:
+            half = 4.0
+            nx, ny = -dy / length * half, dx / length * half
+            for end in (start, current):
+                painter.drawLine(QPointF(end.x() - nx, end.y() - ny),
+                                 QPointF(end.x() + nx, end.y() + ny))
+        reading = self.measure_scale.reading(
+            math.dist(drag["start"], drag["current"]))
+        font = painter.font()
+        font.setPointSizeF(max(8.0, MEASURE_FONT * self.zoom))
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        text_width = metrics.horizontalAdvance(reading)
+        text_height = metrics.height()
+        middle = QPointF((start.x() + current.x()) / 2.0,
+                         (start.y() + current.y()) / 2.0)
+        painter.drawText(
+            QRectF(middle.x() - text_width / 2.0,
+                   middle.y() - text_height - 6.0,
+                   text_width, text_height),
+            Qt.AlignmentFlag.AlignCenter, reading)
 
     def _paint_marquee(self, painter: QPainter) -> None:
         """Draw the area/table selection rectangle in view coordinates."""
@@ -2999,6 +3110,19 @@ class PDFView(QAbstractScrollArea):
             event.accept()
             return
         if (event.button() == Qt.MouseButton.LeftButton
+                and self.tool_mode == "measure"):
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            self.clear_selection()
+            hit = self._pdf_point_at(event.position().toPoint())
+            if hit is not None:
+                page, x, y = hit
+                self._measure_drag = {
+                    "page": page, "start": (x, y), "current": (x, y),
+                }
+                self.viewport().update()
+            event.accept()
+            return
+        if (event.button() == Qt.MouseButton.LeftButton
                 and self.tool_mode in ("area", "table")):
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             self.clear_selection()
@@ -3062,6 +3186,11 @@ class PDFView(QAbstractScrollArea):
             self._extend_shape(event.position().toPoint())
             event.accept()
             return
+        if (self._measure_drag is not None
+                and (event.buttons() & Qt.MouseButton.LeftButton)):
+            self._extend_measure(event.position().toPoint())
+            event.accept()
+            return
         if (self._marquee is not None
                 and (event.buttons() & Qt.MouseButton.LeftButton)):
             self._marquee["current"] = event.position().toPoint() + QPoint(
@@ -3119,6 +3248,15 @@ class PDFView(QAbstractScrollArea):
             event.accept()
             return
         if (event.button() == Qt.MouseButton.LeftButton
+                and self._measure_drag is not None):
+            drag = self._measure_drag
+            self._extend_measure(event.position().toPoint())
+            self._measure_drag = None
+            self.viewport().update()
+            self._commit_measure(drag)
+            event.accept()
+            return
+        if (event.button() == Qt.MouseButton.LeftButton
                 and self._marquee is not None):
             start = self._marquee["start"]
             current = self._marquee["current"]
@@ -3166,6 +3304,10 @@ class PDFView(QAbstractScrollArea):
             return
         if key == Qt.Key.Key_Escape and self._shape_drag is not None:
             self._cancel_shape()
+            event.accept()
+            return
+        if key == Qt.Key.Key_Escape and self._measure_drag is not None:
+            self._cancel_measure()
             event.accept()
             return
         if key == Qt.Key.Key_Escape and self._marquee is not None:

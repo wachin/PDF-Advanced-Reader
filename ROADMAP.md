@@ -900,7 +900,8 @@ highlight that stays on its words however the page is turned (F10-3g), a list
 that re-reads the pages an edit touched (F10-3h), freehand ink in the
 document (F10-3i), the pen tool and its style pickers (F10-3j/3k), the
 shape tool (F10-3l/3m), the standard rubber stamps with their tool
-(F10-3n) and custom caption/image stamps (F10-3o) done.
+(F10-3n), custom caption/image stamps (F10-3o) and measurement annotations
+with a chosen scale (F10-3p) done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1278,7 +1279,23 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       reflow guard as the standard stamps. A file that is not an image, an
       empty definition, a caption the font cannot draw and one too long for the
       page are refused before the document changes.)
-- [ ] Measurement annotations (`/Projection`), with the scale they are drawn in
+- [x] Measurement annotations: a distance with the scale it is drawn in
+      (**F10-3p.** A measurement is a real `/Line` annotation carrying
+      `/IT /LineDimension` and a rectilinear `/Measure` dictionary
+      (`/Subtype /RL`, `/R (1 pt = 0.352778 mm)`, one `/NumberFormat` for the
+      distance), so the file itself says what the number means — not the 3D
+      `/Projection` dictionary an earlier version of this item named. MuPDF
+      draws such a line bare, so PDFAR writes the end ticks and the reading
+      into `/AP/N` itself, like a custom stamp's caption. The Measure split
+      button offers millimetres, centimetres, inches, points and a custom
+      "factor unit" scale; a drag places one as one edit, with a live reading
+      that comes from the page geometry and follows the pointer under any
+      zoom or view rotation. The scale is viewer state, so two tabs can
+      measure in two units, and reflow disables the tool.)
+- [ ] Perimeter and area measurements (`/IT /PolygonDimension`, a polygon's
+      `/Measure` and the area number format it needs)
+- [ ] Scale calibration: derive the scale from a line of known length instead
+      of typing the factor
 - [ ] Appearance streams, so other readers show the same thing without
       regenerating them
 - [ ] XFDF import/export
@@ -1403,9 +1420,10 @@ colour and thickness come from pickers beside the tool (F10-3k); shapes are real
 tool drags all five kinds with a live preview (F10-3m); the 14 standard rubber
 stamps are real `/Stamp` annotations with a click-to-place tool (F10-3n), and a
 custom stamp can be a typed caption or an image file whose appearance PDFAR
-writes itself (F10-3o).
-Next, in order: measurement, appearance streams so other readers show what
-PDFAR wrote, and XFDF import/export.
+writes itself (F10-3o); a measurement is a real `/LineDimension` with its own
+`/Measure` scale, a live reading and a split button for the units (F10-3p).
+Next, in order: perimeter/area and calibration, appearance streams so other
+readers show what PDFAR wrote, and XFDF import/export.
 
 Goal:
 
@@ -3202,8 +3220,123 @@ Saving the book with the stamps is 1.7 s for 23.6 MB.
 restarts — a definition is given each time the tool is armed; a colour or font
 choice for a caption (the caption is red Helvetica-Bold like the standard
 stamps); multi-line captions; and editing the appearance of a stamp already
-placed (its note can be changed, but the mark is what was drawn). Measurement
-annotations (`/Projection`) are next.
+placed (its note can be changed, but the mark is what was drawn). Distance
+measurement is F10-3p; perimeter/area and scale calibration are still open.
+
+---
+
+### F10-3p Measuring distances with a chosen scale — [x] Implemented
+
+**Completed**: 2026-10-27
+
+**What landed**: `MeasurementAnnotation`, `MeasurementScale`, `AddMeasurement`
+and `AnnotationManager.add_measurement()`, plus a Measure tool whose split
+button chooses the units and whose drag places one dimension. A measurement is
+a real PDF dimension: a `/Line` annotation with `/IT /LineDimension` and a
+rectilinear `/Measure` dictionary (`/Subtype /RL`, `/R (1 pt = …)`, one
+`/NumberFormat` in `/X` for the distance), so the file itself carries the
+scale and a reader that understands dimensions shows the same number PDFAR
+does. The old roadmap item said `/Projection`, which is a 3D projection
+dictionary and has nothing to do with 2D measurement; `/Measure` is the
+mechanism PdfCraft and other editors use.
+
+**The dictionary.** The factor is written with six decimals, the unit as a
+PDF literal string, and `precision` as the number format's denominator
+(`/D 10` = one decimal, up to `/D 10000` = four). The reader accepts the
+dictionary either direct or as an indirect object, understands only `/RL`,
+and maps the denominator back to 0–4 decimals; anything else — a compound or
+geospatial measure, a missing `/X` array, an unusable unit — leaves the
+annotation to be read as the plain line it also is. `checked_measure_scale()`
+refuses a non-finite or out-of-range factor, more than four decimals, and a
+unit that is empty, over 16 characters, has control characters or is outside
+Latin-1, before the document is touched.
+
+**The appearance.** MuPDF paints a dimension line as a bare line, so the
+ticks and the number are PDFAR's own form XObject in `/AP/N`: a line, two
+perpendicular end ticks and a Helvetica reading above it (below it near the
+page top), in `MEASURE_COLOR` and the pen's width. The box pads the geometry
+by the tick and the label, is clamped to the page, and refuses a reading
+wider than the page. Two MuPDF traps: a `/Line` annotation has no Rect
+property, so `set_rect()` fails with "Line annotations have no Rect
+property" and the box is written straight into `/Rect` in PDF space, whose y
+axis runs up from the mediabox bottom; and `update()` must run first because
+it refits `/Rect` to the bare line and draws a plain appearance, after which
+`/Rect`, `/IT`, `/Measure`, `/Subj`, `/Contents` and `/AP` go on in that
+order. `xref_get_key()` follows nested paths (`Measure/Subtype`) but does not
+index arrays, so the `/X` format is parsed with regexes.
+
+**The tool.** Measure is a page-only left-button tool: press captures one end
+in page space with `_pdf_point_at()`, moves extend the other end, and release
+commits the drag as one `AddMeasurement` — one annotation, one Ctrl+Z. The
+preview paints the line, the ticks and the live reading in view space from
+the captured page points, so zoom and view rotation carry it; a press-release
+with no extent is dropped, a point off the page stops the end at the paper,
+and Escape, a tool change or a view-mode change cancels. The split button
+offers Millimetres, Centimetres, Inches, Points and "Custom Scale…" (a factor
+and a unit, e.g. `0.5 in`); the scale is viewer state like the pen's colour,
+so each tab keeps its own, and the toolbar's colour/width pickers style the
+measurement as they style ink and shapes. Reflow disables the tool with the
+other page-only tools.
+
+**Files changed**: `src/pdfar/annotations.py` (`MeasurementScale`,
+`MEASURE_SCALES`, `checked_measure_scale`, `MeasurementAnnotation`,
+`MEASURE_*` constants, `_pdf_number`, `_measure_dictionary`,
+`_measurement_appearance`, `_read_measurement_scale`, `_measurement_model`,
+`AddMeasurement`, `AnnotationManager.add_measurement`, the `/LineDimension`
+branch of `_read_page`, the `_pdf_caption` → `_pdf_string` rename),
+`src/pdfar/viewer.py` (`measure_scale`, `_measure_drag`, `set_measure_scale`,
+`_cancel_measure`, `_extend_measure`, `_commit_measure`, `_paint_measure`,
+the tool's mouse and Escape paths), `src/pdfar/main.py` (the measure action
+and split button, the scale menu, `_choose_measure_scale`,
+`_sync_measure_scale`, `_choose_custom_scale`, per-tab sync, reflow guard,
+pen options and tint), `assets/icons/measure.svg`,
+`tests/test_measurements.py`, and the toolbar-order assertion in
+`tests/test_main.py`.
+
+**Verified by eye** (headless): a 300×200 "plan" took a 180 pt horizontal
+line in millimetres (63.5 mm), a diagonal in centimetres (7.63 cm) and a line
+at the page top in points (180.0 pt, reading below the line). The saved page
+re-rendered 2,819 red pixels with the ticks and all three readings, and after
+save/reopen the three scales came back from `/Measure` with the same
+readings. The real window, armed from the split button, showed the live
+"6.35 cm" preview mid-drag and a dirty tab with the placed dimension after
+release. Screenshots `/tmp/f103p_page.png`, `/tmp/f103p_ui_preview.png`,
+`/tmp/f103p_ui_placed.png`.
+
+**Tests**: 833 passed (was 778) — `tests/test_measurements.py` (55): a
+measurement is a `/Line` with `/IT /LineDimension`, `/Measure /RL`, the
+`Distance` subject, an `/AP/N` stream, the `NM` id and the history label; the
+reading follows the distance and each preset scale (mm, cm, in, pt) with the
+period it promises; the reading paints red on the page; the box makes room
+above the line, moves below it at the page top, and stays on the page at four
+corners; the pen colour and width reach `/C` and `/BS`; one undo removes it
+and redo restores it; save + reopen keeps the points, the scale, the reading
+and a painted appearance; a note replaces `/Contents` without losing the
+drawing; two equal points, an unusable factor, a non-Latin-1 unit and a
+reading wider than the page are refused with the version, dirty flag and
+history unchanged; `checked_measure_scale` trims and refuses the bad cases;
+a plain line with no `/Measure`, a foreign `/Measure` subtype and an indirect
+`/Measure` object read as a line / a line / a measurement respectively. On
+the tool side: a preset arms the tool and sets the default action and
+tooltips; the menu lists the presets and Custom Scale; a drag places one
+measurement while a click places none; Escape, a tool change and reflow stop
+it; the preview follows the drag; the custom dialog arms a scale, warns and
+keeps the old one for out-of-range input, and cancels cleanly; two tabs keep
+two scales; the pen controls appear and style the mark; and a 90° view still
+lands the dimension on the dragged page points. Three consecutive full runs.
+
+**Performance on the 540-page book** (page 1): the measurement itself is the
+same copy-and-adopt edit as every other kind — 59 ms median (one 103 ms
+first run), undo 16.9 ms and redo 16.6 ms including the one-page re-read.
+Through a real `PDFView`, 60 pt of drag previews in 0.3 ms, release applies
+the dimension in 260 ms including the page re-read, the re-rasterised page
+paints in 307 ms and a no-edit repaint is 2.9 ms. Saving the book with the
+measurement is 2.05 s for 24 MB.
+
+**What is not here**: perimeter and area (a polygon's `/PolygonDimension`),
+scale calibration from a known length, snapping to geometry or existing
+dimensions, and moving or editing the endpoints of a placed measurement —
+undo and redo are the only ways to change it.
 
 ---
 
