@@ -28,6 +28,7 @@ from pdfar.annotations import (
 )
 from pdfar.edits import EditError, Scope
 from pdfar.save import save_document
+from pdfar.xfdf import export_xfdf
 
 #: Geometry that fits the 200x100 sample page, one entry per kind.  Box shapes
 #: carry ``rect``; the others carry page-space vertices.
@@ -38,6 +39,14 @@ SHAPES = {
     "arrow": {"points": ((20.0, 20.0), (80.0, 70.0))},
     "polygon": {"points": ((20.0, 20.0), (80.0, 30.0), (50.0, 70.0))},
 }
+
+#: A box on the first page with no page content under it, for measuring ink.
+#: Deliberately small: the smaller the mark, the more a stale appearance scaled
+#: into the corrected box shows up in the width of its border.
+CLEAR = (150.0, 15.0, 175.0, 40.0)
+
+#: Sampling of the rendered page used to measure the painted border.
+ZOOM = 8
 
 #: What the file has to say for each kind.  An arrow shares ``/Line`` with a
 #: plain line; ``line_ends`` is what tells them apart.
@@ -95,6 +104,48 @@ def shapes_on(doc, page=0):
                      round(rect.x1, 1), round(rect.y1, 1)),
         })
     return out
+
+
+def boxes(doc, page=0):
+    """Every shape's box on *page*, by id, as the file reports it."""
+    return {held["id"]: held["rect"] for held in shapes_on(doc, page)}
+
+
+def painted(page, box):
+    """Where the marks changed the picture, in points: the extreme edges of the
+    ink and the runs it crosses along the box's middle row.
+
+    The page is rendered with and without its annotations and the two compared,
+    because the sample page has text and a black square of its own — those are
+    identical in both pictures and so cancel out.
+    """
+    matrix = fitz.Matrix(ZOOM, ZOOM)
+    clip = fitz.Rect(*box)
+    bare = page.get_pixmap(matrix=matrix, annots=False, clip=clip)
+    marked = page.get_pixmap(matrix=matrix, annots=True, clip=clip)
+
+    def ink(x, y):
+        return bare.pixel(x, y) != marked.pixel(x, y)
+
+    points = [(box[0] + x / ZOOM, box[1] + y / ZOOM)
+              for y in range(marked.height) for x in range(marked.width)
+              if ink(x, y)]
+    if not points:
+        raise AssertionError("nothing was painted")
+    edges = (min(x for x, _y in points), min(y for _x, y in points),
+             max(x for x, _y in points), max(y for _x, y in points))
+    middle = (box[1] + box[3]) / 2
+    row = int((middle - box[1]) * ZOOM)
+    runs, run = [], 0
+    for x in range(marked.width):
+        if ink(x, row):
+            run += 1
+        elif run:
+            runs.append(run / ZOOM)
+            run = 0
+    if run:
+        runs.append(run / ZOOM)
+    return edges, runs
 
 
 @pytest.fixture
@@ -300,6 +351,89 @@ def test_a_shape_survives_a_save_and_a_reopen(manager, kind):
                 assert got == pytest.approx(want, abs=0.01)
     finally:
         reopened.session.close()
+
+
+# ---------------------------------------------------------------- the box keeps its size
+@pytest.mark.parametrize("kind", ("rect", "ellipse"))
+def test_a_box_shape_holds_the_box_that_was_drawn(manager, kind):
+    """MuPDF widens a ``/Square``'s or ``/Circle``'s box by a point on every side
+    as it creates it, and neither ``set_rect()`` nor ``update()`` takes it back.
+
+    That box is the shape's only geometry, so the extra point is not a rounding
+    detail: it is a mark that is bigger than the one the user drew.
+    """
+    made = draw(manager, kind)
+
+    assert boxes(manager.doc)[made.id] == pytest.approx(SHAPES[kind]["rect"])
+    assert made.rects[0] == pytest.approx(SHAPES[kind]["rect"])
+
+
+@pytest.mark.parametrize("kind", ("rect", "ellipse"))
+def test_a_box_shape_drawn_at_the_box_it_was_read_keeps_that_size(tmp_path, manager,
+                                                                  kind):
+    """The defect is the compounding, not the one point: whatever a reader takes
+    out of the file, drawing it again has to put back the same box.
+    """
+    want = SHAPES[kind]["rect"]
+    made = draw(manager, kind, page=1, width=2.0)
+    path = save_document(manager.session).path
+    manager.session.close()
+
+    reopened = AnnotationManager(make_session(path))
+    try:
+        assert boxes(reopened.doc, page=1)[made.id] == pytest.approx(want)
+        read_back = tuple(reopened.get_annotation(made.id).rects[0])
+        again = reopened.add_shape(1, kind, rect=read_back, width=2.0)
+        assert boxes(reopened.doc, page=1)[again.id] == pytest.approx(want)
+    finally:
+        reopened.session.close()
+
+
+@pytest.mark.parametrize("kind", ("rect", "ellipse"))
+def test_a_box_shape_does_not_grow_through_the_xfdf_exchange(tmp_path, kind):
+    """The exchange is where the growth was found — an export writes the box the
+    file holds and an import draws a shape at that box, so every round left the
+    mark a point bigger on each side than the last.
+    """
+    want = SHAPES[kind]["rect"]
+    source = AnnotationManager(make_session(
+        build_sample_pdf(tmp_path / "source.pdf", pages=2)))
+    try:
+        made = source.add_shape(0, kind, rect=want, color=RED, width=2.0)
+        text = export_xfdf(source)
+    finally:
+        source.session.close()
+
+    for cycle in (1, 2, 3):
+        arrived = AnnotationManager(make_session(
+            build_sample_pdf(tmp_path / f"round{cycle}.pdf", pages=2)))
+        try:
+            assert arrived.import_xfdf(text) is not None, "the import was refused"
+            assert boxes(arrived.doc)[made.id] == pytest.approx(want)
+            text = export_xfdf(arrived)
+        finally:
+            arrived.session.close()
+
+
+@pytest.mark.parametrize("width", (1.0, 2.0, 6.0))
+def test_a_shape_is_painted_inside_its_box_with_the_border_asked_for(manager,
+                                                                     width):
+    """Taking the point back must not cost the drawing anything.
+
+    A reader that wrote the box and left the old appearance alone would scale
+    that appearance down into it, thinning the border with the shape; one that
+    clipped the appearance to the box would cut the border off.  Here the ink
+    stays inside the box and the stroke is the width the user picked, to within
+    one pixel of the render.
+    """
+    draw(manager, "rect", rect=CLEAR, width=width)
+
+    page = manager.doc.load_page(0)
+    edges, runs = painted(page, CLEAR)
+    pixel = 1.0 / ZOOM
+    assert edges[0] >= CLEAR[0] - pixel and edges[1] >= CLEAR[1] - pixel
+    assert edges[2] <= CLEAR[2] + pixel and edges[3] <= CLEAR[3] + pixel
+    assert runs == pytest.approx([width, width], abs=pixel)
 
 
 # ------------------------------------------------------------------ the listing side

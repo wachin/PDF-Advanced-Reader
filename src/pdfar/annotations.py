@@ -1390,6 +1390,29 @@ def _clean_shape(kind: str, rect, points) -> tuple:
     return tuple(cleaned)
 
 
+def _trim_stored_box(doc: fitz.Document, annot: fitz.Annot,
+                     box: Tuple[float, float, float, float]) -> None:
+    """Put a box shape's ``/Rect`` back to the box that was drawn.
+
+    MuPDF widens a ``/Square``'s or ``/Circle``'s box by a point on every side as
+    it creates the annotation, and neither ``set_rect()`` nor ``update()`` takes
+    it back.  The box *is* the geometry of these two kinds, so that point is not a
+    rounding detail but a growing mark: read the box out of the file, draw a shape
+    at it, and the next file states a point more on every side — which is how the
+    comment exchange left inflating the mark, once per round trip, forever.
+
+    The padding is equal on all four sides, so it can be taken off the array the
+    file holds without knowing which way that space's axes run.
+    """
+    inset = annot.rect.x0 - box[0]
+    _kind, value = doc.xref_get_key(annot.xref, "Rect")
+    edges = [float(number) for number in value.strip("[]()").split()]
+    doc.xref_set_key(
+        annot.xref, "Rect",
+        f"[{_pdf_number(edges[0] - inset)} {_pdf_number(edges[1] - inset)} "
+        f"{_pdf_number(edges[2] + inset)} {_pdf_number(edges[3] + inset)}]")
+
+
 @dataclass(frozen=True)
 class AddShape(SinglePageEdit):
     """Draw one shape on a page — a PDF ``/Square``, ``/Circle``, ``/Line`` or
@@ -1436,6 +1459,10 @@ class AddShape(SinglePageEdit):
             annot.set_info(title=self.author)
         if self.note:
             annot.set_info(content=self.note)
+        if self.kind in ("rect", "ellipse"):
+            # Before the appearance, so what is painted is the box that is stored
+            # and not a wider one scaled down into it.
+            _trim_stored_box(doc, annot, geometry)
         # MuPDF writes the appearance stream here, so the shape shows in other
         # readers even though PDFAR only stores its geometry.
         annot.update()

@@ -908,7 +908,9 @@ the document's comments (F10-3t), the reader that turns another program's
 XFDF into a plan of edits (F10-3u), that plan as one undoable import
 (F10-3v) and the two File-menu commands that reach either half (F10-3w)
 done — and the identity those commands' marks rest on now survives a document
-whose marks were all given the same name (F10-3x).
+whose marks were all given the same name (F10-3x), while a square or a circle
+keeps the box it was drawn into instead of growing a point on every side each
+time the file is read (F10-3y).
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1399,13 +1401,19 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       the mark on the page the row names, so nothing that was listed can fail to
       be edited, and the export of such a document names its marks apart instead
       of writing one name 540 times.)
-- [ ] A square or a circle grows **1 pt on every side** each time it is read back
+- [x] A square or a circle grows **1 pt on every side** each time it is read back
       (found by F10-3u: MuPDF writes a shape's `/Rect` a point larger than the box
       it was given, whatever `/BS /W` says, so the box an export states is a point
       wider than the box the mark was drawn into and an import takes the file's
       word for it. Two cycles measured: every other kind returns to the numbers it
       left with. The fix belongs to the shape model or its appearance, not to
-      XFDF — subtracting a MuPDF constant would misread every other reader's file.)
+      XFDF — subtracting a MuPDF constant would misread every other reader's file.
+      **F10-3y.** it is taken back where the box is written: `AddShape` asks MuPDF
+      for the shape, moves the array the file holds in by exactly the distance MuPDF
+      moved the edges out, and only then lets `update()` paint it, so the appearance
+      is drawn for the box that ends up in the file rather than scaled into it. A
+      mark another program drew keeps the box that program wrote, because reading is
+      not editing.)
 
 ## F10-4 Page manipulation (was F6) — [ ]
 
@@ -1541,9 +1549,12 @@ undoable import that refuses the file or takes all of it (F10-3u,
 F10-3v); and both halves are now commands a user can reach, under File
 (Export / Import Comments (XFDF)) — the exchange is finished at the
 interface, not only in the library (F10-3w).
-Next, in order: the defect the XFDF export found and
-left open — a square or circle grows **1 pt per side** on every read — then
-F10-4's page manipulation.
+Next, in order: the two defects that exchange found are
+now closed — marks that share a name are listed as the separate marks they
+are (F10-3x), and a square or a circle keeps the box it was drawn into
+instead of growing a point on every side each time the file is read
+(F10-3y). Next in order: F10-4's page
+manipulation.
 
 Goal:
 
@@ -4299,6 +4310,98 @@ and the case where a file forges a `/NM` that is *exactly* PDFAR's own spelling 
 an object number — the two marks then want one key and one row is lost. No reader
 produces that name, and PDFAR's export cannot; it is recorded here rather than
 designed around.
+
+---
+
+### F10-3y The box a shape is kept in — [x] Implemented
+
+**Completed**: 2026-10-28
+
+**What landed**: `_trim_stored_box()` in `src/pdfar/annotations.py`, called from
+`AddShape.apply` for the two kinds whose geometry *is* a box, before `update()`
+paints it. This is the second of the two defects the XFDF exchange found, and the
+last open item F10-3 left behind.
+
+**The defect**: MuPDF writes a `/Square`'s or `/Circle`'s `/Rect` **one point
+larger on every side** than the box it is handed, at the moment it creates the
+annotation. For the other three kinds the geometry lives in `/L` and `/Vertices`
+and the box is derived, so only these two carry the widening in what they are. And
+the box is what an exchange carries: the export states the box the file holds, the
+import draws a shape at that box, MuPDF pads it again — so the mark grew and the room
+around it shrank, once per round trip, forever.
+
+**Measured before anything was written** (`/tmp/f103y/orders.py`, `spaces.py`,
+`thick.py`):
+
+* the pad is **1 pt per side, always** — at `/BS /W` of 1, 2, 3 and 6 pt, and with
+  `/Rotate` 0/90/180/270, an offset crop box and a media box that does not start at
+  the origin. The array the file holds differs in those last cases; the box as the
+  library reports it in page space does not, and the pad is equal on all four sides
+  either way, which is what lets it be taken back without knowing which way that
+  space's axes run;
+* `set_rect()` cannot take it back — a no-op before `update()` and re-padded after,
+  the same refusal the measurement work found for `/Line`, so writing `/Rect` at the
+  xref is the library's own door rather than a bypass of it;
+* the order matters: write the box *after* `update()` and the appearance MuPDF
+  already made is scaled down into it, which shrinks the mark by its padding and
+  thins the border with it (measured ink at 19.875…69.875 for a 50×40 box). Written
+  *before*, `update()` paints the box that ends up in the file, and the border stays
+  exactly 1, 2, 3 and 6 pt — the correction costs the drawing nothing.
+
+**Ten rounds through the exchange**, both kinds, one mark each: **one distinct box**,
+`(20, 20, 70, 60)` — the box that was drawn. With the repair switched off the same
+ten rounds give ten distinct boxes, ending at `(9, 9, 81, 71)`: a mark that was 50×40
+is 72×62, 44 % wider and 55 % taller, and it would keep going.
+
+**Files changed**: `src/pdfar/annotations.py`, `tests/test_shapes.py`, `ROADMAP.md`,
+`docs/pdfcraft-editing-analysis.md`.
+
+**Tests**: **9 new**, in four groups — the drawn box is the stored box, in the file
+and on the model (2); a saved-and-reopened shape redrawn at the box that was read
+back keeps that size, which is the compounding itself (2); three exchange rounds keep
+it (2); and the painted ink stays inside the box with the border the user picked, at
+1, 2 and 6 pt, measured by rendering the page with and without its annotations and
+comparing the two so the sample page's own text and square cancel out (3). All nine
+fail with `_trim_stored_box` switched off (`/tmp/f103y/mutated.py`): without the
+repair the ink lies partly outside the box the file claims, so only 5.0 pt of a 6 pt
+stroke is measured inside it. The 25 pt box is deliberate — the smaller the mark, the
+more an appearance left drawn for the padded box and scaled down into the corrected
+one shows up as a thinned border: `/tmp/f103y/naive.py` builds that mistake on purpose
+and the 6 pt case reads 5.625 pt of ink, which the test refuses. **1021 passed, three
+consecutive runs** (131.5 / 129.2 / 130.5 s). Ruff unchanged at the 7
+pre-existing errors; mypy unchanged at 545.
+
+**Verified by eye**: `/tmp/f103y/verified.py` draws a rectangle and a circle over a
+grey guide rectangle that is exactly the requested box, the old way and the new, at
+4× (`/tmp/f103y/before.png`, `after.png`). Before, the red ink hangs a point outside
+the guide on all four sides — visible as the circle crossing the box it is supposed
+to fit. After, the ink sits on the guide (30.00…129.75 for a 30…130 box), the circle
+is tangent to all four guide edges rather than squashed, and the border is unbroken
+wherever it runs.
+
+**Performance**: one `xref_get_key` and one `xref_set_key` per box shape, at a point
+where the annotation has just been created. Shapes drawn through the manager, half
+squares and half ellipses over 60 pages:
+
+| shapes | before | after |
+|---|---|---|
+| 100 | 6.7 ms each | **6.8 ms** each |
+| 500 | 14.0 ms each | **13.7 ms** each |
+| 1000 | 22.3 ms each | **23.1 ms** each |
+
+The growth across those rows is not this change: it is F10-3c's revision copy, which
+has more document to duplicate each time, and it is the same with the repair switched
+off.
+
+**What is not here**: any change to a mark PDFAR did not draw. A square that arrives
+from another reader keeps the box that reader wrote, padded or not, because reading a
+file is not editing it — the same rule F10-3x recorded for names, and the reason the
+checklist said the fix belongs to the shape model rather than to XFDF, where
+subtracting a MuPDF constant would misread every other program's box. Also not here:
+the vertex kinds, whose boxes MuPDF derives from `/L` and `/Vertices` and which are
+left to it, and any attempt to make `/Rect` hold room for a border the way MuPDF's
+pad did — the border is now drawn inside the box the user dragged, which is what the
+selection ring and the scroll-to already assume.
 
 ---
 
