@@ -33,6 +33,8 @@ try:
 except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 
+from .appearances import ensure_appearances
+
 
 class SaveError(RuntimeError):
     """A refusal the user can act on.  The message is shown verbatim."""
@@ -350,7 +352,14 @@ def save_document(session, path: Optional[str] = None, *, full: bool = False,
     if target == own_path:
         session.require_saved_file_unchanged()
         if not full and _can_append(doc, target):
+            ensure_appearances(doc)
             return _save_incremental(session, doc, target)
+
+    # A viewer paints what an annotation's /AP says.  PDFAR's own marks write
+    # that stream as they are made, but a mark from another program may have
+    # been left for the viewer to regenerate, and not every viewer does.  The
+    # file becomes someone else's copy from here, so it leaves complete.
+    ensure_appearances(doc)
 
     # Level 1 frees the bytes of the objects a deleted page leaves behind; level
     # 2 also merges duplicate streams and shrinks the object table, and costs the

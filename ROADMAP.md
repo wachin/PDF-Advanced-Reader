@@ -901,8 +901,9 @@ that re-reads the pages an edit touched (F10-3h), freehand ink in the
 document (F10-3i), the pen tool and its style pickers (F10-3j/3k), the
 shape tool (F10-3l/3m), the standard rubber stamps with their tool
 (F10-3n), custom caption/image stamps (F10-3o), measurement annotations
-with a chosen scale (F10-3p), perimeter/area measurements (F10-3q) and
-calibration from a line of known length (F10-3r) done.
+with a chosen scale (F10-3p), perimeter/area measurements (F10-3q),
+calibration from a line of known length (F10-3r) and self-contained
+appearance streams on every mark a save writes (F10-3s) done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1317,8 +1318,21 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       dialog starts with the line's current reading, so it can be corrected
       rather than retyped.  Nothing is written to the document: the scale is
       viewer state like the units, and Ctrl+Z has nothing to undo.)
-- [ ] Appearance streams, so other readers show the same thing without
+- [x] Appearance streams, so other readers show the same thing without
       regenerating them
+      (**F10-3s.** Every mark PDFAR made already carried its own `/AP/N` form
+      XObject: MuPDF writes it on `update()` for highlights, notes, ink,
+      shapes and standard stamps, and the custom-stamp and measurement edits
+      write their own. What a file could not promise was that marks it
+      *inherited* had one — a program that leaves appearance generation to the
+      viewer writes only the annotation dictionary, and viewers disagree or
+      skip it. `ensure_appearances()` now runs inside every save before the
+      bytes are produced: each annotation without `/AP/N` gets the drawing
+      MuPDF makes for it, an appearance the file already has is never
+      rewritten, and links, popups and form widgets are left alone. The scan
+      reads `/Annots` at the xref level, so the 540-page book with 1 046
+      links pays **50–80 ms** on a multi-second save and a document with no
+      annotations pays nothing.)
 - [ ] XFDF import/export
 
 ## F10-4 Page manipulation (was F6) — [ ]
@@ -1446,9 +1460,10 @@ writes itself (F10-3o); a measurement is a real `/LineDimension` with its own
 perimeter and an area are real `/PolyLineDimension` and `/PolygonDimension`
 annotations with the square-unit format their reading needs (F10-3q), and a
 reference line of known length sets the scale instead of a typed factor
-(F10-3r).
-Next, in order: appearance streams so other readers show what PDFAR wrote,
-and XFDF import/export.
+(F10-3r); a save now gives every annotation in the file, including marks
+another program left without one, the appearance stream that lets any reader
+paint it (F10-3s).
+Next, in order: XFDF import/export.
 
 Goal:
 
@@ -3547,6 +3562,86 @@ same path as F10-3p: the distance applied in 373.1 ms through a real
 fresh line, plan ratios ("1 mm on paper = 50 mm"), recalibrating an
 already-placed measurement, snapping the reference line to geometry, and
 honouring a PDF `/UserUnit` other than 1.
+
+---
+
+### F10-3s Appearance streams for marks from any editor — [x] Implemented
+
+**Completed**: 2026-10-28
+
+**What landed**: a save now guarantees that every annotation in the file it
+writes carries its own drawing in `/AP/N`. The new `appearances.py` holds the
+scan and the repair; `save_document()` runs it on the live document just
+before the bytes are produced, on the incremental path and the staged rewrite
+alike. It never invents a second drawing for a mark the file already
+describes: an annotation with `/AP/N` is left byte for byte as it was, so
+another editor's appearance is not "corrected". Links, popups and form
+widgets are skipped — they have no mark of their own, and a widget's
+appearance belongs to the form and `/NeedAppearances`, which PDFAR does not
+edit.
+
+**What was already true.** All fourteen kinds PDFAR writes were confirmed to
+save a self-contained form before any code changed: `AddHighlight`, `AddNote`,
+`AddInk`, `AddShape` and `AddStamp` call `Annot.update()`, which is what
+writes the stream, and `AddCustomStamp`/`AddMeasurement` write their own with
+`_new_stream_object()` (the measurement's caption needs it, MuPDF draws bare
+geometry). The gap was on the *reading* side of the promise: a file saved by
+PDFAR can contain a mark another program left for the viewer to regenerate —
+the annotation dictionary says where and what, no stream says how — and the
+viewers that matter disagree about whether to draw one. That is the case this
+step closes, and the invariant the tests now pin for PDFAR's own writes.
+
+**How the scan stays cheap.** Walking `page.annots()` over the 540-page book
+cost 356 ms and found nothing: GS262 has 1 046 link annotations, and links
+share the page's `/Annots` array while never carrying an appearance. The scan
+instead reads each page's `/Annots` at the xref level, skips `/Link`,
+`/Popup` and `/Widget`, and only loads a page when one of its objects has no
+`/AP/N` — so a clean book pays about a quarter of that walk, and a document
+with no annotations is not touched at all. A page whose array holds a direct
+dictionary, or whose markup cannot be read, is skipped rather than failing the
+save; a repair MuPDF refuses is skipped the same way (one damaged mark must
+not stop the rest of the file from being written).
+
+**Files changed**: `src/pdfar/appearances.py` (new: `has_appearance`,
+`ensure_appearances` and the xref-level scan), `src/pdfar/save.py` (import and
+the two calls around the incremental/staged split), `tests/test_appearances.py`
+(new), `ROADMAP.md`, `docs/pdfcraft-editing-analysis.md`.
+
+**Verified by eye**: a three-page file with all fourteen kinds was saved and
+painted by **Poppler** (`pdftoppm`, an independent renderer): the yellow and
+sky-blue highlights, note icon, rectangle, ellipse, line, arrowhead, polygon,
+Draft stamp, "PAID" caption stamp, ink stroke and the three dimensions with
+their readings all appeared with no viewer-side regeneration
+(`/tmp/f103s/page-1.png`, `page-2.png`, `page-3.png`). A foreign file with a
+blue square whose `/AP` had been stripped, plus a PDFAR note, was saved and
+also painted by Poppler with the square present — and a direct xref check
+showed the square gained a form while the link kept none
+(`/tmp/f103s/foreign-1.png`).
+
+**Tests**: 898 passed, three consecutive full runs. `tests/test_appearances.py`
+adds 8 cases: all fourteen kinds save a `/Subtype /Form` with a `/BBox`,
+non-empty content and, where the stream names `/F1`, the font resource; the
+saved file sets no `/AcroForm` to ask a viewer for help; a foreign square with
+no appearance gains one on the next save while its colour survives; an
+appearance the file brought is preserved byte for byte; a Save As repairs the
+copy and leaves the original alone; the repair is idempotent; one undrawable
+mark is skipped while the next is repaired; and a refusing repair does not
+stop the save. Recolouring a highlight is checked from the saved stream, so
+the file other readers get carries the new colour.
+
+**Performance on the 540-page book** (24.7 MB, 1 046 links, nothing to
+repair): the scan takes **52–77 ms** cold and ~50 ms warm; inside a full save
+with one new highlight it costs about **55 ms** on a 2.04 s write (the same
+save measured 2.10 s with it and 2.42 s against 2.13 s in a noisier first
+pair), and a second scan after the save is 49 ms. The edit that produced the
+mark is unchanged at 76 ms.
+
+**What is not here**: deciding that an existing but blank or malformed
+`/AP/N` needs redrawing (presence is the line — rewriting what another editor
+wrote is not a repair), form widgets and `/NeedAppearances`, a side cache for
+missing appearances at display time (PDFAR already paints what MuPDF
+synthesises), and pixel-for-pixel agreement with another editor's own
+default appearance for the same dictionary.
 
 ---
 
