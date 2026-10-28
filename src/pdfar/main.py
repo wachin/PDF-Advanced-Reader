@@ -529,10 +529,27 @@ class MainWindow(QMainWindow):
             setattr(self, f"act_stamp_{key.lower()}", action)
             self._stamp_actions[key] = action
 
+        # Stamps PDFAR draws itself: a typed caption or an image file.
+        self._custom_stamp = None
+        self._custom_stamp_actions = {}
+        for kind, label, tip in (
+                ("text", "Custom Text…",
+                 "Type a caption, then click the page"),
+                ("image", "Custom Image…",
+                 "Choose an image, then click the page")):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setToolTip(tip)
+            action.triggered.connect(
+                lambda _checked=False, k=kind: self._choose_custom_stamp(k))
+            setattr(self, f"act_stamp_custom_{kind}", action)
+            self._custom_stamp_actions[kind] = action
+
         for action in (self.act_explore, self.act_sel_text,
                        self.act_sel_area, self.act_sel_table, self.act_draw,
                        *self._shape_actions.values(),
-                       *self._stamp_actions.values()):
+                       *self._stamp_actions.values(),
+                       *self._custom_stamp_actions.values()):
             self._tool_group.addAction(action)
 
         # Page view modes (Okular-inspired).  Per document; the active view
@@ -852,6 +869,9 @@ class MainWindow(QMainWindow):
         self.stamp_split.setAutoRaise(True)
         stamp_menu = QMenu(self.stamp_split)
         for action in self._stamp_actions.values():
+            stamp_menu.addAction(action)
+        stamp_menu.addSeparator()
+        for action in self._custom_stamp_actions.values():
             stamp_menu.addAction(action)
         self.stamp_split.setMenu(stamp_menu)
         self.stamp_split.setDefaultAction(self._stamp_actions["Draft"])
@@ -2578,6 +2598,8 @@ class MainWindow(QMainWindow):
         if mode == "shape":
             return self._shape_actions[self._shape_kind]
         if mode == "stamp":
+            if self._custom_stamp is not None:
+                return self._custom_stamp_actions[self._custom_stamp["kind"]]
             return self._stamp_actions[self._stamp_name]
         return {
             "browse": self.act_explore,
@@ -2609,7 +2631,11 @@ class MainWindow(QMainWindow):
                 self.tool_split.setDefaultAction(action)
         if view is not None:
             view.set_shape_kind(self._shape_kind)
-            view.set_stamp_name(self._stamp_name)
+            if mode == "stamp":
+                if self._custom_stamp is not None:
+                    view.set_custom_stamp(**self._custom_stamp)
+                else:
+                    view.set_stamp_name(self._stamp_name)
             view.set_tool_mode(mode)
         self._sync_pen_options()
 
@@ -2628,10 +2654,72 @@ class MainWindow(QMainWindow):
         if name not in self._stamp_actions:
             return
         self._stamp_name = name
+        self._custom_stamp = None
         action = self._stamp_actions[name]
         action.setChecked(True)
         self.stamp_split.setDefaultAction(action)
         self._set_tool_mode("stamp")
+
+    def _custom_stamp_tip(self, definition: dict) -> str:
+        """The split button's tooltip for a custom stamp."""
+        if definition.get("kind") == "text":
+            return f"Custom stamp: {definition.get('caption', '')}"
+        return f"Custom stamp: {os.path.basename(definition.get('image', ''))}"
+
+    def _set_custom_stamp(self, definition: dict) -> None:
+        """Arm the stamp tool with a definition the user just gave."""
+        kind = definition.get("kind")
+        if kind not in self._custom_stamp_actions:
+            return
+        self._custom_stamp = {"kind": kind,
+                              "caption": definition.get("caption", ""),
+                              "image": definition.get("image", "")}
+        self._stamp_name = "Custom"
+        action = self._custom_stamp_actions[kind]
+        action.setToolTip(self._custom_stamp_tip(self._custom_stamp))
+        action.setChecked(True)
+        self.stamp_split.setDefaultAction(action)
+        self._set_tool_mode("stamp")
+        self.statusBar().showMessage(
+            "Custom stamp ready — click the page to place it", 5000)
+
+    def _choose_custom_stamp(self, kind: str) -> None:
+        """Ask for a caption or an image and arm the stamp tool with it."""
+        previous = (self._tool_action(self._tool_mode)
+                    if self._tool_mode == "stamp"
+                    else self._stamp_actions.get(self._stamp_name,
+                                                 self._stamp_actions["Draft"]))
+
+        def cancel() -> None:
+            # The action was checked when the menu item fired; put the check
+            # back where it was so the menu still says what the tool places.
+            previous.setChecked(True)
+            self.stamp_split.setDefaultAction(previous)
+
+        if kind == "text":
+            current = (self._custom_stamp or {}).get("caption", "")
+            caption, ok = QInputDialog.getText(
+                self, "Custom Stamp", "Stamp text:", text=current)
+            if not ok or not caption.strip():
+                cancel()
+                return
+            self._set_custom_stamp({"kind": "text",
+                                    "caption": caption.strip(), "image": ""})
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Custom Stamp Image", "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)")
+        if not path:
+            cancel()
+            return
+        try:
+            fitz.Pixmap(path)
+        except Exception:
+            QMessageBox.warning(self, "Custom Stamp",
+                                "PDFAR cannot read that image.")
+            cancel()
+            return
+        self._set_custom_stamp({"kind": "image", "caption": "", "image": path})
 
     def _set_view_mode(self, mode: str) -> None:
         """Apply a page view mode to the active document."""
@@ -2704,6 +2792,8 @@ class MainWindow(QMainWindow):
             action.setEnabled(selection_ok)
         for action in self._stamp_actions.values():
             action.setEnabled(selection_ok)
+        for action in self._custom_stamp_actions.values():
+            action.setEnabled(selection_ok)
         split = getattr(self, "tool_split", None)
         if split is None:
             return
@@ -2723,6 +2813,11 @@ class MainWindow(QMainWindow):
             return
         if view is not None:
             view.set_tool_mode(self._tool_mode)
+            # Stamp state is viewer state too, so a tab switch shows the tab's
+            # own standard stamp or custom definition, not the previous tab's.
+            self._custom_stamp = view.custom_stamp
+            if view.stamp_name in self._stamp_actions:
+                self._stamp_name = view.stamp_name
             if self._tool_mode == "shape":
                 # The kind is viewer state, like the pen's colour, so the tab
                 # the user switched to keeps the shape it was drawing.
@@ -2730,9 +2825,14 @@ class MainWindow(QMainWindow):
                 self.shape_split.setDefaultAction(
                     self._shape_actions[self._shape_kind])
             elif self._tool_mode == "stamp":
-                self._stamp_name = view.stamp_name
-                self.stamp_split.setDefaultAction(
-                    self._stamp_actions[self._stamp_name])
+                if self._custom_stamp is not None:
+                    action = self._custom_stamp_actions[
+                        self._custom_stamp["kind"]]
+                    action.setToolTip(self._custom_stamp_tip(
+                        self._custom_stamp))
+                else:
+                    action = self._stamp_actions[self._stamp_name]
+                self.stamp_split.setDefaultAction(action)
         self._tool_action(self._tool_mode).setChecked(True)
         self._sync_pen_options()
 
@@ -2870,6 +2970,8 @@ class MainWindow(QMainWindow):
             action.setIcon(tinted_icon(f"shape_{kind}.svg", ink))
         stamp_icon = tinted_icon("stamp.svg", ink)
         for action in self._stamp_actions.values():
+            action.setIcon(stamp_icon)
+        for action in self._custom_stamp_actions.values():
             action.setIcon(stamp_icon)
         for mode in ("single", "facing", "facing_centered", "overview",
                      "continuous"):

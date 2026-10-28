@@ -59,8 +59,8 @@ from .search import SearchHit
 from .session import DocumentSession
 from .tiles import Tile, TileGrid, TILE_SIZE
 from .annotations import (
-    INK_COLOR, INK_WIDTH, SHAPE_LABELS, STAMP_LABELS, Annotation,
-    AnnotationManager, HIGHLIGHT_COLORS, NoteAnnotation,
+    CUSTOM_STAMP_NAME, INK_COLOR, INK_WIDTH, SHAPE_LABELS, STAMP_LABELS,
+    Annotation, AnnotationManager, HIGHLIGHT_COLORS, NoteAnnotation,
 )
 
 #: How far apart two captured points of a pen stroke have to be, in screen
@@ -310,6 +310,9 @@ class PDFView(QAbstractScrollArea):
         self._shape_drag: Optional[dict] = None
         #: The standard stamp the stamp tool places on the next click.
         self.stamp_name = "Draft"
+        #: A stamp of PDFAR's own making, which takes the click instead:
+        #: ``{"kind": "text"|"image", "caption": ..., "image": ...}``.
+        self.custom_stamp: Optional[dict] = None
 
         # search
         self._hit_rects: Dict[int, List[Tuple[float, float, float, float]]] = {}
@@ -785,6 +788,25 @@ class PDFView(QAbstractScrollArea):
         if name not in STAMP_LABELS:
             return
         self.stamp_name = name
+        self.custom_stamp = None
+
+    def set_custom_stamp(self, kind: str, caption: str = "",
+                         image: str = "") -> None:
+        """Choose a stamp drawn from a caption or an image file.
+
+        ``kind`` is ``"text"`` (a one-line caption) or ``"image"`` (a path).
+        The definition belongs to the view, like the pen's colour, so two tabs
+        can place two different stamps; the next click uses it instead of the
+        standard name.
+        """
+        if kind == "text" and not caption.strip():
+            return
+        if kind == "image" and not image:
+            return
+        if kind not in ("text", "image"):
+            return
+        self.custom_stamp = {"kind": kind, "caption": caption, "image": image}
+        self.stamp_name = CUSTOM_STAMP_NAME
 
     def set_ink_color(self, color: str) -> None:
         """Choose the colour the pen writes into the annotation's ``/C``.
@@ -2966,7 +2988,14 @@ class PDFView(QAbstractScrollArea):
             hit = self._pdf_point_at(event.position().toPoint())
             if hit is not None:
                 page, x, y = hit
-                self.annotation_manager.add_stamp(page, self.stamp_name, (x, y))
+                if self.custom_stamp is not None:
+                    self.annotation_manager.add_custom_stamp(
+                        page, (x, y),
+                        caption=self.custom_stamp.get("caption", ""),
+                        image=self.custom_stamp.get("image", ""))
+                else:
+                    self.annotation_manager.add_stamp(
+                        page, self.stamp_name, (x, y))
             event.accept()
             return
         if (event.button() == Qt.MouseButton.LeftButton

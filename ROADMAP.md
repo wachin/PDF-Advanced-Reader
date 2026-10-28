@@ -899,8 +899,8 @@ places them (F10-3e), a comments panel that jumps to what it lists (F10-3f), a
 highlight that stays on its words however the page is turned (F10-3g), a list
 that re-reads the pages an edit touched (F10-3h), freehand ink in the
 document (F10-3i), the pen tool and its style pickers (F10-3j/3k), the
-shape tool (F10-3l/3m) and the standard rubber stamps with their tool
-(F10-3n) done.
+shape tool (F10-3l/3m), the standard rubber stamps with their tool
+(F10-3n) and custom caption/image stamps (F10-3o) done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1264,8 +1264,20 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       survives save/reopen through the code the other kinds left generic. The
       Stamp tool is a click, not a drag, and its split button offers all
       fourteen and keeps the chosen stamp per tab.)
-- [ ] Custom stamps: a text caption or an image file as the stamp's appearance
-      (**F10-3o, next**)
+- [x] Custom stamps: a text caption or an image file as the stamp's appearance
+      (**F10-3o.** A stamp PDFAR draws itself rather than one MuPDF draws from
+      a standard name. `AddCustomStamp` writes the appearance as a form XObject
+      in the annotation's `/AP/N`: a caption becomes a red Helvetica-Bold line
+      in a box that shrinks to fit the page, and an image is embedded as an
+      image XObject with its alpha kept as an `/SMask`, so a logo shows the page
+      through where the file is clear. The mark is `/Name /Custom`, which no
+      viewer regenerates, and its `/Contents` is the caption (or the user's own
+      note) so the comments panel says what the mark says. "Custom Text…" and
+      "Custom Image…" sit under the fourteen in the stamp menu, ask for the
+      caption or file, arm the click tool, and follow the same per-tab rule and
+      reflow guard as the standard stamps. A file that is not an image, an
+      empty definition, a caption the font cannot draw and one too long for the
+      page are refused before the document changes.)
 - [ ] Measurement annotations (`/Projection`), with the scale they are drawn in
 - [ ] Appearance streams, so other readers show the same thing without
       regenerating them
@@ -1389,9 +1401,11 @@ tool draws one where the pointer is, under any rotation (F10-3j), and the pen's
 colour and thickness come from pickers beside the tool (F10-3k); shapes are real
 `/Square`, `/Circle`, `/Line` and `/Polygon` annotations (F10-3l), and the shape
 tool drags all five kinds with a live preview (F10-3m); the 14 standard rubber
-stamps are real `/Stamp` annotations with a click-to-place tool (F10-3n).
-Next, in order: custom stamps (F10-3o), measurement, appearance streams
-so other readers show what PDFAR wrote, and XFDF import/export.
+stamps are real `/Stamp` annotations with a click-to-place tool (F10-3n), and a
+custom stamp can be a typed caption or an image file whose appearance PDFAR
+writes itself (F10-3o).
+Next, in order: measurement, appearance streams so other readers show what
+PDFAR wrote, and XFDF import/export.
 
 Goal:
 
@@ -3084,6 +3098,112 @@ every save pays.
 stamp's appearance — which is F10-3o next; dragging to size a stamp instead of
 clicking its standard size; and replacing the appearance of a stamp placed by
 another program.
+
+### F10-3o Custom stamps — a caption or an image PDFAR draws itself — [x] Implemented
+
+**Completed**: 2026-10-27
+
+**What landed**: `AddCustomStamp`, a stamp whose appearance PDFAR writes
+instead of letting MuPDF derive it from a standard name. A **caption** becomes
+one red Helvetica-Bold line inside a red box; an **image file** is embedded
+whole, transparency included. Either way the appearance is a form XObject in
+the annotation's `/AP/N` and the annotation is named `/Name /Custom`, so every
+reader shows what PDFAR put there and no viewer regenerates a standard stamp
+over it. `/Contents` is the caption (or a note the caller supplied), which is
+what makes the comments panel say what the mark says. The box keeps the
+stamp's own aspect — a text layout or the image's pixels — is placed around
+the click and slid inside at the page edges.
+
+**Text layout.** The caption collapses whitespace and must be Latin-1, the
+only range the built-in Helvetica-Bold can draw; the font starts at 18 pt and
+shrinks until the line fits 80 % of the page width, never below 8 pt. A
+caption that still would not fit at 8 pt, or one with characters outside
+Latin-1, is refused before the document is touched rather than written
+unreadably small. Padding is 10 pt on every side, and the text is escaped for
+a PDF literal string.
+
+**Image layout.** The file is decoded with `fitz.Pixmap`; a source with alpha
+keeps it as a grey `/SMask` (the last channel becomes the mask, the colour
+channels become a DeviceRGB or DeviceGray image), and CMYK is converted to
+RGB. The image XObject is drawn into the form at its pixel size, so the form
+scales to whatever box the stamp takes; the box is the standard stamp's
+190 pt wide (or 60 % of a small page) at the image's aspect. An unreadable or
+missing file is an `EditError`, not a broken annotation.
+
+**Two MuPDF traps, both about order.** `get_new_xref()` creates an *empty*
+object and `update_stream()` only accepts one that is already a dictionary, so
+an appearance is written dictionary-first, stream-second (and passing
+pre-compressed bytes as well gets them compressed twice and the image does not
+show). And `add_stamp_annot()` gives every stamp the 3.8:1 Draft appearance,
+which `update()` regenerates — refitting `/Rect` to that shape. The custom box
+is therefore set *after* `update()`, the caption `update()` writes into
+`/Contents` is cleared when the stamp has no note (`/Contents null`, the
+F10-3a finding), and only then are `/AP/N`, `/Name` and the id installed.
+
+**The interface.** The stamp menu now ends with "Custom Text…" and "Custom
+Image…" below a separator: the first asks for the caption, the second opens an
+image file dialog, and each arms the click-to-place tool with that definition.
+The chosen definition is viewer state, like the pen's colour and the shape
+kind, so each tab places its own; switching tabs restores that tab's standard
+or custom stamp and the split button's default action and tooltip follow.
+Cancelling a dialog (or picking an unreadable image) restores the stamp that
+was armed before. Reflow disables the two entries with the rest of the stamp
+tool.
+
+**Files changed**: `src/pdfar/annotations.py` (`CUSTOM_STAMP_NAME`, the
+caption font constants, `stamp_box`'s `aspect`, `_caption_layout`,
+`_pdf_caption`, `_new_stream_object`, `_caption_appearance`,
+`_image_appearance`, `_place_custom_stamp`, `AddCustomStamp`,
+`AnnotationManager.add_custom_stamp`, `StampAnnotation`'s docstring),
+`src/pdfar/viewer.py` (`custom_stamp`, `set_custom_stamp`, the custom branch
+of the stamp click), `src/pdfar/main.py` (the two custom actions, the menu
+separator, `_set_custom_stamp`, `_choose_custom_stamp`, the cancel path,
+per-tab sync, enable/tint), `tests/test_custom_stamps.py`, and the menu
+assertion in `tests/test_stamps.py`.
+
+**Verified by eye** (headless): a 300×200 page at 150 % took two captions and
+a 32×16 RGBA logo — `PAID 2026-10-27`, `CONFIDENTIAL - INTERNAL REVIEW`
+(shrunk to fit) and the logo — and read back all three as `/Name Custom`, with
+the captions in `/Contents` and the image stamp blank. The page rendered
+37,488 red pixels, and a pixel in the logo's transparent half equalled the
+bare page's pixel, so the `/SMask` works. A `REVIEWED` caption placed after
+turning the view 90° stored its box centred on the click. After saving and
+reopening, the four stamps came back with their captions and their `/AP`
+streams, and re-rendered at 41,357 red pixels. Screenshots `/tmp/f103o_ui.png`,
+`/tmp/f103o_rotated.png`.
+
+**Tests**: 778 passed (was 747) — `tests/test_custom_stamps.py` (31): a text
+stamp is a `/Stamp` named `Custom` with the caption in `/Contents`, an `/AP/N`
+stream, the `NM` id and the history label "Custom stamp"; the caption paints;
+the box centres on the click and clamps at three page edges; a long caption
+shrinks inside 80 % of the page; an image stamp keeps its 2:1 aspect, shows
+the image, keeps transparency (a clear pixel equals the page) and clamps; an
+empty definition, an unreadable file, a missing file, a non-Latin-1 caption
+and a caption too long for the page are each refused with the version, dirty
+flag and history unchanged; `apply()` raises `EditError` and carries
+`Scope.COMMENTS`; undo removes and redo restores the same id; save + reopen
+keeps the caption, the box and a painted appearance; a custom stamp lists in
+the panel with its caption and takes a note without losing its appearance. On
+the tool side: arming a caption or image switches to the stamp tool and sets
+the default action and tooltip; a click places it; choosing a standard stamp
+clears it; it lands on the click under a 90° view; reflow disables it; the
+dialogs arm/cancel correctly (including an unreadable image restoring the
+previous stamp); and two tabs keep a caption stamp and an image stamp
+separately. Three consecutive full runs.
+
+**Performance on the 540-page book** (page 1): the custom appearance is
+invisible beside the edit — 61 ms for a text stamp, 57 ms for an image stamp
+and 55 ms to re-apply, against 58 ms for a standard stamp. Through the real
+`PDFView` a click applies in 432 ms (text) and 312 ms (image), including the
+page re-read, with 69 ms and 201 ms to repaint; a no-edit repaint is 4–6 ms.
+Saving the book with the stamps is 1.7 s for 23.6 MB.
+
+**What is not here**: a library of custom stamps kept across documents or
+restarts — a definition is given each time the tool is armed; a colour or font
+choice for a caption (the caption is red Helvetica-Bold like the standard
+stamps); multi-line captions; and editing the appearance of a stamp already
+placed (its note can be changed, but the mark is what was drawn). Measurement
+annotations (`/Projection`) are next.
 
 ---
 

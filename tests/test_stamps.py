@@ -286,8 +286,12 @@ def test_the_stamp_is_a_click_tool(qapp, win, view):
 
 
 def test_the_menu_offers_every_standard_stamp(win, view):
-    entries = [a.text() for a in win.stamp_split.menu().actions()]
-    assert entries == [STAMP_LABELS[name] for name in NAMES]
+    actions = win.stamp_split.menu().actions()
+    entries = [a.text() for a in actions]
+    assert entries[:len(NAMES)] == [STAMP_LABELS[name] for name in NAMES]
+    # F10-3o adds a separator and the two custom entries after the fourteen.
+    assert actions[len(NAMES)].isSeparator()
+    assert entries[len(NAMES) + 1:] == ["Custom Text…", "Custom Image…"]
 
 
 def test_a_click_places_the_chosen_stamp(qapp, win, view):

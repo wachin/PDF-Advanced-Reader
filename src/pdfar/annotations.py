@@ -15,6 +15,7 @@ object all mean the same thing across an undo, a save and a reopen.
 
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -93,6 +94,16 @@ STAMP_NAMES = (
 )
 STAMP_LABELS = {key: label for key, label, _value in STAMP_NAMES}
 STAMP_VALUES = {key: value for key, _label, value in STAMP_NAMES}
+
+#: The ``/Name`` a stamp of PDFAR's own making carries.  Its appearance is the
+#: ``/AP/N`` stream the edit writes, not one MuPDF draws from a standard name.
+CUSTOM_STAMP_NAME = "Custom"
+
+#: How a text stamp is drawn: Helvetica-Bold, red like the standard ones, one
+#: line with a box around it.  The font shrinks to fit a narrow page.
+STAMP_CAPTION_FONT = 18.0
+STAMP_CAPTION_MIN_FONT = 8.0
+STAMP_CAPTION_PADDING = 10.0
 
 #: A stamp's natural width and the width:height ratio of MuPDF's appearance.
 #: ``add_stamp_annot`` fits its box to that ratio whatever rectangle it is
@@ -232,33 +243,178 @@ class ShapeAnnotation(Annotation):
 class StampAnnotation(Annotation):
     """A rubber stamp: a PDF ``/Stamp`` annotation.
 
-    ``name`` is the standard ``/Name`` the file keeps (``"Draft"``,
-    ``"Approved"``…), which is also what MuPDF draws the appearance from; the
-    box lives in ``rects[0]``.  ``content`` is a note the user attached, not the
-    stamp's name: MuPDF fills ``/Contents`` with the name it already knows, and
-    that caption is not something the user wrote.
+    ``name`` is the ``/Name`` the file keeps: one of the standard names
+    (``"Draft"``, ``"Approved"``…), which is also what MuPDF draws the
+    appearance from, or ``"Custom"`` for a stamp whose appearance PDFAR wrote
+    itself — a caption or an image.  The box lives in ``rects[0]``.
+    ``content`` is a note the user attached, not the stamp's name: MuPDF fills
+    ``/Contents`` with the standard name it already knows, and that caption is
+    not something the user wrote.  A custom text stamp puts its caption there
+    instead, so the comments panel can say what the mark says.
     """
     type: AnnotationType = AnnotationType.STAMP
     name: str = "Draft"
 
 
 def stamp_box(width: float, height: float,
-              center: Sequence[float]) -> Tuple[float, float, float, float]:
+              center: Sequence[float],
+              aspect: float = STAMP_ASPECT) -> Tuple[float, float, float, float]:
     """The box a stamp takes around *center*, inside a *width* x *height* page.
 
-    The stamp keeps MuPDF's 3.8:1 appearance, is at most 190 pt wide, and never
-    covers more than 60 % of either side of a small page.  A click near an edge
-    moves the whole box inwards rather than clipping it: half a stamp hanging
-    off the paper is an annotation no reader can select.
+    The stamp keeps *aspect* (MuPDF's 3.8:1 appearance by default), is at most
+    190 pt wide, and never covers more than 60 % of either side of a small
+    page.  A click near an edge moves the whole box inwards rather than
+    clipping it: half a stamp hanging off the paper is an annotation no reader
+    can select.
     """
     box_width = min(STAMP_WIDTH, width * 0.6)
-    box_height = box_width / STAMP_ASPECT
+    box_height = box_width / aspect
     if box_height > height * 0.6:
         box_height = height * 0.6
-        box_width = box_height * STAMP_ASPECT
+        box_width = box_height * aspect
     cx, cy = float(center[0]), float(center[1])
     x0 = min(max(cx - box_width / 2.0, 0.0), width - box_width)
     y0 = min(max(cy - box_height / 2.0, 0.0), height - box_height)
+    return (x0, y0, x0 + box_width, y0 + box_height)
+
+
+def _caption_layout(caption: str,
+                    page_width: float) -> Tuple[str, float, float, float]:
+    """The text, box size and font size of a caption stamp.
+
+    A caption is one line; whitespace collapses to single spaces.  The font
+    starts at 18 pt and shrinks until the line fits inside 80 % of the page,
+    never below 8 pt: a caption that would still not fit at 8 pt is refused
+    instead of being written unreadably small.
+    """
+    text = " ".join(caption.split())
+    if not text:
+        raise EditError("A custom stamp needs a caption")
+    try:
+        text.encode("latin-1")
+    except UnicodeEncodeError:
+        raise EditError(
+            "That caption has characters the stamp font cannot draw") from None
+    limit = page_width * 0.8
+    size = STAMP_CAPTION_FONT
+    text_width = fitz.get_text_length(text, fontname="hebo", fontsize=size)
+    while text_width + 2 * STAMP_CAPTION_PADDING > limit \
+            and size > STAMP_CAPTION_MIN_FONT:
+        size -= 1.0
+        text_width = fitz.get_text_length(text, fontname="hebo", fontsize=size)
+    width = text_width + 2 * STAMP_CAPTION_PADDING
+    if width > limit:
+        raise EditError("That caption is too long for this page")
+    return text, width, size + 2 * STAMP_CAPTION_PADDING, size
+
+
+def _pdf_caption(text: str) -> str:
+    """*text* as the bytes of a PDF literal string, escaped for WinAnsi."""
+    out = []
+    for byte in text.encode("latin-1"):
+        if byte in (0x28, 0x29, 0x5C):
+            out.append("\\" + chr(byte))
+        elif 32 <= byte <= 126:
+            out.append(chr(byte))
+        else:
+            out.append(f"\\{byte:03o}")
+    return "".join(out)
+
+
+def _new_stream_object(doc: fitz.Document, definition: str, content: bytes) -> int:
+    """An xref holding *definition* as its dictionary and *content* as its stream.
+
+    ``get_new_xref()`` creates an empty object and ``update_stream()`` only
+    accepts one that is already a dictionary, so the dictionary goes first;
+    then ``update_stream()`` adds ``/Length`` and the Flate filter itself.
+    """
+    xref = doc.get_new_xref()
+    doc.update_object(xref, definition)
+    doc.update_stream(xref, content)
+    return xref
+
+
+def _caption_appearance(doc: fitz.Document, text: str, width: float,
+                        height: float, size: float) -> int:
+    """The form XObject that draws a red box and *text* into it."""
+    font = doc.get_new_xref()
+    doc.update_object(
+        font, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold "
+              "/Encoding /WinAnsiEncoding >>")
+    baseline = height / 2.0 - size * 0.26
+    content = (
+        f"q 1 0 0 RG 1 0 0 rg 2 w "
+        f"0.5 0.5 {width - 1.0:.3f} {height - 1.0:.3f} re S "
+        f"BT /F1 {size:.2f} Tf {STAMP_CAPTION_PADDING:.3f} {baseline:.3f} Td "
+        f"({_pdf_caption(text)}) Tj ET Q"
+    ).encode("latin-1")
+    return _new_stream_object(
+        doc,
+        f"<< /Type /XObject /Subtype /Form /FormType 1 "
+        f"/BBox [0 0 {width:.3f} {height:.3f}] "
+        f"/Resources << /Font << /F1 {font} 0 R >> >> >>",
+        content)
+
+
+def _image_appearance(doc: fitz.Document,
+                      path: str) -> Tuple[int, float, float]:
+    """The form XObject that shows the image at *path*, and its pixel size.
+
+    The image becomes an image XObject; a source with transparency also gets a
+    grey ``/SMask`` so the page shows through where the file is clear, which
+    is what makes a logo or a scanned signature usable as a stamp.
+    """
+    name = os.path.basename(str(path)) or str(path)
+    try:
+        pix = fitz.Pixmap(os.fspath(path))
+    except Exception:
+        raise EditError(f"“{name}” is not an image PDFAR can read") from None
+    if pix.width <= 0 or pix.height <= 0:
+        raise EditError(f"“{name}” is empty")
+    mask_samples = None
+    if pix.alpha:
+        samples, components = pix.samples, pix.n
+        mask_samples = bytes(samples[i] for i in range(components - 1,
+                                                      len(samples), components))
+        plain = fitz.Pixmap(pix, 0)
+    else:
+        plain = pix
+    if plain.n not in (1, 3):
+        plain = fitz.Pixmap(fitz.csRGB, plain)
+    image = _new_stream_object(
+        doc,
+        f"<< /Type /XObject /Subtype /Image /Width {plain.width} "
+        f"/Height {plain.height} "
+        f"/ColorSpace {'/DeviceGray' if plain.n == 1 else '/DeviceRGB'} "
+        f"/BitsPerComponent 8 >>",
+        plain.samples)
+    if mask_samples is not None:
+        mask = _new_stream_object(
+            doc,
+            f"<< /Type /XObject /Subtype /Image /Width {plain.width} "
+            f"/Height {plain.height} /ColorSpace /DeviceGray "
+            f"/BitsPerComponent 8 >>",
+            mask_samples)
+        doc.xref_set_key(image, "SMask", f"{mask} 0 R")
+    form = _new_stream_object(
+        doc,
+        f"<< /Type /XObject /Subtype /Form /FormType 1 "
+        f"/BBox [0 0 {plain.width} {plain.height}] "
+        f"/Resources << /XObject << /Im0 {image} 0 R >> >> >>",
+        f"q {plain.width} 0 0 {plain.height} 0 0 cm /Im0 Do Q".encode())
+    return form, float(plain.width), float(plain.height)
+
+
+def _place_custom_stamp(width: float, height: float, page_width: float,
+                        page_height: float,
+                        center: Sequence[float]
+                        ) -> Tuple[float, float, float, float]:
+    """A stamp of its own aspect at its natural size, shrunk to fit the page."""
+    scale = min(1.0, page_width * 0.8 / width, page_height * 0.6 / height)
+    box_width, box_height = width * scale, height * scale
+    cx, cy = float(center[0]), float(center[1])
+    x0 = min(max(cx - box_width / 2.0, 0.0), page_width - box_width)
+    y0 = min(max(cy - box_height / 2.0, 0.0), page_height - box_height)
     return (x0, y0, x0 + box_width, y0 + box_height)
 
 
@@ -446,10 +602,12 @@ def _shape_model(annot: fitz.Annot, page_idx: int,
 def _stamp_model(annot: fitz.Annot, page_idx: int) -> StampAnnotation:
     """Read one document stamp into the model.
 
-    The name is ``/Name``, the standard key MuPDF drew the appearance from; it
-    is not the same as ``/Contents``, which MuPDF fills with that same name by
+    The name is ``/Name``, the key MuPDF drew the appearance from; it is not
+    the same as ``/Contents``, which MuPDF fills with that same name by
     default.  Treating that caption as a note would put a note on every stamp
     the user never wrote, so it is only a note when it differs from the name.
+    A custom stamp names itself ``Custom`` and puts its own caption or note in
+    ``/Contents``, so the two never match.
     """
     info = annot.info
     rect = annot.rect
@@ -757,6 +915,67 @@ class AddStamp(SinglePageEdit):
             annot.set_info(content=self.note)
         annot.update()
         _name(doc, annot, self.ann_id)
+
+
+@dataclass(frozen=True)
+class AddCustomStamp(SinglePageEdit):
+    """Put a stamp PDFAR draws itself on a page.
+
+    A *caption* becomes a red box with text; an *image* is embedded with its
+    transparency intact.  Either way the appearance is a form XObject in the
+    annotation's ``/AP/N``, so any reader shows what PDFAR put there, and
+    ``/Name`` is the non-standard ``"Custom"`` so no viewer regenerates a
+    standard stamp over it.  *center* is where the user clicked; the box keeps
+    the stamp's own aspect and stays inside the page.
+    """
+
+    ann_id: str
+    page: int
+    caption: str = ""
+    image: str = ""
+    center: Tuple[float, float] = (0.0, 0.0)
+    author: str = ""
+    note: str = ""
+
+    scope = Scope.COMMENTS
+
+    @property
+    def label(self) -> str:
+        return "Custom stamp"
+
+    def apply(self, doc: fitz.Document) -> None:
+        caption = " ".join(self.caption.split())
+        if not caption and not self.image:
+            raise EditError("A custom stamp needs a caption or an image")
+        page = doc.load_page(self.page)
+        if self.image:
+            form, width, height = _image_appearance(doc, self.image)
+            box = stamp_box(page.rect.width, page.rect.height, self.center,
+                            aspect=width / height)
+        else:
+            text, width, height, size = _caption_layout(
+                caption, page.rect.width)
+            form = _caption_appearance(doc, text, width, height, size)
+            box = _place_custom_stamp(width, height, page.rect.width,
+                                      page.rect.height, self.center)
+        annot = page.add_stamp_annot(fitz.Rect(*box))
+        if self.author:
+            annot.set_info(title=self.author)
+        content = self.note or caption
+        if content:
+            annot.set_info(content=content)
+        # update() regenerates the standard Draft appearance (and a caption)
+        # the annotation was born with, and refits the rect to that 3.8:1
+        # shape.  Everything the custom stamp is goes on after it: our box,
+        # our appearance, and /Name /Custom so no viewer regenerates a
+        # standard stamp over it.  A stamp with no note keeps no /Contents.
+        annot.update()
+        annot.set_rect(fitz.Rect(*box))
+        if not content:
+            doc.xref_set_key(annot.xref, "Contents", "null")
+        _name(doc, annot, self.ann_id)
+        doc.xref_set_key(annot.xref, "AP", f"<< /N {form} 0 R >>")
+        doc.xref_set_key(annot.xref, "Name", f"/{CUSTOM_STAMP_NAME}")
 
 
 @dataclass(frozen=True)
@@ -1077,6 +1296,27 @@ class AnnotationManager(QObject):
         ann_id = str(uuid.uuid4())
         if not self._run(AddStamp(
                 ann_id=ann_id, page=int(page), name=name,
+                center=(float(center[0]), float(center[1])),
+                author=author, note=note)):
+            return None
+        made = self.get_annotation(ann_id)
+        return made if isinstance(made, StampAnnotation) else None
+
+    def add_custom_stamp(self, page: int,
+                         center: Sequence[float],
+                         caption: str = "", image: str = "",
+                         author: str = "",
+                         note: str = "") -> Optional[StampAnnotation]:
+        """Place a caption or image stamp on *page*, centred on *center*.
+
+        One stamp is one edit, so one Ctrl+Z takes the mark off.  ``None`` if
+        the edit was refused — an empty definition, a caption too long for the
+        page, or a file that is not an image PDFAR can read.
+        """
+        ann_id = str(uuid.uuid4())
+        if not self._run(AddCustomStamp(
+                ann_id=ann_id, page=int(page), caption=caption,
+                image=str(image) if image else "",
                 center=(float(center[0]), float(center[1])),
                 author=author, note=note)):
             return None
