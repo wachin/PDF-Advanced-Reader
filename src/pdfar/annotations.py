@@ -937,15 +937,33 @@ def _rgb_to_hex(color: Sequence[float]) -> str:
 
 
 # ----------------------------------------------------------------------- identity
-def annot_key(annot: fitz.Annot) -> str:
-    """The model id of a document annotation: its ``/NM`` name.
+def annot_object_key(annot: fitz.Annot) -> str:
+    """The annotation's object number as an identity: one mark, in one document.
 
-    PyMuPDF reports ``/NM`` as ``info["id"]`` and gives every annotation it makes
-    a unique one, which is what lets an id survive a save and a clone.  An
-    annotation from another program may have none, and naming it on open would
-    turn reading the file into changing it, so those are keyed by object number.
+    Nothing else in a document can answer to this key, which is why it is what the
+    page caches are keyed by and the fallback for any mark whose name is already
+    spoken for.  It is the weaker of the two identities: an object number is not
+    stable across a full save, so a mark known only by one is a mark the file
+    cannot vouch for past the document it is in.
     """
-    return annot.info.get("id") or f"anon:{annot.xref}"
+    return f"anon:{annot.xref}"
+
+
+def annot_key(annot: fitz.Annot) -> str:
+    """The identity a mark claims for itself: its ``/NM`` name if it has one.
+
+    PyMuPDF reports ``/NM`` as ``info["id"]``, and a name is what lets an id
+    survive a save and a clone.  A mark from another program may have none, and
+    naming it on open would turn reading the file into changing it, so those claim
+    their object number instead.
+
+    A claim, not a verdict: PyMuPDF invents ``fitz-A0`` for every annotation it
+    adds without a name and restarts the counter on each page, so a document from
+    another PyMuPDF-based program holds that name once per page.
+    :meth:`AnnotationManager._identities` is where such a mark loses the name and
+    is listed by object number instead.
+    """
+    return annot.info.get("id") or annot_object_key(annot)
 
 
 def _name(doc: fitz.Document, annot: fitz.Annot, ann_id: str) -> None:
@@ -963,9 +981,14 @@ def _find_annotation(page: fitz.Page, ann_id: str) -> fitz.Annot:
     Matching by name rather than by position matters: an undo can leave the page
     with no such annotation, and changing whatever annotation happened to sit at
     that object number instead would damage the document.
+
+    Both of a mark's identities are accepted, because the list settles a shared
+    name by giving the later copies their object numbers: a row that lost the name
+    still has to reach the mark it shows.  The search stays on *page*, which is
+    why a name repeated down the document cannot pull an edit onto another page.
     """
     for annot in page.annots():
-        if annot_key(annot) == ann_id:
+        if ann_id in (annot_key(annot), annot_object_key(annot)):
             return annot
     raise EditError("That annotation is not in this document any more.")
 
@@ -1734,8 +1757,9 @@ class AnnotationManager(QObject):
     def __init__(self, session: DocumentSession, parent=None):
         super().__init__(parent)
         self.session = session
-        #: What each page's read produced, so a page that did not change does not
-        #: have to be read again.
+        #: What each page's read produced, keyed by object number so a page cannot
+        #: lose a mark, and cached so a page that did not change does not have to
+        #: be read again.
         self._by_page: Dict[int, Dict[str, Annotation]] = {}
         self._annotations: Dict[str, Annotation] = {}
         # -1 so that the first read happens even for a session at generation 0.
@@ -1777,11 +1801,33 @@ class AnnotationManager(QObject):
                 self._by_page[page_idx] = models
             else:
                 self._by_page.pop(page_idx, None)
-        self._annotations = {ann_id: model
-                             for page in sorted(self._by_page)
-                             for ann_id, model in self._by_page[page].items()}
+        self._annotations = self._identities()
         self._generation = generation
         self.annotations_changed.emit()
+
+    def _identities(self) -> Dict[str, Annotation]:
+        """The cached pages merged into one list, with shared names settled.
+
+        A name is an identity only while it names one mark.  Where two marks claim
+        one name, the first in reading order keeps it and the copies after it are
+        listed by object number, which nothing else answers to — so a document made
+        by another PyMuPDF-based program, whose every page holds a mark named
+        ``fitz-A0``, is listed as the marks it has rather than as one of 540
+        (found by F10-3t).
+
+        Reading order, and page caches keyed by object number, are what make this
+        settle the same way every time: which pages happened to be re-read cannot
+        change who claims a name, and no mark is dropped for want of a key.  The id
+        a row carries is written back onto the model, so the panel, the delete and
+        the export all speak with one voice.
+        """
+        merged: Dict[str, Annotation] = {}
+        for page_idx in sorted(self._by_page):
+            for object_key, model in self._by_page[page_idx].items():
+                ann_id = model.id if model.id not in merged else object_key
+                model.id = ann_id
+                merged[ann_id] = model
+        return merged
 
     def _changed_pages(self, generation: int) -> Optional[Sequence[int]]:
         """The pages to read again, or ``None`` for the whole document.
@@ -1796,7 +1842,12 @@ class AnnotationManager(QObject):
         return self.session.changed_pages
 
     def _read_page(self, doc: fitz.Document, page_idx: int) -> Dict[str, Annotation]:
-        """The models for one page, keyed by the id the document gives them."""
+        """The models for one page, keyed by what makes each of them one object.
+
+        The object number, not the name: two marks on one page that claim the same
+        ``/NM`` are two marks, and a page keyed by name would show one.  The names
+        are still on the models, which is what :meth:`_identities` merges on.
+        """
         found: Dict[str, Annotation] = {}
         try:
             page = doc.load_page(page_idx)
@@ -1835,7 +1886,7 @@ class AnnotationManager(QObject):
                     # would offer an action on something the user brought in
                     # from another program.
                     continue
-                found[model.id] = model
+                found[annot_object_key(annot)] = model
         except ANNOT_READ_ERRORS:
             # Annotations are a linked chain, so one that the file cannot
             # read ends this page's list.  What was read before it stays, and

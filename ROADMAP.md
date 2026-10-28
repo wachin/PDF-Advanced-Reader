@@ -907,7 +907,8 @@ appearance streams on every mark a save writes (F10-3s), XFDF export of
 the document's comments (F10-3t), the reader that turns another program's
 XFDF into a plan of edits (F10-3u), that plan as one undoable import
 (F10-3v) and the two File-menu commands that reach either half (F10-3w)
-done.
+done — and the identity those commands' marks rest on now survives a document
+whose marks were all given the same name (F10-3x).
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1386,11 +1387,18 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       still readable.  A plan the document refuses is the manager's failure to
       report, and the window stays out of it rather than saying the same thing
       twice.)
-- [ ] Marks that arrive without a name of their own are listed as **one** mark
-      (found by F10-3t: PyMuPDF writes `/NM (fitz-A0)` for every annotation it
-      adds without a name, and the counter restarts per page, so a document made
-      by another PyMuPDF-based program carries the same name on every page and
-      the id-keyed list keeps one of 540. See the report.)
+- [x] Marks that arrive without a name of their own are listed as **one** mark
+      (**F10-3x.** found by F10-3t: PyMuPDF writes `/NM (fitz-A0)` for every
+      annotation it adds without a name, and the counter restarts per page, so a
+      document made by another PyMuPDF-based program carries the same name on
+      every page and the id-keyed list kept one of 540.  A name is an identity
+      only while it names one mark, so the first in reading order keeps it and
+      every copy after it is listed by object number, which nothing else answers
+      to; the page caches are keyed by that object number too, so two marks
+      sharing a name on one page are two rows.  Both identities resolve back to
+      the mark on the page the row names, so nothing that was listed can fail to
+      be edited, and the export of such a document names its marks apart instead
+      of writing one name 540 times.)
 - [ ] A square or a circle grows **1 pt on every side** each time it is read back
       (found by F10-3u: MuPDF writes a shape's `/Rect` a point larger than the box
       it was given, whatever `/BS /W` says, so the box an export states is a point
@@ -1533,9 +1541,8 @@ undoable import that refuses the file or takes all of it (F10-3u,
 F10-3v); and both halves are now commands a user can reach, under File
 (Export / Import Comments (XFDF)) — the exchange is finished at the
 interface, not only in the library (F10-3w).
-Next, in order: the two defects the XFDF work found and left
-open — marks that arrive without a name of their own collapse to **one**
-entry, and a square or circle grows **1 pt per side** on every read — then
+Next, in order: the defect the XFDF export found and
+left open — a square or circle grows **1 pt per side** on every read — then
 F10-4's page manipulation.
 
 Goal:
@@ -4193,6 +4200,105 @@ file went; writing the marks into the PDF's own `/Annots` as well (they are alre
 there — the file is for the reader that has no PDF); and any of it on the keyboard,
 since neither command has a shortcut to take without displacing one the save group
 owns.
+
+---
+
+### F10-3x One name, one mark: identity in a document that repeats itself — [x] Implemented
+
+**Completed**: 2026-10-28
+
+**What landed**: the annotation list settles an identity for the document instead
+of trusting each mark's own, in `src/pdfar/annotations.py` — `annot_object_key()`,
+`AnnotationManager._identities()`, a page cache keyed by object number
+(`_read_page`), and a `_find_annotation` that resolves either spelling. This is
+the defect F10-3t found on the way out of the export, and the last open item the
+XFDF work left behind.
+
+**The defect**: PyMuPDF reports `/NM` as `info["id"]` and *invents* one for every
+annotation it adds without a name — `fitz-A0`, with the counter restarting per
+page. A document built by another PyMuPDF-based program therefore carries that
+name once per page, and a list keyed by it showed **one** mark where the file held
+540: one row in the panel, one name in the export, one mark the user could delete.
+Reproduced before anything was written (`/tmp/f103x/verify.py` on a 540-page book):
+540 marks in the file, one in the list.
+
+**The rule**: a name is an identity only while it names one mark. The first in
+reading order keeps it and every copy after it is listed by object number, which
+nothing else in the document answers to. That is the same rule `annot_key` already
+applied to a mark with no `/NM` at all — extended to a mark whose `/NM` is already
+spoken for, which is the case that was missing.
+
+**Why the pages are keyed by object number too**: the collapse was never only
+between pages. A page dict keyed by name loses a mark the same way, and another
+reader's file is free to repeat a name within one page. Keying the caches by object
+number means no read can drop anything, and leaves the merging — which sees every
+page — the single place where a name is awarded.
+
+**Why reading order, and not the order pages happen to be read in**: the list is
+incremental (F10-3h) — an edit re-reads only the pages it wrote. A rule that
+depended on that would renumber the rows under the user depending on which marks
+had been touched last, so `_identities` walks the cached pages in ascending order
+on every reload and the answer depends only on the document.
+
+**The settled id is written back onto the model**, not just into the dict, because
+the panel row, the delete and the export all read `ann.id`: an identity that lived
+only in the dictionary would fix the list and still write one name 540 times.
+
+**What a demoted mark gives up** is portability: an object number means nothing in
+another copy of the file, so across a full save a mark that lost its name may be
+listed under a different one. That was already the deal for every mark that arrived
+nameless, and the alternative — naming foreign marks while reading them — turns
+opening a file into changing one, which is the older rule of the two. The export
+already refuses to write an `anon:` id as a name (F10-3t), so none of this leaks
+into another reader's file: a document of 540 shared-name marks exports as 540
+marks, one of them named and 539 nameless, and the importer gives those their own
+ids.
+
+**Lookups take either form** but stay on the page the row names, so the mark that
+claimed `fitz-A0` on page 1 cannot be reached by the row for page 270's copy, and
+the row that lost the name still edits and deletes its own mark.
+
+**Files changed**: `src/pdfar/annotations.py`, `tests/test_annotation_identity.py`
+(new), `ROADMAP.md`, `docs/pdfcraft-editing-analysis.md`.
+
+**Tests**: **10 new**, in three groups because the fix can be half-right in three
+different ways — nothing is lost (all listed, ids unique, page 1 claims the name, a
+re-read gives the same ids, two marks named alike on *one* page are two rows), each
+row still reaches its mark (rewrite and delete through a borrowed object number,
+neighbors untouched, undo restores the deleted one, and an edit by the shared name
+lands on the mark that claimed it), and nothing that was already unique is
+disturbed (PDFAR's own UUID-named marks keep theirs, and an export names its marks
+apart). **1012 passed, three consecutive runs** (108.4 / 107.5 / 107.7 s). Ruff
+unchanged at the 7 pre-existing errors; mypy unchanged at 545.
+
+**Verified by eye**: `/tmp/f103x/panel.py` opens a four-mark document in the real
+window, every one of them named `fitz-A0` in the file — two of them on page 1. The
+comments panel shows **four rows in three page groups**
+(`/tmp/f103x/a-panel.png`), and editing the row that lost the name (`anon:26`)
+changes that second mark on page 1 and no other. Poppler paints the pages
+underneath (`/tmp/f103x/b-page-{1,2,3}.png`), where the note icons are four marks
+where the list used to see one.
+
+**Performance** (the 540-page book, one `fitz-A0` mark per page):
+
+| | measured |
+|---|---|
+| marks listed, before → after | **1 → 540**, ids unique |
+| first full read | **154 ms** |
+| a whole re-read | **125 ms**, ids unchanged |
+| `set_note` through a borrowed object number, mark 270 | **11 ms**, reaches page 270 |
+| export | 540 marks, **1 named**, 539 nameless by design |
+
+The merge replaced a dict comprehension with a loop over the same models, so the
+fix costs no extra MuPDF work: it is one `xref` read per mark at the point the mark
+was already being built.
+
+**What is not here**: writing names into foreign documents (see above); a
+guarantee that an object number survives a full save, which it does not and cannot;
+and the case where a file forges a `/NM` that is *exactly* PDFAR's own spelling for
+an object number — the two marks then want one key and one row is lost. No reader
+produces that name, and PDFAR's export cannot; it is recorded here rather than
+designed around.
 
 ---
 
