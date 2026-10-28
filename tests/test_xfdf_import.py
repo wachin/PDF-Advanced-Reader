@@ -1,8 +1,8 @@
-"""F10-3u: another reader's XFDF as the marks it asks for (the parser).
+"""F10-3u/3v: another reader's XFDF as the marks it asks for, as one edit.
 
 The export was judged by what a PDF says; the parser is judged by what a file
-says, because that is the only thing it is given.  Three properties decide
-whether the plan it returns is worth applying:
+says, because that is the only thing it is given.  Four properties decide
+whether an import is worth offering to the user:
 
 * a number in the file becomes the page-space point it was flipped from, through
   the page's own crop box — the same rule in the other direction, so a mark that
@@ -11,9 +11,11 @@ whether the plan it returns is worth applying:
 * an edit in the plan is an edit that will work: every value is checked against
   the rules the edits themselves enforce before it is offered, so nothing is
   applied that would be refused a moment later;
-* and what cannot be read is said out loud — the file as a whole is refused when
+* what cannot be read is said out loud — the file as a whole is refused when
   it is not XFDF or is built to exhaust a reader, and a single mark is left out
-  with a reason when it is merely not PDFAR's to draw.
+  with a reason when it is merely not PDFAR's to draw;
+* and the marks that do arrive arrive **together**: one import is one undo step,
+  and an import that cannot be carried out leaves no part of the file behind.
 
 Most of these files are written by hand rather than produced by the export,
 because the point of an exchange is that the other reader is not you.
@@ -31,8 +33,9 @@ import pytest
 
 from conftest import build_sample_pdf, make_session
 from pdfar import xfdf
-from pdfar.annotations import (HIGHLIGHT_OPACITY, AnnotationManager,
-                               measurement_reading)
+from pdfar.annotations import (HIGHLIGHT_OPACITY, AddImportedMarks,
+                               AddNote, AnnotationManager, measurement_reading)
+from pdfar.edits import EditError, Scope
 from pdfar.xfdf import (ImportPlan, XfdfError, export_xfdf, page_anchors,
                         parse_xfdf)
 from test_xfdf import (SCALE, TOLERANCE, build_offset_page, draw_every_kind)
@@ -692,3 +695,112 @@ def test_every_kind_pdfar_draws_survives_the_file(tmp_path, target):
         assert len(target.get_annotations()) == plan.count
     finally:
         made.session.close()
+
+
+# ------------------------------------------------------------------- applying
+def take(manager, text: str) -> ImportPlan:
+    """*text* imported through the manager, or a failure that says so."""
+    plan = manager.import_xfdf(text)
+    assert plan is not None, "the import was refused"
+    return plan
+
+
+def test_an_import_is_one_undo_step(target):
+    """Three marks over two pages arrive together and go away together, because
+    the user imported once."""
+    plan = take(target, envelope(
+        f'<text page="0" rect="{box_file((10.0, 10.0, 26.0, 26.0))}" name="a"/>',
+        f'<text page="0" rect="{box_file((40.0, 40.0, 56.0, 56.0))}" name="b"/>',
+        f'<square page="2" rect="{box_file((10.0, 10.0, 40.0, 40.0))}" '
+        f'name="c"/>'))
+    assert plan.count == 3
+    assert sorted(ann.id for ann in target.get_annotations()) == ["a", "b", "c"]
+
+    target.session.undo()
+    target.reload_from_document()
+    assert target.get_annotations() == []
+    target.session.redo()
+    target.reload_from_document()
+    assert sorted(ann.id for ann in target.get_annotations()) == ["a", "b", "c"]
+
+
+def test_the_import_is_a_comments_edit_on_the_pages_it_writes(target):
+    """The scope decides what the view throws away, so an import that touched
+    three pages must not claim to have repainted the document, and must not
+    promise the list that it wrote a page it did not."""
+    plan = read(envelope(
+        marks(2),
+        f'<square page="2" rect="{box_file((10.0, 10.0, 40.0, 40.0))}"/>'),
+        target.doc)
+    edit = plan.edit
+    assert isinstance(edit, AddImportedMarks)
+    assert edit.marks == plan.edits
+    assert int(edit.scope) == int(Scope.COMMENTS)
+    # Two marks share page 0; the page is named once, and in order.
+    assert edit.pages == (0, 2)
+
+
+def test_the_undo_entry_names_the_import_and_counts_it(target):
+    take(target, envelope(marks(3)))
+    assert target.session.history.undo_label == "Import 3 comments"
+    target.session.undo()
+    assert target.session.history.redo_label == "Import 3 comments"
+
+    take(target, envelope('<text page="0" rect="10,90,26,74"/>'))
+    assert target.session.history.undo_label == "Import 1 comment"
+
+
+def test_an_import_that_cannot_be_applied_leaves_nothing_behind(target):
+    """Half a conversation on the pages is the failure this edit exists to
+    prevent: the mark that goes in first comes out again with the one that
+    failed, because the document is only adopted if all of them were written."""
+    version = target.session.version
+    with pytest.raises(EditError):
+        target.session.apply(AddImportedMarks(marks=(
+            AddNote(ann_id="fine", page=0, position=(10.0, 10.0)),
+            AddNote(ann_id="gone", page=99, position=(10.0, 10.0)))))
+    target.reload_from_document()
+    assert target.get_annotations() == []
+    assert target.session.version == version
+
+
+def test_an_import_reports_what_it_left_out(target):
+    box = (10.0, 20.0, 60.0, 40.0)
+    plan = take(target, envelope(
+        f'<square page="0" rect="{box_file(box)}" name="mine"/>',
+        f'<freetext page="0" rect="{box_file(box)}">typed by someone else</freetext>',
+        f'<polyline page="1" vertices="{points_file([(5.0, 5.0), (9.0, 9.0)])}"/>'))
+    assert plan.summary() == "1 mark, 2 not taken"
+    assert [ann.id for ann in target.get_annotations()] == ["mine"]
+
+
+def test_importing_the_same_file_twice_through_the_manager_imports_it_once(target):
+    """The second click is the one that does nothing, because the names the first
+    import wrote are now the names the document holds."""
+    version = target.session.version
+    file = envelope(named(3))
+    assert take(target, file).count == 3
+    again = take(target, file)
+    assert again.count == 0
+    assert len(again.skipped) == 3
+    assert target.session.version == version + 1
+    assert sorted(ann.id for ann in target.get_annotations()) == ["n0", "n1", "n2"]
+
+
+def test_a_file_with_nothing_to_take_makes_no_undo_step(target):
+    """An empty step in the history is one the user pays for and cannot see, so a
+    file that arrives with no marks of its own leaves the document alone."""
+    version = target.session.version
+    assert take(target, envelope()).count == 0
+    assert take(target, envelope('<polyline page="0" vertices="1,99;3,97"/>')
+                ).count == 0
+    assert target.session.version == version
+    assert target.session.history.undo_label is None
+
+
+def test_a_file_that_is_not_xfdf_is_refused_before_anything_is_applied(target):
+    version = target.session.version
+    with pytest.raises(XfdfError):
+        target.import_xfdf("the quick brown fox")
+    assert target.session.version == version
+    assert target.get_annotations() == []

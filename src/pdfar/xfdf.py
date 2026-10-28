@@ -58,7 +58,8 @@ except ImportError:  # pragma: no cover - older PyMuPDF
 
 from .annotations import (ANNOT_READ_ERRORS, CUSTOM_STAMP_NAME,
                           MEASURE_KINDS, STAMP_VALUES,
-                          AddCustomStamp, AddHighlight, AddInk, AddMeasurement,
+                          AddCustomStamp, AddHighlight, AddInk,
+                          AddImportedMarks, AddMeasurement,
                           AddNote, AddShape, AddStamp, Annotation,
                           AnnotationManager, HighlightAnnotation,
                           HighlightSpec, InkAnnotation, MEASURE_INTENTS,
@@ -1123,8 +1124,9 @@ class ImportPlan:
     """The edits a file asks for, and the marks it could not deliver.
 
     Nothing here has touched a document: the plan is the whole of the decision, so
-    the code that applies it (F10-3v) has nothing left to interpret and nothing to
-    refuse for.
+    the code that applies it has nothing left to interpret and nothing to refuse
+    for.  :attr:`edit` is that code's one call — the whole plan as the single
+    undoable step an import is.
     """
 
     edits: Tuple[Edit, ...] = ()
@@ -1133,6 +1135,11 @@ class ImportPlan:
     @property
     def count(self) -> int:
         return len(self.edits)
+
+    @property
+    def edit(self) -> Edit:
+        """Every mark of the file as one edit: all of it, or none of it."""
+        return AddImportedMarks(marks=self.edits)
 
     def summary(self) -> str:
         """What the file gave, and what it did not, for the user to be told."""

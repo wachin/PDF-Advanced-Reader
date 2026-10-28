@@ -22,7 +22,8 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Sequence,
+                    Tuple)
 
 try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
@@ -33,6 +34,9 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from .edits import Edit, EditError, Scope
 from .save import SaveError, save_document
 from .session import DocumentSession
+
+if TYPE_CHECKING:  # import cycle: the reader builds the edits this module owns
+    from .xfdf import ImportPlan
 
 #: How solid a highlight paints.  Stored as the annotation's ``/CA``, so a model
 #: read back out of a file reports what was written into it.
@@ -1671,6 +1675,47 @@ class SetAnnotationNote(SinglePageEdit):
         doc.xref_set_key(annot.xref, "Contents", "null")
 
 
+@dataclass(frozen=True)
+class AddImportedMarks(Edit):
+    """Put a file's marks on the pages, as one step the user can undo.
+
+    An import is one action even when the file holds forty marks, so the whole
+    plan rides on a single edit: the session copies the document, every mark is
+    written into the copy, and the copy is adopted only if all of them were.  A
+    mark that fails on the way — a page that is not there any more, a shape whose
+    numbers turned out not to make a shape — takes the *import* down rather than
+    leaving half a conversation on the pages, which is what "refuses the file or
+    takes all of it" has to mean once the plan has left the parser.
+
+    The marks are the edits an :class:`pdfar.xfdf.ImportPlan` holds, each already
+    checked by the parser through the same validators these edits call, so a plan
+    that came from a reading cannot refuse for a reason the reading did not know.
+    """
+
+    marks: Tuple[Edit, ...]
+
+    scope = Scope.COMMENTS
+
+    @property
+    def label(self) -> str:
+        count = len(self.marks)
+        return f"Import {count} comment" + ("s" if count != 1 else "")
+
+    @property
+    def pages(self) -> Optional[Tuple[int, ...]]:  # type: ignore[override]
+        """Every page a mark lands on; ``None`` if any of them cannot say."""
+        named: List[int] = []
+        for mark in self.marks:
+            if mark.pages is None:
+                return None
+            named.extend(mark.pages)
+        return tuple(sorted(set(named)))
+
+    def apply(self, doc: fitz.Document) -> None:
+        for mark in self.marks:
+            mark.apply(doc)
+
+
 class AnnotationManager(QObject):
     """The annotations the document holds, as a list the interface can show.
 
@@ -1827,6 +1872,36 @@ class AnnotationManager(QObject):
         self.reload_from_document()
         self.annotations_edited.emit(int(scope))
         return True
+
+    def import_xfdf(self, text: str) -> Optional["ImportPlan"]:
+        """Take another reader's comments into the document as **one** edit.
+
+        Returns the plan, whose ``summary()`` is what to tell the user: how many
+        marks arrived, how many were left out and why each one was.  ``None`` says
+        the import was refused and the document is as it was — the reason arrives
+        on ``annotation_edit_failed`` like every other edit's.  A file that is not
+        XFDF, is too big or is built in a way no reader should attempt raises
+        :class:`pdfar.xfdf.XfdfError` before anything here is applied.
+
+        The reading is done against *this* document, twice over: its page boxes
+        supply the coordinates the file's numbers are measured from, and the ids
+        this list holds are the names a mark may not take — which is what makes
+        importing the same file a second time import nothing.
+
+        The import is inside the function because the dependency runs the other
+        way: the reader builds the edits this module owns, and neither should need
+        the other to be loaded.
+        """
+        from .xfdf import page_anchors, parse_xfdf
+
+        self.reload_from_document()
+        plan = parse_xfdf(text, page_anchors(self.doc),
+                          taken=set(self._annotations))
+        if not plan.edits:
+            # Nothing to write, so nothing to undo: an empty step in the history
+            # would be one the user pays for and cannot see.
+            return plan
+        return plan if self._run(plan.edit) else None
 
     def add_highlights(self, by_page: Dict[int, Sequence[tuple]],
                        color: str = "#FFFF00", author: str = "",

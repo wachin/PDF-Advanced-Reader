@@ -904,8 +904,9 @@ shape tool (F10-3l/3m), the standard rubber stamps with their tool
 with a chosen scale (F10-3p), perimeter/area measurements (F10-3q),
 calibration from a line of known length (F10-3r), self-contained
 appearance streams on every mark a save writes (F10-3s), XFDF export of
-the document's comments (F10-3t) and the reader that turns another program's
-XFDF into a plan of edits (F10-3u) done.
+the document's comments (F10-3t), the reader that turns another program's
+XFDF into a plan of edits (F10-3u) and that plan as one undoable import
+(F10-3v) done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1353,14 +1354,17 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       with no `/NM` of its own no `name`, and a mark PDFAR cannot model — free
       text — is left out rather than described wrongly. No `href`, no
       `<fields/>`, no timestamp: the same document writes the same file.)
-- [ ] XFDF import: another reader's comments as marks in the document, as one
+- [x] XFDF import: another reader's comments as marks in the document, as one
       undoable edit that refuses the file or takes all of it
-      (**F10-3u** has landed the reading: `parse_xfdf(text, page_anchors(doc),
-      taken)` returns an `ImportPlan` of ready-to-apply `Add*` edits and the list
-      of marks it left out, each with the reason the user will be shown. It stays
-      unchecked until the plan becomes one undoable `Scope.COMMENTS` edit
-      (F10-3v) and a menu command reaches it (F10-3w) — a parser no user can
-      invoke is not yet the feature.)
+      (**F10-3u** read the file: `parse_xfdf(text, page_anchors(doc), taken)`
+      returns an `ImportPlan` of ready-to-apply `Add*` edits and the marks it left
+      out, each with the reason the user will be shown. **F10-3v** applied it:
+      `AddImportedMarks` carries the whole plan as one `Scope.COMMENTS` edit on the
+      pages it wrote, and `AnnotationManager.import_xfdf(text)` reads and applies
+      it against the live document — one Ctrl+Z for forty marks, and an import that
+      cannot be carried out leaves no part of the file behind. What is still open
+      is the item below: no menu command reaches either half yet, so the capability
+      exists and the user cannot ask for it.)
 - [ ] The File-menu commands that reach the two halves
 - [ ] Marks that arrive without a name of their own are listed as **one** mark
       (found by F10-3t: PyMuPDF writes `/NM (fitz-A0)` for every annotation it
@@ -1504,11 +1508,9 @@ reference line of known length sets the scale instead of a typed factor
 another program left without one, the appearance stream that lets any reader
 paint it (F10-3s); the document's comments write out as XFDF, in the
 file's own coordinates and with the scale a measurement was taken at
-(F10-3t); and another program's XFDF reads back as a plan of the edits that
-would put its marks on the page, refusing the file or naming every mark it
-left out (F10-3u).
-Next, in order: applying that plan as one undoable edit (F10-3v), then the
-File-menu commands that reach both halves (F10-3w).
+(F10-3t); and another program's XFDF reads back into the document as one
+undoable import that refuses the file or takes all of it (F10-3u, F10-3v).
+Next: the File-menu commands that reach both halves (F10-3w).
 
 Goal:
 
@@ -3948,6 +3950,98 @@ file; FDF and the `<f href>` form of an exchange, where the comments live in
 another file; `<fields>` and anything to do with form values; page labels; XFA;
 `<trails>`, `<popup>` geometry, `MK`/`RA` and the rest of the vocabulary PDFAR has
 no model for; and the two identity and geometry findings recorded above.
+
+---
+
+### F10-3v XFDF import as one undoable edit — [x] Implemented
+
+**Completed**: 2026-10-28
+
+**What landed**: `AddImportedMarks` in `src/pdfar/annotations.py`, the
+`ImportPlan.edit` property in `src/pdfar/xfdf.py`, and
+`AnnotationManager.import_xfdf(text)` — which reads a file against the document it
+is managing and carries the whole plan out as one step. The XFDF import checklist
+item closes here; what is left of the feature is the menu that reaches it
+(F10-3w).
+
+**One import, one undo step.** The user did one thing, so the document has to
+agree: an edit per mark would make Ctrl+Z take back the conversation one comment at
+a time, and it would pay for a whole copy-and-adopt of the document per mark. The
+composite holds the plan's edits and applies them to the one copy the session made,
+so the copy happens once. Measured on a thousand marks, that is the difference
+between **5.4 s and 36.2 s**.
+
+**"Refuses the file or takes all of it" is now true at the document too**, not only
+at the parser. The session already guarantees it — an edit runs against a
+throwaway clone and the live document is replaced only when the edit returns — and
+the composite is what turns that guarantee into one step: a mark that fails half
+way through, for a reason the reading could not have known (a page that stopped
+existing between the parse and the apply), takes the *import* down and leaves the
+first mark of it nowhere. `Import 2 comments failed: page not in document` is the
+whole of what the user sees; the version, the history and the pages are what they
+were.
+
+**It says what it touched.** `scope` is `COMMENTS`, so an import repaints no page
+content and rebuilds no layout; `pages` is the sorted union of the pages its marks
+name, so F10-3h's per-page re-read reads those pages and no others — an import that
+wrote two pages of the 540-page book re-lists two, not five hundred and forty. A
+mark that cannot say reverts the whole edit to "cannot say", which is the safe
+direction: the list reads everything again rather than showing a stale row.
+
+**A plan with nothing in it applies nothing.** An empty file, or a file whose every
+mark was left out, returns its plan — so the dialog can still say "0 marks, 6 not
+taken" and name the reasons — but writes no document and leaves no undo step the
+user would have to pass through on the way back to their own edits.
+
+**The names come from the document as it stands**, which is why the method
+re-reads its own list before parsing: `taken` is what the document holds *now*, so
+importing the same file a second time takes no mark and changes no version. The
+`xfdf` import sits inside the method rather than at the top of the module because
+the dependency runs the other way — the reader builds the edits this module owns —
+and neither half should have to load the other to be read.
+
+**Files changed**: `src/pdfar/annotations.py`, `src/pdfar/xfdf.py`,
+`tests/test_xfdf_import.py`, `ROADMAP.md`, `docs/pdfcraft-editing-analysis.md`.
+
+**Verified by eye**: the same **foreign** file F10-3u was verified with — twenty
+hand-written elements over four Letter pages — imported through the manager into a
+document with nothing on it, and page 2 painted by **Poppler** at each step
+(`/tmp/f103v/visual/{a-before,b-imported,c-undone,d-refused}-2.png`). The four
+images are two pairs, **byte for byte identical**: the page after the undo is the
+page before the import, and the page after a refused composite import is the page
+the accepted one left. In between, the ink, the rectangle and the ellipse sit where
+their numbers said, and the undo entry reads `Import 14 comments`.
+
+**Tests**: 981 passed, three consecutive full runs. Eight cases in
+`tests/test_xfdf_import.py` cover the properties above: three marks over two pages
+arriving and leaving together; the composite being a `COMMENTS` edit that names
+each touched page once; the undo entry carrying the count and the singular; a
+failing composite leaving no part of itself; the counts a user is told; importing
+the same file twice through the manager being importing it once; an empty file
+making no undo step; and a file that is not XFDF being refused before anything is
+applied.
+
+**Performance** (parse + apply + re-list, on a 3-page file unless stated):
+
+| marks | one composite edit | one edit per mark |
+|---|---|---|
+| 10 | 29 ms | 39 ms |
+| 200 | 642 ms | 1 671 ms |
+| 1 000 | **6.4 s** | **37.5 s** |
+| 500 on the 540-page book | 2.45 s | (100 marks: 1.51 s) |
+
+The parse is the cheap part throughout — 27 ms of the 6.4 s — and what remains is
+MuPDF writing a mark and its appearance: about **2.8–5.4 ms per mark**, which grows
+slightly with the count. **That is the number F10-3w has to design around**: a
+thousand-mark import is five seconds on the GUI thread, so the menu command either
+shows it is working or does not offer files of that size.
+
+**What is not here**: the File-menu commands for either half (F10-3w), so the
+import still cannot be asked for; any progress or busy indication while a large
+file is applied; the export's side of the same dialog (a file chooser, a default
+name, a write error); importing into a *second* document or a page range; and
+merging a file whose marks the document already holds by position rather than by
+name — a repeated name is refused, not reconciled.
 
 ---
 
