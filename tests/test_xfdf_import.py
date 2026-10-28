@@ -804,3 +804,61 @@ def test_a_file_that_is_not_xfdf_is_refused_before_anything_is_applied(target):
         target.import_xfdf("the quick brown fox")
     assert target.session.version == version
     assert target.get_annotations() == []
+
+
+# ---------------------------------------------------------------- the file
+# The parser is given text; these are the two steps that turn a path a user
+# pointed at into text, and the name the chooser offers them.
+def test_a_comments_file_is_named_after_the_document_it_describes():
+    """``review.pdf`` is exchanged as ``review.xfdf``, beside it."""
+    assert xfdf.comments_file_for("/docs/review.pdf") == "/docs/review.xfdf"
+    assert xfdf.comments_file_for("/docs/review.PDF") == "/docs/review.xfdf"
+    assert xfdf.comments_file_for("report") == "report.xfdf"
+
+
+def test_loading_a_file_hands_the_parser_its_text(tmp_path):
+    path = tmp_path / "marks.xfdf"
+    text = envelope('<text page="0" rect="10,90,26,74"/>')
+    path.write_text(text, encoding="utf-8")
+    assert xfdf.load_xfdf(str(path)) == text
+
+
+def test_a_file_that_is_not_there_is_a_reason_and_not_a_traceback(tmp_path):
+    with pytest.raises(XfdfError, match="Could not read"):
+        xfdf.load_xfdf(str(tmp_path / "gone.xfdf"))
+
+
+def test_a_file_that_is_not_text_is_refused_the_way_xfdf_is(tmp_path):
+    """Somebody points the importer at a JPEG: the answer is a sentence.
+
+    The chooser offers every file, so this is a user action and not a bug, and it
+    is refused with the same exception the rest of the file's refusals use.
+    """
+    path = tmp_path / "photo.xfdf"
+    path.write_bytes(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\xff\xfe\x00")
+    with pytest.raises(XfdfError, match="not text"):
+        xfdf.load_xfdf(str(path))
+
+
+def test_the_size_bound_is_put_on_the_file_before_its_bytes_are_read(tmp_path,
+                                                                     monkeypatch):
+    """:func:`_guard` counts characters, which is one read too late.
+
+    A file over the limit is refused on its byte count here: UTF-8 never holds
+    more characters than bytes, so the same bound applied first costs nothing and
+    keeps a two-gigabyte mistake from becoming memory.
+    """
+    path = tmp_path / "huge.xfdf"
+    path.write_text(envelope(), encoding="utf-8")
+    asked = []
+
+    def size(_path):
+        asked.append(str(_path))
+        return xfdf.MAX_INPUT_CHARS + 1
+
+    monkeypatch.setattr(xfdf.os.path, "getsize", size)
+    monkeypatch.setattr("builtins.open",
+                        lambda *a, **k: pytest.fail("the file was read anyway"))
+    with pytest.raises(XfdfError, match="too large"):
+        xfdf.load_xfdf(str(path))
+    assert asked == [str(path)]

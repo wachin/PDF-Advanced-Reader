@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import List, Optional
+from typing import List, Optional, Sequence, Tuple
 
 try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
@@ -56,6 +56,7 @@ from .sidebar import (
 )
 from .tabs import DocumentTab
 from .viewer import PDFView, MEMORY_LEVELS, VIEW_MODE_LABELS
+from .xfdf import (XfdfError, comments_file_for, export_xfdf, load_xfdf)
 
 ZOOM_STEP_PRESETS = (0.025, 0.05, 0.075, 0.10, 0.125,
                      0.15, 0.175, 0.20, 0.225, 0.25)
@@ -68,6 +69,21 @@ MEASURE_KIND_TIPS = {
     "perimeter": "Measure the length along a path of corners",
     "area": "Measure the area a polygon encloses",
 }
+
+#: How many of a file's left-out marks the import names before it stops counting.
+#: A file may carry :data:`pdfar.xfdf.MAX_MARKS` of them, and the list exists to
+#: say *which* another reader sent that PDFAR could not take — not to be read from
+#: the top of a thousand-line dialog.
+MAX_REPORTED_SKIPS = 12
+
+
+def skipped_report(skipped: Sequence[Tuple[str, str]]) -> str:
+    """One line per mark an import left out, in the words the reader chose."""
+    lines = [f"• {what}: {why}" for what, why in skipped[:MAX_REPORTED_SKIPS]]
+    left = len(skipped) - len(lines)
+    if left > 0:
+        lines.append(f"• … and {left} more")
+    return "\n".join(lines)
 
 
 def view_state_key(path: str) -> str:
@@ -392,6 +408,18 @@ class MainWindow(QMainWindow):
         self.act_revert.setToolTip("Discard every change and reopen the file")
         self.act_revert.setEnabled(False)
         self.act_revert.triggered.connect(self._revert_document)
+
+        self.act_export_xfdf = QAction("&Export Comments (XFDF)…", self)
+        self.act_export_xfdf.setToolTip(
+            "Write this document's comments to a file another reader can import")
+        self.act_export_xfdf.setEnabled(False)
+        self.act_export_xfdf.triggered.connect(self._export_comments)
+
+        self.act_import_xfdf = QAction("&Import Comments (XFDF)…", self)
+        self.act_import_xfdf.setToolTip(
+            "Add another reader's comments to this document as one undoable edit")
+        self.act_import_xfdf.setEnabled(False)
+        self.act_import_xfdf.triggered.connect(self._import_comments)
 
         self.act_print = QAction("&Print…", self)
         self.act_print.setShortcut(QKeySequence.StandardKey.Print)
@@ -735,6 +763,9 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.act_save)
         file_menu.addAction(self.act_save_as)
         file_menu.addAction(self.act_revert)
+        file_menu.addSeparator()
+        file_menu.addAction(self.act_export_xfdf)
+        file_menu.addAction(self.act_import_xfdf)
         file_menu.addSeparator()
         file_menu.addAction(self.act_print)
         file_menu.addSeparator()
@@ -1411,6 +1442,93 @@ class MainWindow(QMainWindow):
         tab.view.invalidate(scope)
         self._on_document_changed(tab)
         self.status_left.setText(f"Reverted to the file on disk: {session.path}")
+        return True
+
+    def _export_comments(self) -> None:
+        """Write the current document's comments to a file."""
+        tab = self._active_tab()
+        if tab is not None:
+            self._export_tab_comments(tab)
+
+    def _export_tab_comments(self, tab: DocumentTab) -> bool:
+        """Write *tab*'s marks out as an XFDF file the user names.
+
+        The document is not touched, so none of this marks it dirty or asks to be
+        saved: the file describes the marks, it is not another copy of the PDF.  A
+        document with nothing on it still writes a valid, empty exchange — the
+        other reader is told there was nothing to send rather than left wondering
+        why no file appeared.
+        """
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Comments", comments_file_for(tab.doc_path),
+            "XFDF Files (*.xfdf);;All Files (*)")
+        if not path:
+            return False
+        if not path.lower().endswith(".xfdf"):
+            path += ".xfdf"
+        text = export_xfdf(tab.view.annotation_manager)
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(text)
+        except OSError as exc:
+            QMessageBox.critical(self, "Export Comments",
+                                 f"Could not write the comments file:\n{exc}")
+            return False
+        self.status_left.setText(f"Comments exported to {path}")
+        return True
+
+    def _import_comments(self) -> None:
+        """Put another reader's comments on the current document's pages."""
+        tab = self._active_tab()
+        if tab is not None:
+            self._import_tab_comments(tab)
+
+    def _import_tab_comments(self, tab: DocumentTab) -> bool:
+        """Read a comments file and apply it to *tab* as one edit.
+
+        The whole exchange is decided inside :meth:`AnnotationManager.import_xfdf`
+        — parse, then apply, or neither — so this has one job left: say what came
+        of it.  A file that is not XFDF, is too big or is built the way no reader
+        should attempt is refused by :func:`pdfar.xfdf.load_xfdf` before a mark is
+        planned; a plan that cannot be carried out arrives as ``None``, with its
+        reason already on the status bar through the same signal every other failed
+        edit uses.
+
+        The cursor waits because applying is MuPDF work done once per mark: a file
+        of a thousand of them is a pause a user should be told about instead of one
+        that looks like a freeze.
+        """
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Comments", comments_file_for(tab.doc_path),
+            "XFDF Files (*.xfdf);;All Files (*)")
+        if not path:
+            return False
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            plan = tab.view.annotation_manager.import_xfdf(load_xfdf(path))
+        except XfdfError as exc:
+            refused = str(exc)
+        else:
+            refused = ""
+        finally:
+            QApplication.restoreOverrideCursor()
+        if refused:
+            QMessageBox.critical(self, "Import Comments", refused)
+            self.status_left.setText("Comments not imported")
+            return False
+        if plan is None:
+            return False
+        if plan.skipped:
+            # Every mark the file carried that did not arrive, because a comment
+            # that silently disappears is indistinguishable from one never sent.
+            lead = f"Took {plan.summary()}" if plan.count else "Nothing was imported"
+            QMessageBox.information(self, "Import Comments",
+                                    f"{lead}.\n\nLeft out:\n"
+                                    f"{skipped_report(plan.skipped)}")
+        name = os.path.basename(path)
+        self.status_left.setText(
+            f"Imported {plan.summary()} from {name}" if plan.count
+            else f"No comments imported from {name}")
         return True
 
     def _show_page_numbers(self) -> None:
@@ -2439,6 +2557,11 @@ class MainWindow(QMainWindow):
         self.act_save.setEnabled(tab is not None)
         self.act_save_as.setEnabled(tab is not None)
         self.act_revert.setEnabled(session is not None and session.dirty)
+        # Neither comment command needs a dirty document: exporting writes marks
+        # that are already in the file, and importing is how a document gets marks
+        # in the first place.  What both need is a document.
+        self.act_export_xfdf.setEnabled(tab is not None)
+        self.act_import_xfdf.setEnabled(tab is not None)
 
     def _undo_edit(self) -> None:
         tab = self._active_tab()

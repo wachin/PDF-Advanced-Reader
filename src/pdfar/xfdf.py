@@ -40,11 +40,14 @@ already holds.  A file that is not XFDF, is too big or is built in a way no read
 should attempt is refused entire, before anything is applied; a mark inside it
 that PDFAR cannot describe is left out and counted, because another reader's
 comments are not required to be only the kinds this one has words for.
+:func:`load_xfdf` is where that rule meets the disk: it puts the size bound on the
+file, so a reader is never paid for bytes that were going to be refused anyway.
 """
 
 from __future__ import annotations
 
 import math
+import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -1205,3 +1208,37 @@ def parse_xfdf(text: str, anchors: Sequence[Optional[Tuple[float, float]]],
         except _Skip as skip:
             skipped.append((_describe(_local(element), element), str(skip)))
     return ImportPlan(edits=tuple(edits), skipped=tuple(skipped))
+
+
+# ----------------------------------------------------------------------- file
+def comments_file_for(doc_path: str) -> str:
+    """The comments file that belongs with a document: ``name.xfdf`` beside it.
+
+    Both commands open their chooser here.  The marks of an exchange travel with
+    one document, so the name that says which one is the document's own, and the
+    folder that says where it was is the one the other reader will be pointed at.
+    """
+    base, _ = os.path.splitext(doc_path)
+    return f"{base}.xfdf"
+
+
+def load_xfdf(path: str) -> str:
+    """The text of a file the user pointed at, with the size bound put on it first.
+
+    :func:`_guard` counts characters and would catch an oversized file too, but by
+    then the read has already cost what the bound exists to prevent; a UTF-8 file
+    never holds more characters than bytes, so checking the size here refuses the
+    same file without reading it.  Nothing else is judged on the way in: whether
+    the text is XFDF is :func:`parse_xfdf`'s business, and a file that is not text
+    at all is the same kind of answer as one that is not XFDF — a reason, not a
+    traceback.
+    """
+    try:
+        if os.path.getsize(path) > MAX_INPUT_CHARS:
+            raise XfdfError("That file is too large to read.")
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    except UnicodeDecodeError as exc:
+        raise XfdfError("That file is not text PDFAR can read.") from exc
+    except OSError as exc:
+        raise XfdfError(f"Could not read that file:\n{exc}") from exc

@@ -905,8 +905,9 @@ with a chosen scale (F10-3p), perimeter/area measurements (F10-3q),
 calibration from a line of known length (F10-3r), self-contained
 appearance streams on every mark a save writes (F10-3s), XFDF export of
 the document's comments (F10-3t), the reader that turns another program's
-XFDF into a plan of edits (F10-3u) and that plan as one undoable import
-(F10-3v) done.
+XFDF into a plan of edits (F10-3u), that plan as one undoable import
+(F10-3v) and the two File-menu commands that reach either half (F10-3w)
+done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1362,10 +1363,29 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       `AddImportedMarks` carries the whole plan as one `Scope.COMMENTS` edit on the
       pages it wrote, and `AnnotationManager.import_xfdf(text)` reads and applies
       it against the live document — one Ctrl+Z for forty marks, and an import that
-      cannot be carried out leaves no part of the file behind. What is still open
-      is the item below: no menu command reaches either half yet, so the capability
-      exists and the user cannot ask for it.)
-- [ ] The File-menu commands that reach the two halves
+      cannot be carried out leaves no part of the file behind. What was still open
+      when this landed is the item below — no menu command reached either half, so
+      the capability existed and the user could not ask for it.)
+- [x] The File-menu commands that reach the two halves
+      (**F10-3w.** File ▸ *Export Comments (XFDF)…* and File ▸ *Import
+      Comments (XFDF)*, offered whenever a document is open and never gated on
+      the dirty mark: exporting describes the marks that are already in the
+      file, and importing is how a document gets marks in the first place.  Both
+      choosers open on `name.xfdf` beside the document, because a marks file that
+      does not say which document it belongs to is a pile of numbers; an export
+      whose name has no extension gets one, and a document with nothing on it
+      still writes a valid empty file — the other reader is told there was
+      nothing to send.  The import reads the file through `load_xfdf`, which puts
+      the size bound on the *file* so oversized ones, missing ones and ones not
+      text are refused as sentences before a byte is parsed, and holds the
+      wait cursor across the apply because a thousand marks are four seconds of
+      MuPDF work.  What comes back is said twice: one line in the status bar
+      (`Imported 3 marks, 2 not taken from review.xfdf`) and, whenever anything was
+      left out, a dialog naming every mark that did not arrive with the reason the
+      reader gave — capped at twelve lines, so a file of a thousand refusals is
+      still readable.  A plan the document refuses is the manager's failure to
+      report, and the window stays out of it rather than saying the same thing
+      twice.)
 - [ ] Marks that arrive without a name of their own are listed as **one** mark
       (found by F10-3t: PyMuPDF writes `/NM (fitz-A0)` for every annotation it
       adds without a name, and the counter restarts per page, so a document made
@@ -1508,9 +1528,15 @@ reference line of known length sets the scale instead of a typed factor
 another program left without one, the appearance stream that lets any reader
 paint it (F10-3s); the document's comments write out as XFDF, in the
 file's own coordinates and with the scale a measurement was taken at
-(F10-3t); and another program's XFDF reads back into the document as one
-undoable import that refuses the file or takes all of it (F10-3u, F10-3v).
-Next: the File-menu commands that reach both halves (F10-3w).
+(F10-3t); another program's XFDF reads back into the document as one
+undoable import that refuses the file or takes all of it (F10-3u,
+F10-3v); and both halves are now commands a user can reach, under File
+(Export / Import Comments (XFDF)) — the exchange is finished at the
+interface, not only in the library (F10-3w).
+Next, in order: the two defects the XFDF work found and left
+open — marks that arrive without a name of their own collapse to **one**
+entry, and a square or circle grows **1 pt per side** on every read — then
+F10-4's page manipulation.
 
 Goal:
 
@@ -4042,6 +4068,131 @@ file is applied; the export's side of the same dialog (a file chooser, a default
 name, a write error); importing into a *second* document or a page range; and
 merging a file whose marks the document already holds by position rather than by
 name — a repeated name is refused, not reconciled.
+
+---
+
+### F10-3w Export and Import Comments: the exchange, at the menu — [x] Implemented
+
+**Completed**: 2026-10-28
+
+**What landed**: File ▸ *Export Comments (XFDF)…* and File ▸ *Import Comments
+(XFDF)* in `src/pdfar/main.py` (`act_export_xfdf` / `act_import_xfdf`,
+`_export_tab_comments` / `_import_tab_comments`, `skipped_report`), and two
+file-level helpers in `src/pdfar/xfdf.py` — `load_xfdf(path)` and
+`comments_file_for(doc_path)`. The XFDF checklist closes here: the writer, the
+reader and the step that applies what the reader planned were all in the library,
+and until now no action could reach any of them.
+
+**Offered whenever a document is open, and never because one is dirty.** Revert
+waits on the dirty mark because discarding nothing is not a thing to do; these two
+do not. An export describes marks that are already in the file, and an import is
+how a document gets marks in the first place — a clean document is the most likely
+thing to be given comments, not the least.
+
+**The name the chooser offers is the document's own** (`review.pdf` →
+`review.xfdf`, beside it), because a marks file that does not say which document it
+belongs to is a pile of numbers, and the folder the file came out of is where the
+other reader will be pointed. A name typed without an extension gets one; a
+document with nothing on it still writes a valid empty file, which is the answer to
+"send me your comments" and not a silent refusal.
+
+**The size bound moved from the string to the file.** `_guard` counts characters,
+which is one read too late: `load_xfdf` checks the byte count first (UTF-8 never
+holds more characters than bytes) so a two-gigabyte mistake is refused without being
+read, and a missing file, a directory and a JPEG are refused in the same breath as
+a file that is not XFDF — as a sentence, through `XfdfError`, because the chooser
+offers every file and a user picking one has not made an error in the program.
+
+**A thousand marks is four seconds, and the cursor says so.** The apply is MuPDF
+work per mark, measured at **2.8–5.4 ms** each in F10-3v, and the wait cursor is
+that number's answer: the command holds it across the whole import rather than
+letting a five-second window look like a freeze. It is not conditional on the count,
+because the count is only known after the parse that the apply follows.
+
+**What the user is told, twice, on purpose.** The status bar gets one line —
+`Imported 3 marks, 2 not taken from review.xfdf` — and any mark that did not arrive
+is *named*, in a dialog, with the reason the reader gave:
+
+```
+Took 14 marks, 6 not taken.
+
+Left out:
+• strikeout on page 1: is not a kind of mark PDFAR can draw
+• polyline on page 2: draws an open path, which PDFAR has no shape for
+• text on page 10: names a page this document does not have
+• stamp on page 4: is a "Paste" stamp, which is not one PDFAR draws
+```
+
+A comment that vanishes silently cannot be told apart from one that was never sent,
+so a count alone would not do. The list is capped at twelve lines
+(`MAX_REPORTED_SKIPS`) with the remainder counted, because a file may carry
+`MAX_MARKS` refusals and a dialog nobody scrolls to the end of says less than one
+that ends.
+
+**A plan the document refuses is the manager's to explain.** `import_xfdf` returns
+`None` when the edit itself failed, and every failed edit in this application
+already reports through `transient_message` — so the command adds no dialog of its
+own, and the user hears the reason once.
+
+**An export is not a save.** It touches no document, marks nothing dirty, asks
+nothing of the writer, and cannot fail in a way Ctrl+Z has to undo. The one thing
+that can go wrong is the disk, and `OSError` becomes a critical dialog naming the
+file it could not write.
+
+**Files changed**: `src/pdfar/main.py`, `src/pdfar/xfdf.py`,
+`tests/test_xfdf_ui.py` (new), `tests/test_xfdf_import.py`, `ROADMAP.md`,
+`docs/pdfcraft-editing-analysis.md`.
+
+**Tests**: **21 new** — 15 in `tests/test_xfdf_ui.py` for the window (offered only
+with a document; both choosers open on the document's own name; a cancelled chooser
+writes nothing and changes nothing; the marks that go out are the marks the document
+holds; a name without an extension becomes a file; an empty document still writes
+one; a write failure is said; a whole-file import is one undo step; a non-XFDF file
+is refused out loud with no history entry; left-out marks are named; importing twice
+imports once; a mark for a page the document lacks is left out and says which; a
+manager's refusal is not reported as an import) and 6 in
+`tests/test_xfdf_import.py` for the file boundary (`comments_file_for`, the text
+round trip, a missing file, a non-text file, and the size bound applied *before* the
+read — asserted by patching `open` so a file that was read anyway fails the test).
+**1002 passed, three consecutive runs** (107.3 / 107.7 / 107.2 s). Ruff unchanged at
+the 7 pre-existing errors. Mypy moves 542 → **545**, the three new ones being the
+`QMenu | None` stub artifact `_build_menubar` already reports on every one of its 56
+lines (`menubar.addMenu()` is optional in the bindings, not in fact); no new kind of
+error, and the alternative was an inconsistency no reader would understand.
+
+**Verified by eye**: `/tmp/f103w/visual/menu.py` drives the window's own handlers
+with the choosers pointed at real files — never the library functions — over four
+documents. Six marks of six different kinds (highlight, note, square, ink,
+measurement, stamp) go out through Export as a 1 213-byte file; a second document
+imports them through Import, and **Poppler** — a reader that knows nothing of
+PDFAR — paints page 2 with all six in their places, including the dimension reading
+`657.65 cm`, which is the scale travelling in PDFAR's own namespace
+(`/tmp/f103w/visual/{a-before,b-imported,c-undone}-2.png`). One Ctrl+Z empties the
+document and the page after it is **byte-identical** to the page before
+(`c9a5e2ca…` both). The foreign twenty-element file the parser was verified with
+arrives as `Imported 14 marks, 6 not taken` and the dialog above. Then the whole
+circle: the six-kind file imported into a third document and exported again is the
+same file **except one line** — the square's rect, `59,491,241,593` becoming
+`58,490,242,594`, which is the 1 pt-per-side growth the open defect item below
+records, now confirmed on the menu path as well as the parser's.
+
+**Performance**:
+
+| through the menu | measured |
+|---|---|
+| export, 6 marks of 6 kinds | **17.9 ms** |
+| import, 6 marks of 6 kinds | **28.7 ms** |
+| import, 1 000 notes over 8 pages | **4 302 ms**, one undo step ("Import 1000 comments") |
+| export, 1 000 notes | **1 000 names held**, file 57 KB |
+| a file that is not XFDF | refused before any mark is planned |
+
+**What is not here**: a progress dialog for the four-second import (a busy cursor is
+not a percentage, and a percentage needs a total the parse has to finish to know);
+exporting a *selection* or a page range; a default that remembers where the last
+file went; writing the marks into the PDF's own `/Annots` as well (they are already
+there — the file is for the reader that has no PDF); and any of it on the keyboard,
+since neither command has a shortcut to take without displacing one the save group
+owns.
 
 ---
 
