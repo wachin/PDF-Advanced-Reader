@@ -902,8 +902,9 @@ document (F10-3i), the pen tool and its style pickers (F10-3j/3k), the
 shape tool (F10-3l/3m), the standard rubber stamps with their tool
 (F10-3n), custom caption/image stamps (F10-3o), measurement annotations
 with a chosen scale (F10-3p), perimeter/area measurements (F10-3q),
-calibration from a line of known length (F10-3r) and self-contained
-appearance streams on every mark a save writes (F10-3s) done.
+calibration from a line of known length (F10-3r), self-contained
+appearance streams on every mark a save writes (F10-3s) and XFDF export of
+the document's comments (F10-3t) done.
 
 *Measured on F10-1:* the edit path never touches the open path — `tobytes()` runs
 for the first time when an edit is accepted, not when a document is read — and
@@ -1333,7 +1334,32 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       reads `/Annots` at the xref level, so the 540-page book with 1 046
       links pays **50–80 ms** on a multi-second save and a document with no
       annotations pays nothing.)
-- [ ] XFDF import/export
+- [x] XFDF export: the document's comments as a file another reader can open
+      (**F10-3t.** `xfdf.py` writes Adobe's XFDF from the annotation list: one
+      element per mark, in the mark's own kind — `highlight`, `text`, `ink`,
+      `square`, `circle`, `line`, `polygon`, `polyline`, `stamp` — with the
+      geometry the PDF holds rather than the geometry the view shows. Every
+      coordinate is flipped through the page's *crop box*, so a scan whose
+      visible area starts at (36, 36), a media box that does not start at zero
+      and a page the file turns with `/Rotate` all put the mark on the same
+      words. A highlight's four corners come out in the order the specification
+      gives a quadrilateral, an ink keeps one `<gesture>` per stroke, a
+      measurement its `<vertices>` and its ends, and an arrow its `head`/`tail`.
+      The scale of a measurement is the one thing XFDF has no word for, so it
+      travels in `urn:pdfar:xfdf:1` attributes at the precision the file's own
+      `/Measure` keeps. Nothing is claimed that the file never said: a mark with
+      no `/CA` gets no `opacity`, a note or standard stamp no `color`, a mark
+      with no `/NM` of its own no `name`, and a mark PDFAR cannot model — free
+      text — is left out rather than described wrongly. No `href`, no
+      `<fields/>`, no timestamp: the same document writes the same file.)
+- [ ] XFDF import: another reader's comments as marks in the document, as one
+      undoable edit that refuses the file or takes all of it
+- [ ] The File-menu commands that reach the two halves
+- [ ] Marks that arrive without a name of their own are listed as **one** mark
+      (found by F10-3t: PyMuPDF writes `/NM (fitz-A0)` for every annotation it
+      adds without a name, and the counter restarts per page, so a document made
+      by another PyMuPDF-based program carries the same name on every page and
+      the id-keyed list keeps one of 540. See the report.)
 
 ## F10-4 Page manipulation (was F6) — [ ]
 
@@ -1462,8 +1488,11 @@ annotations with the square-unit format their reading needs (F10-3q), and a
 reference line of known length sets the scale instead of a typed factor
 (F10-3r); a save now gives every annotation in the file, including marks
 another program left without one, the appearance stream that lets any reader
-paint it (F10-3s).
-Next, in order: XFDF import/export.
+paint it (F10-3s); and the document's comments write out as XFDF, in the
+file's own coordinates and with the scale a measurement was taken at
+(F10-3t).
+Next, in order: XFDF import, then the File-menu commands that reach both
+halves.
 
 Goal:
 
@@ -3642,6 +3671,136 @@ wrote is not a repair), form widgets and `/NeedAppearances`, a side cache for
 missing appearances at display time (PDFAR already paints what MuPDF
 synthesises), and pixel-for-pixel agreement with another editor's own
 default appearance for the same dictionary.
+
+---
+
+### F10-3t XFDF export: the document's comments as a file that can travel — [x] Implemented
+
+**Completed**: 2026-10-28
+
+**What landed**: `src/pdfar/xfdf.py` (new) writes Adobe's XFDF for the marks an
+`AnnotationManager` lists. `export_xfdf(manager)` returns the document as text —
+envelope, `<annots>`, one element per mark — and asks the document for nothing
+but each page's box. The import half and the menu commands are separate steps
+(F10-3u, F10-3v), so nothing in the interface reaches this yet.
+
+**The coordinates are the crux, and they were measured rather than assumed.**
+PDFAR's models, its rendering, its selection and its tools all measure *down*
+from the top-left of the page's visible area; `/Rect`, `/QuadPoints`, `/L` and
+`/InkList` measure *up* from the bottom-left of the page. The rule that covers
+every case is `x = crop.x0 + page_x`, `y = crop_top − page_y`, where `crop_top`
+is the crop box's top edge in the file's own space — which is *not* what PyMuPDF
+reports as `cropbox.y1`, because that is a distance down from the media box. So
+the anchor is `(cropbox.x0, mediabox.y1 − cropbox.y0)`, and four page shapes were
+checked against the raw arrays rather than against a picture of the format: a
+plain page, a page whose `CropBox` starts at (36, 36), one whose `MediaBox` also
+starts away from zero, and one the file itself turns with `/Rotate 90`. MuPDF
+reports an annotation's rectangle in the *unturned* space whatever the rotation,
+which is why a mark on a scanned-turned page needs no rotation handling here.
+`/QuadPoints` corner order was measured too: upper-left, upper-right, lower-left,
+lower-right — the other pairing traces a bow tie across the band instead of its
+two edges.
+
+**What each kind says.** `highlight` (with `coords` per selected line), `text`
+(a note, `icon="Note"`), `ink` (one `<gesture>` per stroke, so a multi-stroke
+drawing keeps its strokes), `square`, `circle`, `line`, `polygon`, `polyline`,
+`stamp`. An arrow is a `line` carrying `head="None" tail="ClosedArrow"`, the way
+the file stores `/LE`; a measurement is its geometry's element plus `intent`
+(`LineDimension`/`PolyLineDimension`/`PolygonDimension`, the slash dropped because
+an XFDF name attribute carries names, not PDF tokens), a `subject` of
+Distance/Perimeter/Area and `<vertices>` or `start`/`end`. The reading itself
+travels as `<contents>`, which is the text the mark shows on the page.
+
+**The scale is the one thing the format cannot hold**, and it is the one number
+without which a measurement is a squiggle. It goes out as `pdfar:measure`,
+`pdfar:scale`, `pdfar:unit` and `pdfar:precision`, bound to
+`xmlns:pdfar="urn:pdfar:xfdf:1"`: a conforming reader ignores a prefix it does
+not own, and the six decimals are what the file's own `/Measure /C` keeps, so the
+reading in the exchange file and the reading on the page are the same reading. An
+import that has not read the namespace may keep the geometry but must not print
+the number as PDFAR's.
+
+**What is deliberately not claimed.** No `href`/`<f>` — an unresolvable path is
+worse than none, and the marks are in the elements. No empty `<fields/>`, which a
+reader can take as an instruction to clear every form field. No `opacity` for a
+mark with no `/CA` (PyMuPDF reports `-1`, and `-1` is not a claim about
+transparency). No `color` for a note or a standard stamp, because PDFAR writes
+none and the appearance paints what it paints. No `date`/`creationdate` for a mark
+PDFAR made — no edit writes `/M` — so the file does not change every time it is
+written. No `name` for a mark that came in without `/NM`: its object number means
+nothing in another copy of the file. No `<popup>`, no FDF, no `/FreeText` (PDFAR
+has no model for it, and leaving a mark out is a smaller loss than describing it
+wrong). An image stamp's *picture* cannot travel; it goes out as a stamp carrying
+its note, like a caption stamp.
+
+**Found on the way — one unnamed mark becomes one row.** `annot_key()` falls back
+to `anon:<xref>` when an annotation has no `/NM`, on the reasonable assumption
+that PyMuPDF reports `/NM` as `info["id"]`. It does, and it also *invents* one:
+every annotation a PyMuPDF-based program adds without a name is written into the
+file as `/NM (fitz-A0)`, with the counter restarting per page. A 540-page
+document built that way therefore carries the same name 540 times, and
+`AnnotationManager`'s id-keyed flat list keeps **one** mark of them — the sidebar
+shows one row, and the export writes one element, for 540 real marks. This is not
+an XFDF bug and is not fixed here (identity is F10-3h's machinery, and a fix has
+to say what survives a save and a clone); it is now a checklist item of its own.
+The benchmark below gives each mark a distinct name, which is what a file from
+another editor usually looks like.
+
+**Two smaller findings, recorded not fixed.** `_highlight_model` keeps the `-1`
+that PyMuPDF reports for an unset `/CA`, so recolouring an *inherited* highlight
+would call `set_opacity(-1)`; the export sidesteps it by writing `opacity` only
+inside `0.0 <= opacity < 1.0`. And `AddMeasurement` flips its `/Rect` through
+`page.mediabox.height` rather than the crop box, which differs only on a page with
+an offset `CropBox` — the export computes the box from the mark's own points, so it
+does not inherit that.
+
+**Files changed**: `src/pdfar/xfdf.py` (new), `tests/test_xfdf.py` (new),
+`ROADMAP.md`, `docs/pdfcraft-editing-analysis.md`.
+
+**Verified by eye**: a three-page file holding all fourteen kinds was saved,
+exported, and then **the exchange file's own numbers were drawn back onto the
+pages they name** — each `rect` as a magenta box, each `coords` pair as the two
+edges of the highlighted line, each `<vertices>` as a polyline — and painted by
+**Poppler** (`pdftoppm`, an independent renderer, `/tmp/f103t/visual/sheet-*.png`).
+Every box sat on its mark: the highlight's edges on the yellow band, the note
+icon, ellipse, PAID caption and DRAFT stamp inside their frames, the ink stroke,
+line and arrow, the green rectangle, the polygon, and the three dimensions with
+their vertices on the paths and their readings. Read back through the *media*
+box instead, the same drawing lands 36 pt off on the offset page — which is the
+claim the crop-box anchor is making.
+
+**Tests**: 921 passed, three consecutive full runs. `tests/test_xfdf.py` adds 23
+cases: the envelope (XML declaration, XFDF namespace, `xml:space="preserve"`, no
+`<fields>`), an empty document, thirteen marks becoming thirteen correctly-named
+elements each carrying its own `name`, and the same document writing the same
+file twice; the flip stated as numbers (`coords="10,80,100,80,10,70,100,70"`),
+every mark's geometry compared with the raw `/QuadPoints`, `/InkList`, `/L`,
+`/Vertices` and `/Rect` arrays it claims to describe, a page the file turns by
+`/Rotate 90`, a crop box at (36, 36) and a media box at (10, 20); text that would
+break the file (`&`, `<`, quotes, tab, CR/LF, non-ASCII) surviving a round trip
+through a real parser; arrow ends, ink strokes, stamp icons and the note's missing
+colour; a measurement's reading, intent, subject, unit, precision and its scale
+equal to the file's `/C`; an inherited highlight with no `/CA` exported without
+an `opacity` while PDFAR's own keeps `0.4`; author and both PDF dates travelling
+verbatim; free text and a URI link left out of a foreign file, whose named square
+keeps the colour and border width the file holds; a nameless mark travelling
+nameless; a non-finite coordinate costing that mark and not the file; and control
+characters being dropped instead of written.
+
+**Performance**: about **28 µs per mark** (1 000 marks on one page: 28 ms,
+138 KiB), and the per-page box lookup is cached, so 540 pages with one mark each
+cost **82 ms** and 1 620 marks over 540 pages **125 ms**. On the real 540-page
+GS262 book with 200 marks spread over 200 pages: **156 ms**, 27 KiB. An export is
+therefore cheaper than the save it would usually follow, by two orders of
+magnitude.
+
+**What is not here**: the import half (F10-3u) and the File-menu commands that
+reach either (F10-3v), so no user action produces or consumes this file yet;
+`<popup>`, FDF, `<template>`, `<trails>` and the other XFDF vocabulary PDFAR has
+no model for; page-number labels and `page` attributes in the `/Pages`-relative
+form Adobe's own writers sometimes emit (PDFAR addresses a page by index, which is
+what the format's `page` attribute carries); XFA and form fields, which are not
+comments; and the identity fix the finding above asks for.
 
 ---
 
