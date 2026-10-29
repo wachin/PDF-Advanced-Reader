@@ -1490,7 +1490,7 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
             they had, which now names another sheet — the gap F10-4f left for the pick too.  One
             map answers all three: the view re-aims `current_page`, the strip's pick and the
             saved position with the sheets.
-      - [ ] **F10-4i** — *The numbering range stops echoing itself.* `startPage`/`endPage` are
+      - [x] **F10-4i** — *The numbering range stops echoing itself.* `startPage`/`endPage` are
             1-based and stored **globally** (`pageNumbers/…`, no document in the key),
             `page_range()` clamps them to the open document at use, and the stamp/erase copy
             path saves the clamped pair straight back — so deleting the tail of a book
@@ -1683,8 +1683,11 @@ written back to the settings store, and moves home again on undo, without a snap
 overwrite a mark made since the step (F10-4g). The same map now answers for the reader: the view
 re-aims the page they were on when a step moves the sheets — including the undo, which is not a
 command and was the gap — the strip's pick follows the sheets it named and is allowed to shrink, and
-the position written to `viewState/<path>` is right because the view is (F10-4h). Next in order: the
-numbering range that saves its own clamped values back (F10-4i), the XFDF sidecar exported before a
+the position written to `viewState/<path>` is right because the view is (F10-4h). The last number a
+reader owns outside the document now stays theirs rather than the open book's: the panel's two boxes
+still stop at the page count in front of them, and the range the copy is stamped with — and saved
+back to the global store — is the pair the reader asked for, clamped where it is used and not where
+it is remembered (F10-4i). Next in order: the XFDF sidecar exported before a
 delete (F10-4j), and the two the reading-position step found behind it — the strip's one channel for
 "here" and "picked" (F10-4k) and the saved position written against a tree the file may not have
 (F10-4l).
@@ -5295,6 +5298,99 @@ next step can now delete; the strip says "here" and "picked" through one channel
 shrank to nothing reads as a one-page pick (**F10-4k**); the saved position is written against a
 tree the file may never have (**F10-4l**); the numbering range (**F10-4i**) and the XFDF sidecar
 (**F10-4j**) still hold numbers no step reaches; and the search dock's hit pages are unmoved.
+
+---
+
+### F10-4i The numbering range stops echoing itself — [x] Implemented
+
+**What landed.** The panel now holds two answers and each of them is right about its own thing: the
+two boxes describe the document, and the range describes the reader.
+
+* `_end_page_value` joins `_start_page_value` in the constructor (`page_numbers.py`). The start
+  already had one, and it was the asymmetry that made this bug: `set_page_count()` restored the
+  start box from the remembered value and the end box from `self.last_page_spin.value()` — the
+  widget that Qt had just folded — so a document switch gave the start its number back and left the
+  end holding the last book's page count, permanently.
+* `set_page_count()` keeps the display rule exactly as it was — `setRange(1, count)` on both boxes,
+  and the value pulled inside it — and now restores each box from the pair the panel remembers, so
+  the fold is a *display* fold and reverses when a wider book opens. Its docstring is the rule: move
+  the boxes into the active document; the reader's range stays put.
+* `settings()` and `erase_settings()` report `_start_page_value` / `_end_page_value` instead of
+  asking the widgets. This is the half that carried the harm, because the copy path saves what these
+  answer (`main.py:1695`, `main.py:1749`) and the store is global.
+* `_on_changed()` remembers only when the sender is one of the two page boxes. A font size, a unit
+  change or a position is not a page number, and reading the folded display on those edits would
+  adopt the last book's page count as the reader's range — which is the same bug wearing a different
+  trigger. `_remember_range()` runs *after* `_sync_range()`, so lowering the end below the start
+  moves the remembered start down with the box that was moved, and the pair the panel keeps is
+  ordered for the same reason the boxes are.
+* Both drag write-backs (`apply_settings`, `apply_erase_settings`) store the pair they were handed,
+  so a number dragged on the page cannot answer with a range the panel did not just report.
+* `page_range()` is untouched and still clamps at use. That half was already correct — it is what
+  the label under the boxes reads (`page_numbers.py:1647`) and what both copy loops stamp by
+  (`page_numbers.py:568`, `page_numbers.py:607`), against the document being written rather than the
+  one on screen — and the fix is not a second clamp but the removal of the first one's side effects.
+
+**Why the store is the harm.** On its own a folded spin box is a display bug the reader can undo by
+typing the number again. `pageNumbers/startPage` and `pageNumbers/endPage` carry no document in the
+key, because a reader sets a range once and numbers several books with it, and `_save_numbered_copy`
+calls `settings.save()` after a successful write. So the fold survives the book that caused it: open
+a 120-page report, ask for pages 10 to 100, look at an 8-page memo in the next tab, save a copy from
+*either* one, and every book numbered after that gets pages 8 to 8. The one clamp that was already
+handled correctly was `end_page == 0` — "the last page" — which was already held apart from its box
+in `_end_is_last` and so already survived a document switch. `end_page` was the same kind of value
+stored in the wrong place.
+
+**Tests**: 16 in `tests/test_numbering_range.py`. The range outlives a shorter book, comes back when
+the book does, and survives the book being closed; the boxes still stop at the book in hand, which is
+the half that must not change; the label promises what this book will get; a document switch emits no
+preview because nothing the reader set moved; the two store round trips (numbering and erase) and a
+reopened panel reading `(10, 100)` while showing `8`; a reader's own edit winning in this document and
+in the next; `_sync_range`'s ordering moving the remembered pair with the box it moved; `end_page == 0`
+still meaning last; and the whole story in the real window — a 120-page book, pages 10–100, a switch
+to an 8-page book, `Save Copy…` writing a copy whose only number is on the clamped last sheet while
+the store still holds `(10, 100)`.
+
+**Mutations**: 13 of the new guards, **all caught**. Two lessons repeated from F10-4f. The first
+sweep reported one survivor — the erase write-back dropping the range it was handed — and it was
+already dead by the time the sweep ran: the test that kills it
+(`test_the_erase_answer_follows_the_range_it_was_handed`) had been written after the list was built,
+and a sweep reads the tests that exist when it runs, not the ones it prompted. The second: two of the
+thirteen entries were textually identical patches, because the erase block appears once in the file
+and the numbering block differs only in the line that follows it, so the pair was deduplicated rather
+than counted twice. An anchor has to be unique in the file, not in the method.
+
+**Suite**: **1210 passed, three consecutive runs** (162.9 / 157.8 / 188.0 s). Ruff unchanged at the
+7 pre-existing errors; mypy unchanged at **553 in 16 files**, with the same twenty reported lines in
+`page_numbers.py` before and after — none of them a line this step wrote.
+
+**Verified by eye**: `/tmp/f104i/visual.py` drives the real window with the Page Numbers tab open: a
+30-page book with the range typed as pages 10–25, then a 6-page book in the next tab. On the short
+book the boxes read `6..6` with a maximum of 6 and the label says *Page 6 will show "1/1"* — the
+reader is looking at six pages and the panel is not lying about it — while the panel answers
+`(10, 25)` (`/tmp/f104i/2-short.png`). `Save Copy…` stamps a number on the one clamped sheet and the
+store holds `(10, 25)`. Back on the 30-page book the boxes are `10..25` again and the label promises
+*Pages 10–25 will show "1/16" … "16/16"* (`/tmp/f104i/4-back.png`). The same script run against the
+pre-fix module ends that shot with the end box at **10** and the label reading *Page 10 will show
+"1/1"* (`/tmp/f104i/before/4-back.png`) — the range 10–25 destroyed by one look at a six-page book.
+Typing page 3 as the end *in the short book* is then adopted as `(3, 3)`: the reader's answer for the
+book in hand, not the wide number they left in the other one.
+
+**Performance**: none, measured rather than asserted. The changed paths are the panel's answer, which
+is read on every mouse move of a number or mask drag, and `set_page_count()`, which runs on every tab
+change. On the 540-page book, before and after the change, in warm passes: `preview_settings()` ×1000
+**12.0 / 12.2 ms** against **11.4 / 12.3 ms**; one `apply_settings()` write-back **0.94 ms** against
+**0.92–0.93 ms**; `apply_erase_settings()` **0.83–0.85 ms** against **0.82–0.94 ms**;
+`_update_range_label()` **0.015 ms** both; `set_page_count()` out and back **0.173 ms** against
+**0.171–0.172 ms**; and the whole 120-move drag with the window's handler connected
+**162–165 ms** against **163–184 ms**, the second number including a first-run warm-up. The answer
+path got two attribute reads where it had two widget reads, which is the only direction the change
+could move, and it does not register.
+
+**What is not here**: the XFDF sidecar, which is named from the PDF's own path and so overwrites the
+file that holds a pre-delete numbering (**F10-4j**); the strip saying "here" and "picked" through one
+channel (**F10-4k**); `viewState/<path>` written against a tree the file may never have
+(**F10-4l**); the search dock's hit pages; and `MainWindow._delete_pages`'s duplicate shift.
 
 ---
 

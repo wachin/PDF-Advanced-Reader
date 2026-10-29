@@ -954,11 +954,17 @@ class PageNumbersPanel(QWidget):
         self._erase_offsets_points = (
             float(erase_initial.width), float(erase_initial.height),
             float(erase_initial.margin_x), float(erase_initial.margin_y))
+        # The range is the reader's, not the open document's.  The boxes clamp to
+        # the book in hand — a maximum of its page count is what stops a reader
+        # typing page 100 of eight — and these hold what the reader asked for,
+        # which is what settings() reports and what the copy path saves: the
+        # store is global, so a fold here is a range lost for every book.
         # end_page == 0 means "last page": keep that semantic until the user
         # picks an explicit end, even though the panel is built before a
         # document (and its page count) is known.
         self._start_page_value = max(1, int(initial.start_page))
         self._end_is_last = initial.end_page == 0
+        self._end_page_value = max(0, int(initial.end_page))
 
         self.range_label = QLabel(self)
         self.range_label.setWordWrap(True)
@@ -1335,8 +1341,8 @@ class PageNumbersPanel(QWidget):
             font_size=self.size_spin.value(),
             margin_x=margin_x,
             margin_y=margin_y,
-            start_page=self.first_page_spin.value(),
-            end_page=0 if self._end_is_last else self.last_page_spin.value(),
+            start_page=self._start_page_value,
+            end_page=0 if self._end_is_last else self._end_page_value,
             start_number=self.first_number_spin.value(),
             unit=self.unit_combo.currentData(),
             mask=self.mask_check.isChecked(),
@@ -1355,14 +1361,14 @@ class PageNumbersPanel(QWidget):
             height=height,
             margin_x=margin_x,
             margin_y=margin_y,
-            start_page=self.first_page_spin.value(),
-            end_page=0 if self._end_is_last else self.last_page_spin.value(),
+            start_page=self._start_page_value,
+            end_page=0 if self._end_is_last else self._end_page_value,
             unit=self.unit_combo.currentData(),
             color=self._erase_color,
         )
 
     def set_page_count(self, page_count: int) -> None:
-        """Match the active document; clamp the range and enable saving."""
+        """Move the boxes into the active document; the reader's range stays put."""
         page_count = max(0, int(page_count))
         if page_count == self._page_count:
             self.save_btn.setEnabled(page_count > 0)
@@ -1379,7 +1385,7 @@ class PageNumbersPanel(QWidget):
                 min(self._start_page_value, upper))
             self.last_page_spin.setValue(
                 upper if self._end_is_last
-                else min(self.last_page_spin.value(), upper))
+                else min(self._end_page_value, upper))
             self._sync_range()
         finally:
             self._updating = False
@@ -1429,6 +1435,7 @@ class PageNumbersPanel(QWidget):
             self.size_spin.setValue(settings.font_size)
             self._start_page_value = max(1, int(settings.start_page))
             self._end_is_last = settings.end_page == 0
+            self._end_page_value = max(0, int(settings.end_page))
             self.first_page_spin.setValue(settings.start_page)
             self.last_page_spin.setValue(
                 settings.end_page or max(1, self._page_count))
@@ -1454,6 +1461,7 @@ class PageNumbersPanel(QWidget):
                 max(0, self.erase_position_combo.findData(settings.position)))
             self._start_page_value = max(1, int(settings.start_page))
             self._end_is_last = settings.end_page == 0
+            self._end_page_value = max(0, int(settings.end_page))
             self.first_page_spin.setValue(settings.start_page)
             self.last_page_spin.setValue(
                 settings.end_page or max(1, self._page_count))
@@ -1612,13 +1620,27 @@ class PageNumbersPanel(QWidget):
     def _on_changed(self) -> None:
         if self._updating:
             return
-        if self.sender() is self.first_page_spin:
-            self._start_page_value = self.first_page_spin.value()
-        elif self.sender() is self.last_page_spin:
+        box = self.sender()
+        if box is self.last_page_spin:
             self._end_is_last = False
         self._sync_range()
+        if box is self.first_page_spin or box is self.last_page_spin:
+            self._remember_range()
         self._update_range_label()
         self.settings_changed.emit(self.preview_settings())
+
+    def _remember_range(self) -> None:
+        """Take the reader's answer from the boxes of this document.
+
+        Only ever called while the reader is editing one of them, so the value in
+        front of them — inside this book — is what they meant, and it replaces a
+        number remembered from a wider one.  ``_sync_range`` may have moved the
+        box they did not touch to keep the pair ordered, and where it moved that
+        one is what they asked for as well.
+        """
+        self._start_page_value = self.first_page_spin.value()
+        if not self._end_is_last:
+            self._end_page_value = self.last_page_spin.value()
 
     def _update_range_label(self) -> None:
         settings = self.preview_settings()
