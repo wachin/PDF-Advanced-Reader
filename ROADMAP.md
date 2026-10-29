@@ -1425,9 +1425,16 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       had been using was wrong for twelve of them). This is the precondition of
       rotating permanently — without it, turning a page with PDFAR's own tool would
       jump every mark the user has on it a quarter of the page.
-- [ ] Rotate permanently: write `/Rotate` into each named page node as an undoable
-      `Scope.STRUCTURE` edit, never on a `/Pages` parent, reaching the view, the
-      thumbnails and the saved file (**F10-4b**)
+- [x] Rotate permanently: `RotatePages { pages, delta }` in a new `src/pdfar/pages.py`
+      writes `/Rotate` into **each named page node** as an undoable `Scope.STRUCTURE`
+      edit — never on a `/Pages` parent, and composed from `page.rotation` so a page
+      whose turn it only *inherits* is carried into its own value instead of counted
+      twice. It reaches the view, the thumbnails and the saved file, and refuses a
+      non-quarter angle, an empty list and an out-of-range page whole (**F10-4b**)
+- [ ] Put the turn under the user's hands: *Rotate Page(s)* in the Tools menu, the
+      toolbar and the page-list context menu, plus *Rotate All Pages*, each wired to
+      `apply_edit(RotatePages(...))` so undo/redo and the re-render come free
+      (**F10-4c**; today only the *view* rotation is reachable)
 - [ ] Delete, extract, duplicate, move, reverse
 - [ ] Insert blank page
 - [ ] Split, merge/combine
@@ -1567,8 +1574,11 @@ instead of growing a point on every side each time the file is read
 begun at the end that has to be true before a page can be turned for keeps: a page
 that carries its own `/Rotate` — the ordinary case in a scanned book, which is what
 PDFAR is being built for — now puts its marks, its words, its hits and its clicks
-on the pixels MuPDF actually paints them on (F10-4a). Next in order: the rotation
-edit itself, F10-4b.
+on the pixels MuPDF actually paints them on (F10-4a). The turn itself has followed:
+`RotatePages` writes the angle into the page's own node, undoably, and the view, the
+thumbnails and the saved file all agree on the page that comes out (F10-4b). Next in
+order: the command under the user's hands, F10-4c — today only the *view* rotation is
+reachable, so the edit exists in the library and nowhere else.
 
 Goal:
 
@@ -4512,6 +4522,95 @@ checklist for it. Also not here: a page whose `/Rotate` is not a quarter turn �
 requires a multiple of 90, PyMuPDF folds anything else to 0, and the view now follows
 that reading instead of guessing — and the offset crop box and `/UserUnit` questions that
 belong to the page-box item.
+
+---
+
+### F10-4b Turning a page for keeps — [x] Implemented
+
+**Completed**: 2026-10-29
+
+**What landed**: `src/pdfar/pages.py`, a new module for the page tree, and its first
+edit — `RotatePages { pages, delta }`, a `Scope.STRUCTURE` edit that writes `/Rotate`
+into the node of every page named and into no other object in the file. No viewer,
+sidebar or save code changed: F10-4a's re-measure and F10-1's scope grading already
+handled a structural edit, and this is the first edit that proves they do.
+
+**The two spaces again**: `page.rotation` is the turn a page is *displayed* at,
+including a `/Rotate` it only inherits from an ancestor `/Pages` node, while
+`set_rotation()` writes the page's own node with an absolute angle and never touches a
+parent. Composing the two — `set_rotation((page.rotation + delta) % 360)` — is what
+turns one page of a shared tree without moving its neighbours, and it is why a page
+that arrives inherited-at-90 leaves at 180 rather than at 90 or 270. Writing the delta
+alone would silently *undo* the inherited half of the turn on such a page, which is the
+bug the inheritance tests hold shut.
+
+**Measured first** (`/tmp/f104b/probe*.py`, `iso.py`):
+
+* PyMuPDF does resolve inheritance: with `/Rotate 90` on the root and the key stripped
+  from the page, `page.rotation == 90`, `page.rect` is turned and its bitmap is
+  100×200, while `/Rect` stays on the unturned sheet — F10-4a's split, arriving through
+  an ancestor instead of the page;
+* `doc.new_page()` writes `/Rotate 0` on **every** page it creates, so a fixture built
+  that way cannot inherit anything until the key is removed with
+  `xref_object`/`update_object` — the test's `inherited_pdf()` does exactly that;
+* `set_rotation()` folds 45→0 and 100→0 — a *silently unchanged* document after a
+  command that promised a turn — so the edit refuses an angle that is not a multiple of
+  90 instead of reporting it; −90 → 270, 360 → 0, 540 → 180 all fold the way PDF says.
+* **a lifetime trap** found while writing these tests, and worth the note: an
+  `Annotation` reached through a *temporary* `Page` — `next(doc[0].annots()).rect` —
+  segfaults (exit 139) once MuPDF frees the page the annotation hung off, while
+  `.info[...]` survives, which is why two older tests never tripped it. Binding
+  `page = doc[0]` before walking is safe. Every walk in PDFAR already binds its page,
+  so nothing in the application was exposed; the rule is written into the test module.
+
+**Refusals, whole**: an empty selection, an angle that is not a quarter turn, and any
+page index outside the document are each an `EditError` before a single page is
+written, so `RotatePages(pages=(0, 1, 7))` on a three-page file turns **nothing**
+rather than the first two on the way out. A page named twice is turned once — the list
+says *which* pages, not how many times it said so.
+
+**Files changed**: `src/pdfar/pages.py` (new), `tests/test_page_rotate.py` (new),
+`ROADMAP.md`, `docs/pdfcraft-editing-analysis.md`.
+
+**Tests**: **27 new**, in seven groups — the file read back after a save (4: neighbours
+keep theirs, the angle lands on the page and not the tree, `page.rect` follows, the
+words do not); inheritance (2); angles (9, including four turns returning to the
+start as four separate undo steps); refusals (5, each checking the version and the
+pages are untouched); undo/redo and the pages an edit names (2 — `changed_pages` is
+`(1, 3)`, not every page, which is F10-1h's incremental re-list); the marks and the
+window F10-4a settled (4, a `/Rect` that keeps its exact numbers, the view re-measuring
+both page spaces, the selection ring on the mark's **own ink** rendered with and without
+annots, and a save/reopen carrying the turn and the mark together into the view); and
+the sidebar (1). **Five mutations** of `pages.py` — the empty guard (1 test), the
+quarter-turn guard (1), the bounds check (3), composing with `page.rotation` (3), and
+de-duplicating the list (1) — each fail the suite; **two** of `sidebar.py`'s scope
+grading do the same: letting `METADATA` reach the thumbnails clears a painted icon, and
+rebuilding on every `_THUMB_SCOPES` edit replaces the item a `COMMENTS` edit must have
+kept. **1069 passed, three consecutive runs** (200.0 / 217.4 / 148.7 s).
+Ruff unchanged at the 7 pre-existing errors
+(`ruff check src tests`; both new files are clean, and the repo-wide 13 is those 7 plus
+6 long-standing ones under `tools/`); mypy **547 in 16 files**, the +2 over F10-4a being
+the `import-untyped` + `no-redef` pair every module pays for the house
+`try: import pymupdf as fitz / except ImportError: import fitz` idiom — `xfdf.py:58`,
+`edits.py:31` and `annotations.py:31` carry the identical two.
+
+**Verified by eye**: `/tmp/f104b/verified.py` draws the ring over the mark's ink before
+and after a permanent turn, and re-opens the saved file in MuPDF alone — the ring is on
+the mark in all three, and the saved page's `/Rect` is still exactly
+`(30.0, 12.0, 130.0, 42.0)`.
+
+**Performance**: on the 540-page, 23.9 MB GS262 — a metadata-only edit for the floor is
+40.4 ms, turning one page **48.8 ms** (58.4 ms cold), turning all 540 **210.2 ms**,
+undo 5.0 ms and redo 4.4 ms. The edit itself is two dictionary writes per page; the
+rest is F10-1's copy-and-adopt, which is what every structural edit already pays.
+
+**What is not here**: the command. `main.py` still exposes only the *view* rotation
+(`Ctrl+Left`/`Ctrl+Right`, Tools menu, toolbar), so nothing a user can click reaches
+`RotatePages` yet — that is F10-4c, and it is now the smallest remaining gap between
+the library and the window. Also not here: the other page operations that will share
+`pages.py` (delete, extract, duplicate, move, reverse, insert, split/merge, page boxes),
+the tree flattening that has to precede any reorder, and a file whose `/Rotate` is not
+a multiple of 90 — PDF forbids it, PyMuPDF folds it, and the edit refuses to write one.
 
 ---
 
