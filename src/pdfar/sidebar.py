@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate, QLabel, QToolButton, QLayout, QLayoutItem,
 )
 from . import APP_NAME
-from .edits import Scope
+from .edits import Renumbering, Scope
 from .icons import tinted_icon
 from .render import RenderPool, RenderResult
 from .session import DocumentSession
@@ -254,6 +254,10 @@ class Sidebar(QWidget):
         self.pool = pool
         self._thumb_zoom: Dict[int, float] = {}
         self._thumb_settings = ThumbnailSettings.load()
+        #: The page-tree move the bookmarks have already been re-counted with.
+        #: Identity, not value: two steps can describe the same move, and both are
+        #: meant to be spent.  See :meth:`_renumber_bookmarks`.
+        self._spent_renumbering: Optional[Renumbering] = None
 
         self.bookmark_manager = BookmarkManager(session)
 
@@ -585,6 +589,7 @@ class Sidebar(QWidget):
             self._build_thumbs()
             self.outline.clear()
             self._build_outline()
+            self._renumber_bookmarks()
         else:
             for i in range(self.thumbs.count()):
                 item = self.thumbs.item(i)
@@ -758,6 +763,22 @@ class Sidebar(QWidget):
             user_root.addChild(node)
         self.bookmarks_tree.addTopLevelItem(user_root)
         self.bookmarks_tree.expandAll()
+
+    def _renumber_bookmarks(self) -> None:
+        """Move the user's marks onto the numbers their sheets wear now.
+
+        Spent once per step, keyed to the step's own map: a structure rebuild is
+        not always an edit — dragging the thumbnail size rebuilds the strip at
+        ``Scope.FULL`` — and the map the last page-tree step published is still the
+        session's answer then.  Spending it twice takes every mark a page further
+        from the sheet it was made on, and the second spend is silent.
+        """
+        move = self.session.renumbering
+        if move is None or move is self._spent_renumbering:
+            return
+        self._spent_renumbering = move
+        self.bookmark_manager.renumber(move.where)
+        self._build_bookmarks()
 
     def _on_bookmark_activated(self, item: QTreeWidgetItem, _col: int) -> None:
         """Navigate to the bookmark's page on double-click/Enter."""

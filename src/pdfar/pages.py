@@ -142,6 +142,17 @@ class DeletePages(Edit):
         """
         return None
 
+    def page_order(self, before_count: int) -> Tuple[int, ...]:
+        """The survivors, in the order they keep.
+
+        ``changed`` can only say "everything from the cut onwards" because it
+        answers *which pages to re-read*; this answers *where each page went*,
+        which is what a bookmark held outside the document needs: not how many
+        pages moved, but which number its own sheet wears now.
+        """
+        named = set(self.pages)
+        return tuple(index for index in range(before_count) if index not in named)
+
     @property
     def label(self) -> str:
         if len(self.pages) == 1:

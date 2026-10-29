@@ -1469,9 +1469,42 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       `invalidate` now announces a page count that changed, which is what carries the toolbar's
       total and the page box through a delete *and* back from it: they used to re-agree only on
       a tab switch (**F10-4f**)
-- [ ] Shift what the *user's own* state keys on a page number, which no document-level
-      undo reaches: the saved bookmarks and reading position (`QSettings`, per file), the
-      page-numbering range, and an XFDF sidecar exported before the delete
+- [ ] Shift what the *user's own* state keys on a page number, which no document-level undo
+      reaches.  Measured, that is four stores and one panel, each broken differently, so each is
+      its own step:
+      - [x] **F10-4g** — *Bookmarks follow their sheet.*  A user bookmark is a 0-based page in
+            `QSettings` under `bookmarks/<absolute path>` **and** a row in the sidebar's tree,
+            and a page-tree edit moves neither: a delete re-points the reader's own marks at
+            other sheets, permanently, and no undo reaches it.  The mechanism is a step saying
+            what it did to the numbering — `Edit.page_order(before_count)`, *new index → old
+            index*, carried on the step and published by the session for the transition that
+            just happened (forward when a step is applied or redone, back when it is undone) —
+            and the first consumer renumbers the store, saves it and rebuilds the tree.  A
+            bookmark on a page that went lands on the sheet that took its place, the rule the
+            reader's own page already follows (F10-4f).  Undo moves every bookmark back along
+            the bijection rather than restoring a snapshot, so a bookmark the reader makes
+            between a delete and its undo keeps its page instead of being overwritten.
+      - [ ] **F10-4h** — *The reading position, and the reader's page across undo.*
+            `viewState/<path>` holds `PDFView.get_state()`'s 0-based page, written on tab change
+            and on close and never by an edit; and after an *undo* the reader keeps the number
+            they had, which now names another sheet — the gap F10-4f left for the pick too.  One
+            map answers all three: the view re-aims `current_page`, the strip's pick and the
+            saved position with the sheets.
+      - [ ] **F10-4i** — *The numbering range stops echoing itself.* `startPage`/`endPage` are
+            1-based and stored **globally** (`pageNumbers/…`, no document in the key),
+            `page_range()` clamps them to the open document at use, and the stamp/erase copy
+            path saves the clamped pair straight back — so deleting the tail of a book
+            permanently narrows a range the user set.  Keep the stored range authoritative and
+            clamp only where it is used.
+      - [ ] **F10-4j** — *An XFDF sidecar exported before the delete.* The sidecar is named from
+            the PDF's path, so a later export overwrites the file that holds the pre-delete
+            numbering; an import of such a file into a shortened document skips the entries whose
+            pages are gone and lands the rest on sheets that moved.  Record the page count an
+            export was written against and say at import what disagrees.
+- [ ] The search-results dock keeps each hit's 0-based page in `UserRole` and is cleared only by
+      a new search or a tab change, while the view's own hit list *is* cleared by
+      `Scope.STRUCTURE` — so after a delete the dock still offers pages that have moved, out of
+      step with the view it came from
 - [ ] Extract, duplicate, move, reverse — the same runs against the same pick, and for a
       move the inherited-attribute push-down below
 - [ ] The **assemble** permission asked before a page-tree edit, as PdfCraft gates
@@ -1627,9 +1660,14 @@ this is also where an edit learned to say what it invalidated separately from wh
 (F10-4e). Reaching it is the strip's **Delete Page** and the window's question — the first page
 command that asks before it edits, because a delete is the first one whose undo the reader has
 to be told about rather than be able to work out — and the pick and the reader's own place are
-moved with the sheets rather than left pointing at the numbers they used to hold (F10-4f). Next
-in order: the state that is keyed to a page number outside the document at all — the reader's
-bookmarks and their place in the book.
+moved with the sheets rather than left pointing at the numbers they used to hold (F10-4f). The
+first state the reader owns *outside* the document follows its sheets too: a page-tree step says
+what it did to the numbering, carries that statement between the undo and redo stacks, and the
+session publishes it for the generation that exists now — so a bookmark moves with its page, is
+written back to the settings store, and moves home again on undo, without a snapshot that would
+overwrite a mark made since the step (F10-4g). Next in order: the reading position and the
+reader's page across an undo (F10-4h), the numbering range that saves its own clamped values
+back (F10-4i), and the XFDF sidecar exported before a delete (F10-4j).
 
 Goal:
 
@@ -5046,12 +5084,98 @@ almost nothing on top of the edit.
 
 **What is not here**: the numbers the *user* owns outside the document — saved bookmarks, the
 reading position in `QSettings`, the page-numbering range and an XFDF sidecar exported before
-the delete — none of which the document's own undo reaches, and which are the next line. Also
+the delete — none of which the document's own undo reaches, and which are the next line.  The
+bookmarks are that line's first consumer and have landed with it (**F10-4g**, below); what is
+still not here is the saved reading position and the reader's page across an *undo*, the
+numbering range, and the sidecar. Also
 not here: the **assemble** permission, which PdfCraft consults before any page-tree edit
 (`crates/engine/src/edit.rs:880-895`) and PDFAR still never asks at edit time; the pick across
 an **undo** of a delete, since the reader's page is announced by the count change but the
 selection is not rebuilt, a gap the reorder steps will share; and no page *range* input, so
 "pages 12 to 40" is still either a pick or *all*.
+
+---
+
+### F10-4g Bookmarks follow their sheet — [x] Implemented
+
+**What landed.** A page-tree step now states what it did to the page *numbers*, and the first
+thing that holds a number outside the document reads that statement.
+
+* `Edit.page_order(before_count)` (`edits.py`) answers **new index → old index**: `None` says
+  the numbering is untouched, and a `-1` in the tuple says a sheet has no past — the answer the
+  insert and move steps will need and the delete cannot produce. `DeletePages` overrides it with
+  the survivors in the order they keep (`pages.py`), which is the same question `changed` cannot
+  answer: `changed` says *which pages to re-read* and can only answer "everything from the cut
+  onwards"; this says *where each page went*.
+* `Renumbering(order, backward=False).where(page)` is one rule in both directions. Forward, a
+  sheet that stayed is its position among the survivors and a sheet that went is the count of
+  survivors under it, clamped to the last page. Backward, position `i` returns `order[i]` — the
+  number the sheet came from — and a sheet with no past keeps the number it is on. The
+  gone-sheet half *is* `shifted_index` (F10-4f) re-derived rather than duplicated, and a test
+  cross-checks the two against each other over six delete shapes, because two ways to answer
+  "where did my page go" is one too many to keep in agreement by care alone.
+* The order belongs to the **step**: `_Step.order`, `EditHistory.record(…, order)`, and both
+  `take_undo` / `take_redo` carry it into the step they park, so it travels with its step
+  between the two stacks instead of being recomputed from a document that has already moved.
+* `DocumentSession.renumbering` publishes the map for the generation that exists now, and is
+  read off the edit *before* the working copy is adopted — after the adoption the document
+  cannot be asked what its pages used to be. It is assigned on every step, so a turn after a
+  delete clears the delete's map instead of leaving it published, and `revert()` clears it with
+  the history it came from.
+* `BookmarkManager.renumber(move)` moves the marks, re-sorts by `(page, level)` and writes the
+  settings store **once** — and writes nothing when nothing moved, which is reachable: taking
+  the last page out of a book whose marks all sit on the pages that stay.
+* `Sidebar._renumber_bookmarks()` runs in the STRUCTURE branch beside the thumbnails and the
+  outline: renumber, then rebuild the rows.
+
+**Why a map and not a snapshot.** The obvious mechanism — keep the bookmark list with the step
+and write it back on undo — was rejected on a case the tests hold: a bookmark the reader makes
+*between* a delete and its undo is in no document revision, so restoring the old list destroys
+work the user did after the step. Moving each mark with its sheet keeps it on its sheet, and the
+way back is exact for every mark on a sheet that exists. It is stable rather than identity for
+one mark: a bookmark whose own page went came back on the sheet it was parked on, which is the
+honest answer and the one the reader can see.
+
+**Tests**: `tests/test_bookmark_renumbering.py`, 33 of them, over a six-page book whose sheets
+name themselves — so an assertion can ask *which sheet does this mark reach* (`reaches()`)
+rather than comparing a number against the same arithmetic that produced it. The map's shapes,
+the session's publication and clearing, the store, the tree rows, the click that follows a moved
+row, the undo, the redo, two deletes undone in sequence, a mark made between a delete and its
+undo, a reopen of the saved file, and two rebuilds that must not spend the map again (a
+comment's scope, a thumbnail-width change).
+
+**Mutations**: 24 of the new guards, **22 caught**. The two survivors are known and said here
+rather than quietly dropped: reading `page_count` after `_open_working_copy` instead of before
+is an *equivalent* mutant — the live document is not touched until `_adopt`, which is where the
+comment points — and moving `_renumber_bookmarks()` outside the STRUCTURE branch survives
+because the spent-once key stops the second rebuild before the scope is ever consulted. Both
+guards stay: the scope branch is where the move belongs, and the key is what makes it safe.
+
+**Suite**: **1169 passed, three consecutive runs** (187.5 / 198.6 / 246.0 s — the third run
+shared the machine with the measurements below, which is what the extra 40 s is). Ruff unchanged
+at the 7 pre-existing errors; mypy unchanged at **553 in 16 files** — the new lines add none.
+
+**Verified by eye**: `/tmp/f104g/visual.py` drives the real window over a ruled six-page book
+with a bookmark on every sheet, `QSettings` pointed at the scratch directory so the run cannot
+touch the developer's own store. The tree reads `ch1 (p. 1) … ch6 (p. 6)`; after *Delete Page*
+of page 2 the sheets are `PAGE 1, 3, 4, 5, 6` and the tree reads
+`ch1 (p. 1), ch2 (p. 2), ch3 (p. 2), ch4 (p. 3), ch5 (p. 4), ch6 (p. 5)` — `ch2`'s own sheet went
+and it shares page 2 with `ch3`, which is that sheet's mark. Clicking `ch4 (p. 3)` lands on
+`PAGE 4`, the sheet it was made on. A thumbnail-width rebuild afterwards leaves the store
+exactly as it was. Undo puts all six sheets back and the rows read
+`ch1 (p. 1), ch2 (p. 3), ch3 (p. 3), ch4 (p. 4), ch5 (p. 5), ch6 (p. 6)`: every mark that could
+come home did, and `ch2` stays on the sheet it was parked on (`/tmp/f104g/{before,after,resize,undo}.png`).
+
+**Performance**: on the 540-page book, best of three, the new work in isolation and inside the
+command. Renumber plus tree rebuild: **0.1 ms** with no bookmarks, **6.5 ms** with 200,
+**28.6 ms** with 1 000 — against a delete-and-undo round trip of **2.0–2.3 s**, which did not
+move measurably (2 174 / 2 251 / 2 042 ms at the three mark counts). A move that changes nothing
+costs **4.3 ms** at 1 000 marks and writes no settings file.
+
+**What is not here**: the reading position in `viewState/<path>` and the reader's page across an
+undo (**F10-4h**), which is the same map's second consumer; the numbering range that echoes
+clamped values back (**F10-4i**); the XFDF sidecar (**F10-4j**); and the search dock's stale hit
+pages. Inserting a page is also where `-1` first gets used — a delete cannot produce it.
 
 ---
 

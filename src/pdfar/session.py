@@ -39,7 +39,9 @@ try:
 except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 
-from .edits import Edit, EditError, EditHistory, Scope, Snapshot
+from .edits import (
+    Edit, EditError, EditHistory, Renumbering, Scope, Snapshot,
+)
 from .revisions import RevisionStore, RevisionStoreError
 from .save import Encryption, SaveError
 
@@ -83,6 +85,14 @@ class DocumentSession:
         #: long as it is keeping up: fall behind by two steps and this describes
         #: only the newer one.
         self.changed_pages: Optional[Tuple[int, ...]] = None
+        #: What the step that produced this generation did to the page *numbers*,
+        #: or ``None`` when it moved none.  Same lifetime contract as
+        #: :attr:`changed_pages`, and the same reason for existing: the undo stack
+        #: reaches the document, and a bookmark or a saved reading position is not
+        #: in it.  Whatever holds a page number outside the document reads this to
+        #: find out which number its sheet wears now — and which it wore on the
+        #: way back, when the step is undone.
+        self.renumbering: Optional[Renumbering] = None
         self.history = EditHistory(on_release=self._release_revision)
         self.encryption = Encryption.capture(doc, self.password, authenticated)
         self._disk_stamp = _disk_stamp(path)
@@ -150,6 +160,10 @@ class DocumentSession:
         """
         self._require_owner()
         before = self._before_snapshot()
+        # Read while the document still holds the count from before the edit: an
+        # order tuple is a statement about the old numbering, and after the
+        # adoption there is no way to ask what the pages used to be.
+        order = edit.page_order(self.doc.page_count)
         clone, staged = self._open_working_copy(before)
         try:
             edit.apply(clone)
@@ -164,7 +178,11 @@ class DocumentSession:
         if staged:
             self._revision = staged
         self.changed_pages = edit.changed
-        self.history.record(edit, before)
+        # Assigned on every step, including the ones that say nothing: a turn after
+        # a delete must not leave the delete's map published for the next rebuild
+        # to spend on the bookmarks again.
+        self.renumbering = Renumbering(order) if order is not None else None
+        self.history.record(edit, before, order)
         return self.version, edit.scope
 
     def undo(self) -> Tuple[int, Scope]:
@@ -190,6 +208,11 @@ class DocumentSession:
         if target.before.path:
             self._revision = target.before.path
         self.changed_pages = target.changed
+        # The same step run backwards is the same order read the other way: the
+        # sheet at position ``i`` goes back to the number it came from.
+        self.renumbering = (Renumbering(target.order,
+                                        backward=(direction == "undo"))
+                            if target.order is not None else None)
         if direction == "undo":
             history.take_undo(leaving)
         else:
@@ -327,6 +350,9 @@ class DocumentSession:
             raise SaveError(f"“{name}” needs its password to be reopened.")
         self._adopt(reopened)
         self.changed_pages = None       # a whole document came in; nothing is known
+        # The history went with the edits, and so did any move they described:
+        # the marks the reader kept are where the file on disk says they are.
+        self.renumbering = None
         self.history.clear()
         self._close_revisions()
         self.mark_saved()

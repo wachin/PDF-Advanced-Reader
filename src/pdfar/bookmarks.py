@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
@@ -165,3 +165,29 @@ class BookmarkManager:
             self._save_user_bookmarks()
             return True
         return False
+
+    def renumber(self, move: Callable[[int], int]) -> None:
+        """Put every bookmark on the number its sheet carries now.
+
+        ``move`` is :meth:`pdfar.edits.Renumbering.where` for the step that just
+        ran, in whichever direction it went.  A bookmark is a page number held
+        outside the document: the undo stack reaches the page and not the mark, and
+        a mark the reader made since the step is in no revision to restore, so the
+        mark is *moved along* — and moved back when the step is undone.
+
+        Nothing writes when nothing moved.  Taking the last page out of a book
+        whose marks all sit on the pages that stay is exactly such a step, and the
+        settings file would be rewritten for an edit that changed no bookmark's
+        page.
+        """
+        touched = False
+        for mark in self._user_bookmarks:
+            where = move(mark.page)
+            if where != mark.page:
+                mark.page = where
+                touched = True
+        if touched:
+            # ``add_user_bookmark`` builds the list in page order and the tree
+            # shows it that way; a move that shifted only some marks would not.
+            self._user_bookmarks.sort(key=lambda mark: (mark.page, mark.level))
+            self._save_user_bookmarks()

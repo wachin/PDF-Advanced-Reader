@@ -55,6 +55,53 @@ class EditError(Exception):
     """An edit that could not be carried out.  The document is left untouched."""
 
 
+@dataclass(frozen=True)
+class Renumbering:
+    """What one step did to the page *numbers*, in the direction it went.
+
+    ``order[i]`` is the page number the sheet now at position ``i`` held before
+    the step, so ``len(order)`` is the page count after it and ``-1`` marks a sheet
+    with no past — a page an edit invented rather than moved.
+
+    :meth:`where` answers the question a bookmark, a saved reading position or a
+    numbering range has to ask when the page tree moves: the number is held outside
+    the document, so after the step it names another sheet.  None of it can be
+    restored from a snapshot, because the reader may have changed it since the step
+    went in — so the step carries a map instead, and both directions of the map are
+    exact for anything that points at a sheet which exists.
+    """
+
+    #: Where each page came from; see above.
+    order: Tuple[int, ...]
+    #: True when this is the *undoing* of the step, so numbers run back.
+    backward: bool = False
+
+    def where(self, page: int) -> int:
+        """The number the sheet on *page* wears once the step is taken.
+
+        With ``backward`` the step is being undone, so the question runs the other
+        way: the sheet now at *page* goes home to the number it came from.
+
+        A number whose own sheet went in the step does not point at nothing: it
+        lands on the first sheet to arrive at it, which is where the reader's page
+        carried on when a delete took the one they were on (F10-4f).
+        """
+        if self.backward:
+            if not 0 <= page < len(self.order):
+                return page
+            home = self.order[page]
+            return page if home < 0 else home
+        try:
+            return self.order.index(page)
+        except ValueError:
+            # The sheet went.  Carried on where the reading is: the number the
+            # survivors under it count up to, clamped to the last page when none
+            # of them came from below -- which is what ``shifted_index`` answers
+            # for the same delete, page minus the pages taken out below it.
+            arrived = sum(1 for old in self.order if old < page)
+            return max(0, min(arrived, len(self.order) - 1))
+
+
 class Edit(ABC):
     """One user intent, applied to a document clone."""
 
@@ -82,6 +129,19 @@ class Edit(ABC):
         cut onwards" — and keeps :attr:`pages` for the label and the caller.
         """
         return self.pages
+
+    def page_order(self, before_count: int) -> Optional[Tuple[int, ...]]:
+        """Where each page of the document that comes out came from, or ``None``.
+
+        ``None`` says the edit leaves the numbering alone — the answer for a turn,
+        which rewrites a page's ``/Rotate`` and moves no sheet, and for every edit
+        that is not about the page tree at all.  It is not an optimisation: a step
+        that says nothing is what tells the marks and the reading position held
+        outside the document to stay where they are.  An edit that renumbers
+        overrides it with the :class:`Renumbering` order, whose length is the page
+        count *after*.
+        """
+        return None
 
     @property
     @abstractmethod
@@ -169,6 +229,10 @@ class _Step:
     scope: Scope
     before: Snapshot
     changed: Optional[Tuple[int, ...]] = None
+    #: What the edit did to the page numbers, or ``None`` when it moved none.
+    #: It belongs to the step rather than to the session, so it travels with the
+    #: step between the undo and the redo stacks.
+    order: Optional[Tuple[int, ...]] = None
 
     @property
     def size(self) -> int:
@@ -197,9 +261,16 @@ class EditHistory:
         self._bytes = 0
 
     # ------------------------------------------------------------- recording
-    def record(self, edit: Edit, before: Union[Snapshot, bytes, str]) -> None:
-        """Store the pre-edit state for ``edit`` and clear the redo branch."""
-        step = _Step(edit.label, edit.scope, _as_snapshot(before), edit.changed)
+    def record(self, edit: Edit, before: Union[Snapshot, bytes, str],
+               order: Optional[Tuple[int, ...]] = None) -> None:
+        """Store the pre-edit state for ``edit`` and clear the redo branch.
+
+        ``order`` is what the edit did to the page numbers — the session reads it
+        off the edit while it still holds the count from *before*, because after
+        the adoption the document cannot be asked what it used to be.
+        """
+        step = _Step(edit.label, edit.scope, _as_snapshot(before), edit.changed,
+                     order)
         self._undo.append(step)
         self._bytes += step.size
         self._bytes -= sum(s.size for s in self._redo)
@@ -264,7 +335,8 @@ class EditHistory:
             raise EditError("Nothing to undo")
         step = self._undo.pop()
         self._bytes -= step.size
-        parked = _Step(step.label, step.scope, _as_snapshot(current), step.changed)
+        parked = _Step(step.label, step.scope, _as_snapshot(current), step.changed,
+                       step.order)
         self._redo.append(parked)
         self._bytes += parked.size
         self._trim_redo()
@@ -276,7 +348,8 @@ class EditHistory:
             raise EditError("Nothing to redo")
         step = self._redo.pop()
         self._bytes -= step.size
-        parked = _Step(step.label, step.scope, _as_snapshot(current), step.changed)
+        parked = _Step(step.label, step.scope, _as_snapshot(current), step.changed,
+                       step.order)
         self._undo.append(parked)
         self._bytes += parked.size
         self._trim()
