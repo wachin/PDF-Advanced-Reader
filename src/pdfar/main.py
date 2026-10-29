@@ -46,7 +46,7 @@ from .page_numbers import (
     EraseSettings, PageNumbersPanel, PageNumberSettings, erase_copy,
     erased_copy_path, numbered_copy_path, stamp_copy,
 )
-from .pages import RotatePages
+from .pages import DeletePages, RotatePages, contiguous_runs, shifted_index
 from .save import ProtectionError, SaveError, SaveReport, save_document
 from .search import (
     SearchParams, SearchWorker, compile_regex, highlight_spans, normalize_space,
@@ -713,6 +713,13 @@ class MainWindow(QMainWindow):
             "Turn the page on screen right, into the document (Ctrl+Shift+Right)")
         self.act_page_rotr.triggered.connect(self._page_rot_right)
 
+        self.act_page_delete = QAction("Delete Page", self)
+        self.act_page_delete.setShortcut("Ctrl+Shift+Backspace")
+        self.act_page_delete.setToolTip(
+            "Take the page you are reading out of the document, after asking "
+            "(Ctrl+Shift+Backspace)")
+        self.act_page_delete.triggered.connect(self._page_delete)
+
         self.act_add_bookmark = QAction("Add Bookmark", self)
         self.act_add_bookmark.setShortcut("Ctrl+B")
         self.act_add_bookmark.setToolTip("Add bookmark at current page (Ctrl+B)")
@@ -840,6 +847,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.act_rotate_right)
         tools_menu.addAction(self.act_page_rotl)
         tools_menu.addAction(self.act_page_rotr)
+        tools_menu.addAction(self.act_page_delete)
         tools_menu.addAction(self.act_save_annotations)
         tools_menu.addSeparator()
         tools_menu.addAction(self.act_settings)
@@ -1307,6 +1315,65 @@ class MainWindow(QMainWindow):
         """
         if self.view:
             self.view.apply_edit(RotatePages(pages=tuple(pages), delta=degrees))
+
+    def _page_delete(self) -> None:
+        """The Tools route: take out the page the reader is on, and no other."""
+        if self.view:
+            self._delete_pages((self.view.current_page,))
+
+    def _delete_pages(self, pages: Tuple[int, ...]) -> None:
+        """Take the named sheets out of the file — asking first.
+
+        The only page command that needs a question: a turn is undone by asking for
+        the other way round, while a delete leaves every number above the gap naming
+        the sheet below it.  So the asking is half the work.  The other half is that
+        a page-tree change rebuilds the strip, which drops the pick the delete was
+        made from and leaves ``current_page`` clamped but unannounced — so the
+        reader's place and the pick are re-aimed at the sheets that took the numbers.
+        """
+        view = self.view
+        if view is None:
+            return
+        pages = tuple(sorted(set(pages)))
+        if not pages:
+            return
+        count = view.session.doc.page_count
+        edit = DeletePages(pages=pages)
+        if QMessageBox.question(
+                self, edit.label,
+                f"Delete {self._page_words(pages)}?\n"
+                f"Every page above the gap takes the number of the one below it.\n"
+                f"Undo brings {'them' if len(pages) != 1 else 'it'} back.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        picked = self.sidebar.selected_pages() if self.sidebar is not None else ()
+        reading = view.current_page
+        if not view.apply_edit(edit):
+            # Refused: nothing was cut, so the strip was never rebuilt and the reader
+            # is still on the sheet they were on, with the pick they still hold.
+            return
+        landing = shifted_index(reading, pages, count)
+        if landing != view.current_page:
+            # Scrolling is a relayout of the whole book, and ``invalidate`` has just
+            # announced the page it settled on.  Ask for another one only where the
+            # shift and that clamp disagree, which is every delete but the ones the
+            # reader made below themselves or at the very end of the document.
+            view.goto_page(landing)
+        if self.sidebar is not None:
+            gone = set(pages)
+            self.sidebar.select_pages(
+                shifted_index(page, pages, count)
+                for page in picked if page not in gone)
+
+    @staticmethod
+    def _page_words(pages: Tuple[int, ...]) -> str:
+        """The pages a reader picked, said the way a reader counts them: page 2–4, 7."""
+        parts = [f"{start + 1}" if start == end else f"{start + 1}–{end + 1}"
+                 for start, end in contiguous_runs(pages)]
+        head = "page" if len(pages) == 1 else "pages"
+        return f"{head} {', '.join(parts)}"
 
     def _hit_prev(self) -> None:
         self._step_hit(-1)
@@ -2481,6 +2548,7 @@ class MainWindow(QMainWindow):
         # The strip picks the pages, the view turns them: connected per tab because
         # the handler answers for whichever document is on screen.
         tab.sidebar.page_rotation_requested.connect(self._rotate_pages)
+        tab.sidebar.page_deletion_requested.connect(self._delete_pages)
         # Connect annotation manager to sidebar
         tab.sidebar.set_annotation_manager(tab.view.annotation_manager)
         self._connected_tab = tab
@@ -2505,6 +2573,7 @@ class MainWindow(QMainWindow):
             tab.sidebar.thumbnail_size_changed.disconnect(self._on_thumbnail_size_changed)
             tab.sidebar.save_requested.disconnect(self._save_annotations)
             tab.sidebar.page_rotation_requested.disconnect(self._rotate_pages)
+            tab.sidebar.page_deletion_requested.disconnect(self._delete_pages)
         except TypeError:
             pass
         tab.view.clear_numbering_preview()
@@ -2811,9 +2880,16 @@ class MainWindow(QMainWindow):
             self.page_spin.setValue(page + 1)
 
     def _on_page_changed(self, page: int) -> None:
+        # The count moves under the reader when a page-tree edit takes pages out, and
+        # this is the one signal every route to a new page passes through.  Setting
+        # the ceiling before the value matters: on the way back from a delete the
+        # document is wider than the box still believes, and the value would clamp.
+        count = max(1, self.view.page_count) if self.view is not None else 1
         self.page_spin.blockSignals(True)
+        self.page_spin.setMaximum(count)
         self.page_spin.setValue(page + 1)
         self.page_spin.blockSignals(False)
+        self.page_label.setText(f"/ {count}")
         if self.sidebar is not None:
             self.sidebar.set_current_page(page)
         self._update_status()
@@ -3159,6 +3235,9 @@ class MainWindow(QMainWindow):
         # and reflow notwithstanding — it changes the tree the reading is taken from.
         self.act_page_rotl.setEnabled(has_doc)
         self.act_page_rotr.setEnabled(has_doc)
+        # So does taking a page out.  Whether the document can be emptied is the
+        # edit's to refuse; a greyed item would have to answer for a pick it cannot see.
+        self.act_page_delete.setEnabled(has_doc)
         for action in self._shape_actions.values():
             action.setEnabled(selection_ok)
         for action in self._stamp_actions.values():

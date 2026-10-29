@@ -40,6 +40,22 @@ def contiguous_runs(pages: Iterable[int]) -> Tuple[Tuple[int, int], ...]:
     return tuple((start, end) for start, end in runs)
 
 
+def shifted_index(page: int, deleted: Iterable[int], count: int) -> int:
+    """Where the sheet numbered *page* sits once *deleted* leave a *count*-page book.
+
+    A delete does not only take pages out: every page above the cut takes the number
+    of the one below it, so any page number a reader, the strip's pick or a bookmark
+    was holding means another sheet afterwards.  That is what this answers.
+
+    A page that went itself is answered with the sheet that took its place, which is
+    where the reading carries on from; the clamp at the end is for the last page of
+    the document going, when nothing arrives to fill its number.
+    """
+    gone = set(deleted)
+    below = sum(1 for index in gone if index < page)
+    return max(0, min(page - below, count - len(gone) - 1))
+
+
 @dataclass(frozen=True)
 class RotatePages(Edit):
     """Turn the named pages by *delta* degrees, into the file.
@@ -136,18 +152,19 @@ class DeletePages(Edit):
         if not self.pages:
             raise EditError("No page was chosen to delete")
         count = doc.page_count
+        word = "page" if count == 1 else "pages"
         # Checked whole before anything is removed, so a list that names a page this
         # document does not have takes nothing out on the way out.
         for index in self.pages:
             if not 0 <= index < count:
                 raise EditError(
                     f"Page {index + 1} is not in this document, which has "
-                    f"{count} pages")
+                    f"{count} {word}")
         named = set(self.pages)
         if len(named) >= count:
             raise EditError(
-                f"This document has {count} pages and all of them are being "
-                f"deleted; a page is needed to save it")
+                f"This document is {count} {word} and all of it is being deleted; "
+                f"a page is needed to save it")
         # Highest run first: a delete shifts the numbers above it, so working up
         # from the front would spend the list on the wrong pages.
         for start, end in sorted(contiguous_runs(named), reverse=True):

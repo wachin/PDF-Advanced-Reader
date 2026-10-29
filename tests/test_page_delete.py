@@ -25,6 +25,16 @@ Four measured facts carry the design.
   Pruning those rows can then leave a tree MuPDF refuses to write at all — a first
   entry deeper than level 1, or a step of two levels where the row between them went.
   Links, by contrast, MuPDF removes on its own.
+
+Reaching it from the window rests on two more:
+
+* ``invalidate`` clamps ``current_page`` when the page count falls but does **not**
+  emit ``page_changed``, so after a delete the number box, the strip's highlight and
+  the reader's own idea of where they are sitting can all disagree with the sheet on
+  screen.  Where the reader ends up has to be asked for.
+* The STRUCTURE branch of ``invalidate_thumbnails`` rebuilds the strip from scratch,
+  and a rebuild drops the selection: the pick a delete was made *from* is gone by the
+  time the delete is done with it.
 """
 
 from __future__ import annotations
@@ -36,10 +46,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pymupdf as fitz
 import pytest
 from conftest import build_sample_pdf, make_session
+from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtGui import QContextMenuEvent
+from PyQt6.QtWidgets import QApplication, QMenu, QMessageBox
 
 from pdfar.annotations import AnnotationManager
 from pdfar.edits import EditError, Scope
-from pdfar.pages import DeletePages, contiguous_runs
+from pdfar.pages import DeletePages, contiguous_runs, shifted_index
 from pdfar.save import save_document
 
 #: A box on the sample page that no fixture text touches.
@@ -459,3 +472,377 @@ def test_the_document_on_disk_is_the_one_with_the_pages_out(book):
     with fitz.open(saved) as back:
         assert identities(back) == names
         assert back.page_count == PAGES - 2
+
+
+# --------------------------------------------------------------- reaching it by hand
+@pytest.mark.parametrize("page, deleted, expected", [
+    (3, (1,), 2),        # a survivor takes the number of the sheet below the cut
+    (0, (1,), 0),        # nothing was removed under it, so its number holds
+    (1, (1,), 1),        # the sheet that took a deleted page's place lands there
+    (0, (0,), 0),        # the first sheet gone: old page 2 is what the reader sees
+    (4, (4,), 3),        # with the last page gone, the new last is where they go
+    (4, (1, 2, 3), 1),   # a deep cut near the end cannot point past the last sheet
+    (3, (1, 2, 3), 1),   # three gone from under it leaves old page 4 at index 1
+    (2, (1, 1), 1),      # a page named twice still takes only one sheet out
+])
+def test_the_number_a_reader_was_on_moves_the_way_the_sheets_do(page, deleted,
+                                                                expected):
+    assert shifted_index(page, deleted, PAGES) == expected
+
+
+def test_a_number_is_still_answered_when_the_whole_document_went():
+    """The refusal is the edit's job; asking where a page went never raises."""
+    assert shifted_index(0, (0,), 1) == 0
+
+
+# ------------------------------------------------------------------- the window's half
+class _Answers:
+    """What the window asked, and what the test said back."""
+
+    def __init__(self):
+        self.asked: list = []
+        self.reply = QMessageBox.StandardButton.Yes
+
+
+@pytest.fixture(autouse=True)
+def answers(monkeypatch):
+    """Stand in for every box this feature raises: a modal would block the run.
+
+    The delete is the first page command that asks, so a test has to answer it to
+    reach it at all, and the ones that care about the asking get the text recorded.
+    Anything offering to *save* is answered "don't": closing the window at teardown
+    finds a document the test made dirty, and a Yes there would write a fixture to
+    disk and raise a second box on top of the first.
+    """
+    box = _Answers()
+
+    def fake_question(_parent, title, text, buttons, *rest):
+        box.asked.append((title, text))
+        if buttons & QMessageBox.StandardButton.Save:
+            return QMessageBox.StandardButton.Discard
+        return box.reply
+
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(fake_question))
+    for name in ("warning", "critical", "information"):
+        monkeypatch.setattr(
+            QMessageBox, name,
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.Ok))
+    return box
+
+
+@pytest.fixture
+def opener(qapp):
+    """A window per document, opened on request and closed at the end."""
+    from pdfar.main import MainWindow
+
+    made: list = []
+
+    def open_on(path):
+        win = MainWindow()
+        win.show()
+        qapp.processEvents()
+        win.open_document(path)
+        qapp.processEvents()
+        made.append(win)
+        return win
+
+    yield open_on
+    for win in made:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+    qapp.processEvents()
+
+
+@pytest.fixture
+def window(qapp, opener, book):
+    """The real main window on the five-page book."""
+    return opener(book)
+
+
+@pytest.fixture
+def menus(monkeypatch):
+    """Catch the menu a context handler would put on the screen: ``exec`` blocks."""
+    from PyQt6.QtWidgets import QMenu
+
+    shown: list = []
+
+    def record(self, *args):
+        shown.append(self)
+        return None
+
+    monkeypatch.setattr(QMenu, "exec", record)
+    return shown
+
+
+def _centre(lst, index):
+    """The point a reader's cursor sits on to touch thumbnail *index*."""
+    rect = lst.visualItemRect(lst.item(index))
+    return QPoint(rect.center().x(), rect.center().y())
+
+
+def _pick(lst, *indices):
+    """The pick a reader ends up with after clicking those pages."""
+    lst.clearSelection()
+    for index in indices:
+        lst.item(index).setSelected(True)
+
+
+def _selected(lst):
+    return tuple(row.data(Qt.ItemDataRole.UserRole)
+                 for row in lst.selectedItems())
+
+
+def _ask_for_menu(bar, pos, app):
+    """Ask for the context menu the way the window system does.
+
+    The offscreen platform turns a right click into a selection change but never
+    into a ``QContextMenuEvent``, so the event is handed to the strip's viewport.
+    """
+    QApplication.sendEvent(bar.thumbs.viewport(),
+                           QContextMenuEvent(QContextMenuEvent.Reason.Mouse, pos))
+    app.processEvents()
+
+
+def _labels(menu):
+    return [action.text() for action in menu.actions() if not action.isSeparator()]
+
+
+def _act(menu, label):
+    for action in menu.actions():
+        if action.text() == label:
+            return action
+    raise AssertionError(f"{label!r} is not in {_labels(menu)}")
+
+
+def _sheets(win):
+    """Which original page is under each number right now."""
+    doc = win.view.session.doc
+    return identities(doc)
+
+
+# ------------------------------------------------------------------ the menu, and asking
+def test_the_strip_offers_to_delete_exactly_what_was_picked(qapp, window, menus,
+                                                           answers):
+    win = window
+    _pick(win.sidebar.thumbs, 1, 2, 3)
+    _ask_for_menu(win.sidebar, _centre(win.sidebar.thumbs, 3), qapp)
+    assert _labels(menus[-1])[-1] == "Delete 3 Pages"
+
+    _act(menus[-1], "Delete 3 Pages").trigger()
+    qapp.processEvents()
+    assert win.view.session.doc.page_count == PAGES - 3
+    assert answers.asked, "a delete that destroys pages asks before it takes any"
+
+
+def test_one_page_is_named_as_one_page(qapp, window, menus, answers):
+    win = window
+    _pick(win.sidebar.thumbs, 2)
+    _ask_for_menu(win.sidebar, _centre(win.sidebar.thumbs, 2), qapp)
+    _act(menus[-1], "Delete Page").trigger()
+    qapp.processEvents()
+    assert _sheets(win) == ["Hello PDFAR world", "Page 2 content",
+                            "Page 4 content", "Page 5 content"]
+
+
+def test_the_confirmation_names_the_pages_that_are_going(window, answers):
+    window._delete_pages((1, 2, 3))
+    title, text = answers.asked[0]
+    assert title == "Delete 3 Pages", "the box is worded as the menu item was"
+    assert "2–4" in text, "the sheets the reader picked, in the numbers they wore"
+    assert "Undo" in text, "and the way back, since a box this blunt should say so"
+
+
+def test_answering_no_takes_nothing_out_and_asks_for_nothing(window, answers, qapp):
+    """The refusal has to be the end of it: no edit, no undo step, no dirty file."""
+    win = window
+    answers.reply = QMessageBox.StandardButton.No
+    before = _sheets(win)
+
+    win._delete_pages((0, 1))
+    qapp.processEvents()
+    assert win.view.session.doc.page_count == PAGES
+    assert _sheets(win) == before
+    assert win.view.session.dirty is False
+    assert win.act_undo.isEnabled() is False
+
+
+def test_a_delete_is_one_undo_step_and_redo_takes_it_again(window, answers, qapp):
+    win = window
+    win._delete_pages((1, 2))
+    qapp.processEvents()
+    assert win.view.session.doc.page_count == PAGES - 2
+    win._undo_edit()
+    qapp.processEvents()
+    assert win.view.session.doc.page_count == PAGES
+    assert _sheets(win) == ["Hello PDFAR world", "Page 2 content", "Page 3 content",
+                            "Page 4 content", "Page 5 content"]
+    win._redo_edit()
+    qapp.processEvents()
+    assert win.view.session.doc.page_count == PAGES - 2
+
+
+# ------------------------------------------------------------------------ where one lands
+def test_the_reader_lands_on_the_sheet_that_took_the_deleted_page_s_place(
+        window, answers, qapp):
+    """Reading page 3 and deleting it should go on reading *there*, at page 3."""
+    win = window
+    win.view.goto_page(2)
+    qapp.processEvents()
+    assert _sheets(win)[2] == "Page 3 content"
+
+    win._delete_pages((2,))
+    qapp.processEvents()
+    assert win.view.current_page == 2
+    assert _sheets(win)[win.view.current_page] == "Page 4 content"
+    assert win.page_spin.value() == 3, "the number box moved with the reader"
+    assert win.sidebar.thumbs.currentItem() is win.sidebar.thumbs.item(2)
+
+
+def test_a_sheet_deleted_elsewhere_leaves_the_reader_on_the_same_sheet(
+        window, answers, qapp):
+    """Not the last sheet and not the page that went, where only one answer is right.
+
+    A delete that would leave the reader past the end is fixed by ``goto_page``'s own
+    clamp, so the last page of a book is a weak witness for the shift.  This reads
+    page 4 of five while page 1 goes out: keeping the number puts page 5 on screen,
+    moving it with the sheets gives the page the reader was on.
+    """
+    win = window
+    win.view.goto_page(3)
+    qapp.processEvents()
+    reading = _sheets(win)[3]
+
+    win._delete_pages((0,))
+    qapp.processEvents()
+    assert win.view.current_page == 2
+    assert _sheets(win)[2] == reading
+    assert win.page_spin.value() == 3
+
+
+def test_a_request_that_empties_the_document_leaves_the_reader_where_they_were(
+        qapp, opener, tmp_path, answers):
+    """A one-page file cannot lose its only page; refusing must not disturb the view.
+
+    The pick matters here as much as the page: the edit says no inside
+    ``apply_edit``, so the strip was never rebuilt and the reader is still looking
+    at what they picked.
+    """
+    path = build_sample_pdf(tmp_path / "single.pdf", pages=1)
+    win = opener(path)
+    _pick(win.sidebar.thumbs, 0)
+    reading = win.view.current_page
+
+    win._delete_pages((0,))
+    qapp.processEvents()
+    assert win.view.session.doc.page_count == 1
+    assert win.view.current_page == reading
+    assert _selected(win.sidebar.thumbs) == (0,)
+    assert "a page is needed to save it" in win.statusBar().currentMessage()
+
+
+def test_the_page_total_the_toolbar_shows_follows_the_document(window, answers, qapp):
+    """The box counts the document that is open, not the one that was opened.
+
+    Undo is the half that matters: nothing navigates the reader back, so the count
+    would otherwise stay at the shrunken number and page five would be untypeable.
+    """
+    win = window
+    assert (win.page_spin.maximum(), win.page_label.text()) == (PAGES, f"/ {PAGES}")
+
+    win._delete_pages((0, 1))
+    qapp.processEvents()
+    assert (win.page_spin.maximum(), win.page_label.text()) == (
+        PAGES - 2, f"/ {PAGES - 2}")
+
+    win._undo_edit()
+    qapp.processEvents()
+    assert (win.page_spin.maximum(), win.page_label.text()) == (PAGES, f"/ {PAGES}")
+    assert win.page_spin.value() == win.view.current_page + 1
+
+
+# ------------------------------------------------------------------------- the pick lives
+def test_the_pick_survives_the_rebuild_it_causes(window, answers, qapp):
+    """A rotation could afford to lose the pick; a delete removes its own thumbnails.
+
+    Rebuilding the strip is what a page-tree change does, and with it the selection
+    goes — so a reader who picked four pages of the scan to work through has to be
+    put back on the sheets they meant, not on the same rows.
+    """
+    win = window
+    _pick(win.sidebar.thumbs, 1, 2, 3, 4)
+    wanted = _sheets(win)[1:5]
+
+    win._delete_pages((0,))
+    qapp.processEvents()
+    assert win.sidebar.thumbs.count() == PAGES - 1
+    assert _selected(win.sidebar.thumbs) == (0, 1, 2, 3)
+    assert [_sheets(win)[row] for row in _selected(win.sidebar.thumbs)] == wanted
+
+
+def test_a_pick_loses_the_sheet_that_went_and_keeps_the_rest(window, answers, qapp):
+    win = window
+    _pick(win.sidebar.thumbs, 1, 2, 3)
+    wanted = {_sheets(win)[1], _sheets(win)[3]}
+
+    win._delete_pages((2,))
+    qapp.processEvents()
+    assert _selected(win.sidebar.thumbs) == (1, 2)
+    assert {_sheets(win)[row] for row in _selected(win.sidebar.thumbs)} == wanted
+
+
+def test_a_pick_that_was_all_deleted_is_no_pick_at_all(window, answers, qapp):
+    win = window
+    _pick(win.sidebar.thumbs, 1, 2)
+
+    win._delete_pages((1, 2))
+    qapp.processEvents()
+    assert _selected(win.sidebar.thumbs) == ()
+
+
+# --------------------------------------------------------------------- the menu's own path
+def test_the_tools_command_deletes_the_page_under_the_reader(window, answers, qapp):
+    win = window
+    win.view.goto_page(1)
+    qapp.processEvents()
+    win.sidebar.thumbs.clearSelection()
+    qapp.processEvents()
+
+    win.act_page_delete.trigger()
+    qapp.processEvents()
+    assert _sheets(win) == ["Hello PDFAR world", "Page 3 content",
+                            "Page 4 content", "Page 5 content"]
+    assert win.view.current_page == 1
+
+
+def test_the_tools_command_sits_beside_the_page_turn(window):
+    """Menu placement is documentation: the two page-tree commands a reader can reach."""
+    menus = {menu.title(): menu for menu in window.menuBar().findChildren(QMenu)}
+    tools = menus["&Tools"].actions()
+    order = [action for action in tools
+             if action in (window.act_page_rotl, window.act_page_rotr,
+                            window.act_page_delete)]
+    assert order == [window.act_page_rotl, window.act_page_rotr,
+                     window.act_page_delete], \
+        "an action that is in no menu is a command nobody can reach"
+    assert window.act_page_delete.shortcut().toString() == "Ctrl+Shift+Backspace"
+
+
+def test_the_page_commands_need_a_document(qapp, tmp_path):
+    from pdfar.main import MainWindow
+
+    path = build_sample_pdf(tmp_path / "doc.pdf", pages=1)
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        assert win.act_page_delete.isEnabled() is False
+        win.open_document(path)
+        qapp.processEvents()
+        assert win.act_page_delete.isEnabled() is True
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+

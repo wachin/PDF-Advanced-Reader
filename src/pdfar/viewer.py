@@ -432,6 +432,7 @@ class PDFView(QAbstractScrollArea):
             # accepted as current the moment they land.
             version = self.session.content_changed()
         self._invalidated_version = version
+        counted = self.page_count
         # The document is the annotation store, so a document we have never read
         # is an annotation list we have never read: re-derive it (F10-3).
         self.annotation_manager.reload_from_document()
@@ -454,6 +455,13 @@ class PDFView(QAbstractScrollArea):
                 self._enter_reflow()
             self._request_visible()
         self.content_changed.emit(version, int(scope))
+        if self.page_count != counted:
+            # A document of a different length is a different place to be reading:
+            # the number the reader was on may name another sheet now, and every
+            # control that shows a total has to be told rather than find out on the
+            # next scroll.  After ``content_changed``, so the strip that is rebuilt
+            # for the new page tree is the one the current row is marked in.
+            self.page_changed.emit(self.current_page)
         self.viewport().update()
         return version
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
@@ -241,6 +241,9 @@ class Sidebar(QWidget):
     # Pages to turn, and by how much.  The strip knows which sheets were picked; the
     # window turns them through the view, which owns the undo step and the re-render.
     page_rotation_requested = pyqtSignal(object, int)
+    # The sheets to take out of the file.  Asking whether the reader means it is the
+    # window's job: a turn is undone by turning back, a delete only by knowing to look.
+    page_deletion_requested = pyqtSignal(object)
     # The window owns saving: it is the one place that can explain a refusal, and
     # a second opinion from here would only be able to say "failed".
     save_requested = pyqtSignal()
@@ -649,7 +652,28 @@ class Sidebar(QWidget):
         if isinstance(page, int):
             self.goto_page_requested.emit(page)
 
-    # --------------------------------------------- page rotation, from the strip
+    # ------------------------------------------ page commands, from the strip
+    def selected_pages(self) -> Tuple[int, ...]:
+        """The pages the reader has picked, in page order."""
+        picked = [item.data(Qt.ItemDataRole.UserRole)
+                  for item in self.thumbs.selectedItems()]
+        return tuple(sorted({index for index in picked if isinstance(index, int)}))
+
+    def select_pages(self, pages: Iterable[int]) -> None:
+        """Put the pick back on the sheets carrying these page numbers.
+
+        A page-tree edit rebuilds the strip from scratch, and a rebuild drops the
+        selection, so the pick a delete was made *from* is gone by the time the
+        delete is done with it.  Rows are handed out in document order, which makes
+        a page number and a row number the same thing.
+        """
+        self.thumbs.clearSelection()
+        for page in pages:
+            if 0 <= page < self.thumbs.count():
+                item = self.thumbs.item(page)
+                if item is not None:
+                    item.setSelected(True)
+
     def _picked_pages(self, pos: QPoint) -> Tuple[int, ...]:
         """Every page the request at *pos* points at, in page order.
 
@@ -657,11 +681,9 @@ class Sidebar(QWidget):
         means all of them.  With no pick it is the page the request arrived on, and
         blank space below the last thumbnail names nothing at all.
         """
-        picked = [item.data(Qt.ItemDataRole.UserRole)
-                  for item in self.thumbs.selectedItems()]
-        pages = {index for index in picked if isinstance(index, int)}
+        pages = self.selected_pages()
         if pages:
-            return tuple(sorted(pages))
+            return pages
         item = self.thumbs.itemAt(pos)
         if item is None:
             return ()
@@ -693,6 +715,14 @@ class Sidebar(QWidget):
         if not pages:
             return
         menu = self._page_rotation_menu(pages)
+        # Last, behind a separator of its own: the destructive one of the two, and
+        # the only one a reader cannot undo by asking for the opposite.
+        menu.addSeparator()
+        name = "Delete Page" if len(pages) == 1 else f"Delete {len(pages)} Pages"
+        action = menu.addAction(name)
+        action.triggered.connect(
+            lambda _checked=False, pages=pages:
+            self.page_deletion_requested.emit(pages))
         menu.exec(self.thumbs.viewport().mapToGlobal(pos))
 
     def _on_outline(self, item: QTreeWidgetItem, _col: int) -> None:

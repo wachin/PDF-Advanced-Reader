@@ -1457,11 +1457,18 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       `Edit.changed` now says what a cache keyed by page number must re-read, which for a
       delete is not the list it named: the marks above the cut move, and follow their pages
       (**F10-4e**)
-- [ ] Reach the delete from the strip: **Delete Page** on the pick (F10-4d), with the
-      confirmation none of the page commands so far needed, the pick kept across the
-      rebuild it causes (a rotation could afford to lose it; a deletion removes the very
-      thumbnails the pick was made of) and the reader lands on the sheet that took the
-      deleted page's place
+- [x] Reach the delete from the strip: **Delete Page** on the pick, last in the menu behind
+      a separator of its own, and **Tools ▸ Delete Page** (Ctrl+Shift+Backspace) for the page
+      under the reader's eyes. It is the first page command that **asks**: the box names the
+      sheets as the strip numbers them ("Delete pages 2–4?"), says what moves above the gap and
+      says Undo brings them back, and a *No* leaves no edit, no undo step and no dirty file.
+      A page-tree change rebuilds the strip, which is the thing the pick was made of, so the
+      pick is re-aimed at the sheets that took those numbers and drops the row that went; the
+      reader lands on the sheet that took a deleted page's place, and only scrolls for it where
+      the shift and the clamp disagree — the scroll is a relayout of the whole book.
+      `invalidate` now announces a page count that changed, which is what carries the toolbar's
+      total and the page box through a delete *and* back from it: they used to re-agree only on
+      a tab switch (**F10-4f**)
 - [ ] Shift what the *user's own* state keys on a page number, which no document-level
       undo reaches: the saved bookmarks and reading position (`QSettings`, per file), the
       page-numbering range, and an XFDF sidecar exported before the delete
@@ -1617,9 +1624,12 @@ now a command, Tools ▸ Rotate Page Left / Right, on the page the user is looki
 (F10-4d). Taking pages out follows the same shape and is where the page tree first stops
 being a cosmetic affair: what a delete changes is the *number* of every page above it, so
 this is also where an edit learned to say what it invalidated separately from what it named
-(F10-4e). Next in order: reaching that delete from the strip, and shifting the state that is
-keyed to a page number outside the document at all — the reader's bookmarks and their place
-in the book.
+(F10-4e). Reaching it is the strip's **Delete Page** and the window's question — the first page
+command that asks before it edits, because a delete is the first one whose undo the reader has
+to be told about rather than be able to work out — and the pick and the reader's own place are
+moved with the sheets rather than left pointing at the numbers they used to hold (F10-4f). Next
+in order: the state that is keyed to a page number outside the document at all — the reader's
+bookmarks and their place in the book.
 
 Goal:
 
@@ -4931,6 +4941,117 @@ page's own objects do not survive a save, because an adopted edit forces the sta
 which runs `garbage=2` — measured, the page's object and its content stream are gone from
 the file F10-2's save path writes, and are exactly what an incremental save would have left
 behind.
+
+---
+
+### F10-4f The delete reaches the reader — [x] Implemented
+
+**What landed**: the strip's **Delete Page** / **Delete N Pages** as the last item of the
+context menu, behind a separator of its own; **Tools ▸ Delete Page**
+(`Ctrl+Shift+Backspace`) for the page under the reader's eyes; `Sidebar`'s
+`page_deletion_requested(pages)` connected per tab to `MainWindow._delete_pages`; the
+confirmation in front of both routes; and `shifted_index(page, deleted, count)` in
+`src/pdfar/pages.py`, the one formula both re-aiming numbers use.
+
+**Why this command asks and the others do not**: a turn is undone by asking for the other way
+round, so `Ctrl+Shift+Right` needs no box. A delete's undo is a keystroke the reader has to
+*know to look for*, and its side effect is that every number above the gap starts naming a
+different sheet. So the question is half the work: it names the sheets as the strip numbers
+them (`Delete pages 2–4?`, via `_page_words` over `contiguous_runs`), says what moves, and
+says Undo brings them back. A *No* is a true no-op — no edit, no undo step, no dirty file —
+which is why the default button is No. The asking lives in the window rather than the strip
+so the Tools route gets the same question, and the strip keeps its F10-4d boundary: it names
+pages and asks, and never touches its own `session`.
+
+**Why one function for two numbers**: the reader's place and the strip's pick are both page
+numbers held outside the document, and both mean another sheet once pages go out.
+`shifted_index` is the page less the deleted pages *below* it, clamped to the new last page —
+the clamp being for the last sheet going, when nothing arrives to fill its number, and a page
+that went itself answering with the sheet that took its place. Using it for both is what keeps
+`test_the_reader_lands_on_the_sheet_that_took_the_deleted_page_s_place` and
+`test_the_pick_survives_the_rebuild_it_causes` describing the same arithmetic.
+
+**The landing is paid for only where it is needed**: `invalidate` already clamps
+`current_page`, and for a delete *below* the reader — or one that leaves them on the last
+sheet — the clamp's answer and the shift's answer are the same page. Measured, the scroll is a
+relayout of the whole book (**886 ms** on the 540-page book), so `goto_page` is asked for only
+when `landing != view.current_page`. The first version called it unconditionally and the
+command cost 3.02 s on the big book; guarded, it is 2.79 s including the undo that returns.
+
+**The defect only the painted window could show**: `invalidate` clamps `current_page` when the
+count falls and emitted no `page_changed`, so the toolbar kept the *pre-delete* maximum — page
+five of a four-page document was untypeable until a tab switch re-read it. `invalidate` now
+emits when the count moved, placed after `content_changed` so the strip that gets the current
+row is the rebuilt one, and `_on_page_changed` sets `maximum` *before* the value (on the way
+back from a delete the document is wider than the box still believes, and the value would
+clamp). Setting the total in the one signal every route to a new page passes through also
+retires the open-time and tab-change-time duplication for the delete path.
+
+**Files changed**: `src/pdfar/pages.py` (`shifted_index`, the singular "1 page" in the two
+refusal sentences), `src/pdfar/sidebar.py` (`page_deletion_requested`, `selected_pages`,
+`select_pages`, the menu entry), `src/pdfar/main.py` (`act_page_delete`, `_page_delete`,
+`_delete_pages`, `_page_words`, the tab connect/disconnect, enablement,
+`_on_page_changed`), `src/pdfar/viewer.py` (`invalidate` announcing a changed count),
+`tests/test_page_delete.py`.
+
+**Tests**: **24 new** (module 26 → 50). Eight parametrized `shifted_index` cases including the
+clamp, the deep cut and the duplicated index; the menu entry's name for one page and for a
+pick; the confirmation's title and its wording; *No* changing nothing; the delete being one
+undo step with redo taking it again; the reader's landing, and the same landing from a delete
+made elsewhere in the book; the toolbar total following the document out *and* back; the pick
+surviving, shrinking by the row that went, and vanishing when all of it went; a refused delete
+leaving the reader and their pick exactly as they were; the Tools route naming the page on
+screen; the command sitting in the Tools menu next to the page turn, on its own shortcut; and
+the command needing a document. **Seventeen mutations, all caught** — the strip
+entry missing or mis-named, the Tools menu never showing it, the pick never put back or read as
+nobody-picked, the question not waited for, the reader left on the old number, the reader given
+the number they typed instead of the sheet's new one, a refused delete still reshuffling the
+view, the pick not shortened by the sheet that went, the pages named one by one rather than as
+runs, the Tools route forgetting which page is on screen, the request never connected, the
+command not needing a document, and three parts of the shift formula (its clamp, counting every
+page above the cut rather than those below it, and not deduplicating). The twelfth of those was
+found by suspecting a test rather than the source: as written it asserted that
+`window.findChildren(QAction)` contained "Delete Page", which is true whether or not
+`tools_menu` ever displays it, since the action is parented to the window. Asserting the
+*menu's* action list — the idiom `test_page_rotate.py` already uses — is what makes the
+placement line in `main.py` a tested line, and deleting it now fails. One test was also wrong in
+a way worth naming: reading the **last** page while a page below it goes out lands the reader
+correctly even if their number was never shifted, because `goto_page`'s own clamp hides the
+mistake — it became a test when the reader moved to page 4 of five.
+
+**Suite**: **1136 passed, three consecutive runs** (151.3 / 135.2 / 137.4 s). Ruff unchanged at the 7
+pre-existing errors; mypy **553 in 16 files**, two new and both already-common union-attr
+results on `addAction`'s return (`QAction | None` in `sidebar.py`, `QMenu | None` in
+`main.py`), the same lines every neighbour in those files produces.
+
+**Verified by eye**: `/tmp/f104f/visual.py` drives the real window over a ruled six-page book
+whose pages 2, 3 and 4 carry a red rectangle each. The reader is on page 4, the strip is
+`1   2   3 >*4   5   6` with pages 2–4 picked, and the menu opened over page 4 reads
+**Rotate 3 Pages Left / Right, Rotate All Pages Left / Right, Delete 3 Pages**
+(`/tmp/f104f/menu.png`). Answering Yes gives `1 > 2   3` — pages 2–4 gone, reading page 2
+(the sheet that took the deleted page's number), the sheets `PAGE 1 / PAGE 5 / PAGE 6`, the
+number box showing 2, the outline now `[[1, 'Chapter one', 1], [1, 'Chapter two', 3]]`
+(`/tmp/f104f/after.png`). The pick is *empty*, correctly: every page in it went out, and
+`select_pages` clears before adding, which matters because the rebuild's own current-row
+marking selects too. Undo returns all six sheets and leaves the reader on page 2
+(`/tmp/f104f/undo.png`).
+
+**Performance**: whole command including the undo that comes back from it, best of three. On an
+eight-page document: a turn **22.1 ms**, one page out **36.3 ms**, three pages out **40.6 ms**,
+a delete of the reader's own page **25.9 ms**. On the 540-page book, whose open alone is
+**2.81 s**: a turn round trip **1.91 s**, one page out **2.79 s**, a hundred-page block
+**1.73 s**, forty scattered pages **2.86 s**; `goto_page` **886 ms**, `select_pages` over 540
+rows **0.17 ms**. So a delete costs roughly a turn plus a relayout, and the surface itself adds
+almost nothing on top of the edit.
+
+**What is not here**: the numbers the *user* owns outside the document — saved bookmarks, the
+reading position in `QSettings`, the page-numbering range and an XFDF sidecar exported before
+the delete — none of which the document's own undo reaches, and which are the next line. Also
+not here: the **assemble** permission, which PdfCraft consults before any page-tree edit
+(`crates/engine/src/edit.rs:880-895`) and PDFAR still never asks at edit time; the pick across
+an **undo** of a delete, since the reader's page is announced by the count change but the
+selection is not rebuilt, a gap the reorder steps will share; and no page *range* input, so
+"pages 12 to 40" is still either a pick or *all*.
 
 ---
 
