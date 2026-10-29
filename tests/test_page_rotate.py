@@ -33,6 +33,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pymupdf as fitz
 import pytest
 from conftest import build_sample_pdf, make_session
+from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtGui import QContextMenuEvent
+from PyQt6.QtWidgets import QListWidget
 
 from pdfar.annotations import AnnotationManager
 from pdfar.edits import EditError, Scope
@@ -644,3 +647,285 @@ def test_the_commands_sit_beside_the_view_rotation(qapp, sample_pdf):
         win.close()
         win.deleteLater()
         qapp.processEvents()
+
+
+# ------------------------------------------------------- the pages themselves (F10-4d)
+def _centre(lst, index):
+    """The point a reader's cursor sits on to touch thumbnail *index*."""
+    rect = lst.visualItemRect(lst.item(index))
+    return QPoint(rect.center().x(), rect.center().y())
+
+
+def _blank_below(lst):
+    """A point inside the strip that is on no page: below the last thumbnail."""
+    rect = lst.visualItemRect(lst.item(lst.count() - 1))
+    return QPoint(rect.center().x(), rect.bottom() + 20)
+
+
+def _click(lst, pos, *, ctrl=False, right=False):
+    from PyQt6.QtTest import QTest
+
+    QTest.mouseClick(lst.viewport(),
+                     Qt.MouseButton.RightButton if right else Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.ControlModifier if ctrl
+                     else Qt.KeyboardModifier.NoModifier,
+                     pos)
+
+
+def _press(lst, index, **kwargs):
+    _click(lst, _centre(lst, index), **kwargs)
+
+
+def _pick(lst, *indices):
+    """The pick a reader ends up with after clicking those pages."""
+    lst.clearSelection()
+    for index in indices:
+        lst.item(index).setSelected(True)
+
+
+def _ask_for_menu(bar, pos, app):
+    """Ask for the context menu the way the window system does.
+
+    The offscreen platform turns a right click into a selection change but never
+    into a ``QContextMenuEvent``, so the event that opens the menu is handed to the
+    strip's viewport — the same receiver a real right click reaches.
+    """
+    from PyQt6.QtWidgets import QApplication
+
+    QApplication.sendEvent(bar.thumbs.viewport(),
+                           QContextMenuEvent(QContextMenuEvent.Reason.Mouse, pos))
+    app.processEvents()
+
+
+def _labels(menu):
+    return [action.text() for action in menu.actions() if not action.isSeparator()]
+
+
+def _act(menu, label):
+    for action in menu.actions():
+        if action.text() == label:
+            return action
+    raise AssertionError(f"{label!r} is not in {_labels(menu)}")
+
+
+@pytest.fixture
+def menus(monkeypatch):
+    """Catch the menu a context handler would put on the screen: ``exec`` blocks."""
+    from PyQt6.QtWidgets import QMenu
+
+    shown: list = []
+
+    def record(self, *args):
+        shown.append(self)
+        return None
+
+    monkeypatch.setattr(QMenu, "exec", record)
+    return shown
+
+
+@pytest.fixture
+def strip(qapp, tmp_path):
+    """The thumbnail strip of a three-page document, shown so it has real geometry."""
+    from pdfar.render import RenderPool
+    from pdfar.sidebar import Sidebar
+
+    path = build_sample_pdf(tmp_path / "book.pdf", pages=3)
+    session = make_session(path)
+    pool = RenderPool(session, workers=1)
+    bar = Sidebar(session, pool)
+    bar.resize(320, 900)
+    bar.show()
+    qapp.processEvents()
+    try:
+        yield bar
+    finally:
+        pool.shutdown()
+        bar.deleteLater()
+        session.close()
+        qapp.processEvents()
+
+
+def test_a_second_page_can_be_picked_in_the_strip(qapp, strip):
+    """The strip is a place to *choose* pages, not only to jump to one.
+
+    Single selection could not express "these three pages of the scan", and turning
+    one page of a pick through a menu that acts on all of it needs a set to name.
+    Extended selection costs the reader nothing beside that: a plain click still
+    selects one page, and clicking a picked page again drops it.
+    """
+    lst = strip.thumbs
+    assert lst.selectionMode() == QListWidget.SelectionMode.ExtendedSelection
+
+    _press(lst, 0)
+    qapp.processEvents()
+    assert [item.data(Qt.ItemDataRole.UserRole) for item in lst.selectedItems()] == [0]
+
+    _press(lst, 2, ctrl=True)
+    qapp.processEvents()
+    assert [item.data(Qt.ItemDataRole.UserRole) for item in lst.selectedItems()] == [0, 2]
+
+    _press(lst, 2, ctrl=True)
+    qapp.processEvents()
+    assert [item.data(Qt.ItemDataRole.UserRole) for item in lst.selectedItems()] == [0]
+
+
+def test_picking_pages_does_not_take_the_jump_away(qapp, strip):
+    """The strip's first job is still a jump: double-clicking a page asks for it.
+
+    Extended selection changes what a click does *to the pick*, and a double click is
+    the other gesture the strip answers to.  It is the behaviour this change was most
+    able to break quietly, so it is sent the whole way: ``QTest.mouseDClick`` never
+    reaches ``itemDoubleClicked`` under offscreen Qt — the platform does not turn its
+    synthetic pair into a double click — so the events go over one by one.
+    """
+    from PyQt6.QtCore import QEvent, QPointF
+    from PyQt6.QtGui import QMouseEvent
+    from PyQt6.QtWidgets import QApplication
+
+    seen: list = []
+    strip.goto_page_requested.connect(seen.append)
+    lst = strip.thumbs
+    pos = _centre(lst, 2)
+    local = QPointF(pos)
+    global_ = QPointF(lst.viewport().mapToGlobal(pos))
+
+    def make(event_type, button, buttons):
+        return QMouseEvent(event_type, local, global_, button, buttons,
+                           Qt.KeyboardModifier.NoModifier)
+
+    for event in (make(QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton,
+                       Qt.MouseButton.LeftButton),
+                  make(QEvent.Type.MouseButtonRelease, Qt.MouseButton.LeftButton,
+                       Qt.MouseButton.NoButton),
+                  make(QEvent.Type.MouseButtonDblClick, Qt.MouseButton.LeftButton,
+                       Qt.MouseButton.LeftButton),
+                  make(QEvent.Type.MouseButtonRelease, Qt.MouseButton.LeftButton,
+                       Qt.MouseButton.NoButton)):
+        QApplication.sendEvent(lst.viewport(), event)
+    qapp.processEvents()
+    assert seen == [2]
+
+
+def test_the_menu_acts_on_the_pick_and_on_the_page_under_the_cursor(strip):
+    """Whichever pages the menu names, it is the pages the reader pointed at.
+
+    Picked pages come out in page order whatever the order they were clicked in;
+    with no pick the menu takes the page the request arrived on; and a request on
+    blank space names nothing, because there is no page to turn.
+    """
+    _pick(strip.thumbs, 2, 0)
+    assert strip._picked_pages(_centre(strip.thumbs, 1)) == (0, 2)
+
+    strip.thumbs.clearSelection()
+    assert strip._picked_pages(_centre(strip.thumbs, 1)) == (1,)
+    assert strip._picked_pages(_blank_below(strip.thumbs)) == ()
+
+
+def test_the_menu_names_every_page_it_is_about_to_turn(strip):
+    """The label counts the pages: a turn written into the file is not free."""
+    assert _labels(strip._page_rotation_menu((1,))) == [
+        "Rotate Page Left", "Rotate Page Right",
+        "Rotate All Pages Left", "Rotate All Pages Right"]
+    assert _labels(strip._page_rotation_menu((0, 2))) == [
+        "Rotate 2 Pages Left", "Rotate 2 Pages Right",
+        "Rotate All Pages Left", "Rotate All Pages Right"]
+    assert [a.isSeparator() for a in strip._page_rotation_menu((0,)).actions()] == [
+        False, False, True, False, False]
+
+
+def test_the_menu_asks_and_leaves_the_turn_to_the_window(strip):
+    """The strip has a session it could edit, and must not use it.
+
+    Undo, the re-render and the "is this document saved" answer all live behind the
+    view; a sidebar that wrote the angle itself would turn the page and leave the
+    screen showing the old one, with no step to undo.
+    """
+    seen: list = []
+    strip.page_rotation_requested.connect(
+        lambda pages, delta: seen.append((tuple(pages), delta)))
+
+    menu = strip._page_rotation_menu((0, 2))
+    _act(menu, "Rotate 2 Pages Left").trigger()
+    _act(menu, "Rotate All Pages Right").trigger()
+    assert seen == [((0, 2), -90), ((0, 1, 2), 90)]
+    assert rotations(strip.doc) == [0, 0, 0]
+
+
+def test_a_right_click_on_a_page_offers_to_turn_it(qapp, strip, menus):
+    """The whole path, from the mouse to a menu on the screen."""
+    _press(strip.thumbs, 2, right=True)
+    qapp.processEvents()
+    assert [item.data(Qt.ItemDataRole.UserRole) for item in strip.thumbs.selectedItems()] == [2]
+
+    _ask_for_menu(strip, _centre(strip.thumbs, 2), qapp)
+    assert menus, "the right click opened no menu"
+    assert _labels(menus[-1])[:2] == ["Rotate Page Left", "Rotate Page Right"]
+
+
+def test_the_blank_space_below_the_pages_offers_nothing(qapp, strip, menus):
+    """No page, no menu: a request on the strip's empty tail turns no page."""
+    _pick(strip.thumbs)
+    _click(strip.thumbs, _blank_below(strip.thumbs), right=True)
+    qapp.processEvents()
+    _ask_for_menu(strip, _blank_below(strip.thumbs), qapp)
+    assert menus == []
+
+
+def test_the_pages_a_reader_picked_are_the_pages_that_turn(qapp, window, menus):
+    """A pick, a right click and one menu item: the file holds the turn."""
+    win = window
+    _pick(win.sidebar.thumbs, 1, 2)
+    _ask_for_menu(win.sidebar, _centre(win.sidebar.thumbs, 2), qapp)
+    _act(menus[-1], "Rotate 2 Pages Right").trigger()
+    qapp.processEvents()
+
+    assert rotations(win.view.session.doc) == [0, 90, 90]
+    # Not a turn of the view: what was upright on the screen stays upright.
+    assert win.view.rotation == 0
+    # One request is one edit, so one undo returns both pages at once.
+    win._undo_edit()
+    qapp.processEvents()
+    assert rotations(win.view.session.doc) == [0, 0, 0]
+
+
+def test_rotate_all_pages_turns_a_book_that_arrived_sideways(qapp, window, menus):
+    """The scanned book that came in upside down: one item, every page, one undo."""
+    win = window
+    _pick(win.sidebar.thumbs, 0)
+    _ask_for_menu(win.sidebar, _centre(win.sidebar.thumbs, 0), qapp)
+    _act(menus[-1], "Rotate All Pages Left").trigger()
+    qapp.processEvents()
+
+    assert rotations(win.view.session.doc) == [270, 270, 270]
+    win._undo_edit()
+    qapp.processEvents()
+    assert rotations(win.view.session.doc) == [0, 0, 0]
+
+
+def test_only_the_tab_that_asked_answers_the_request(qapp, window, tmp_path):
+    """A sidebar belongs to its own document.
+
+    The handler turns the pages through the view that is on screen, which is why the
+    connection has to come apart with the tab: a stale one would let a hidden
+    document's thumbnail strip edit the file the reader is looking at.
+    """
+    win = window
+    first = win.sidebar
+    assert win.open_document(build_sample_pdf(tmp_path / "second.pdf", pages=2))
+    qapp.processEvents()
+    assert win.tabs.count() == 2
+    assert first is not win.sidebar
+    try:
+        first.page_rotation_requested.emit((0,), 90)
+        qapp.processEvents()
+        assert rotations(win.view.session.doc) == [0, 0]
+
+        win.tabs.setCurrentIndex(0)
+        qapp.processEvents()
+        first.page_rotation_requested.emit((0,), 90)
+        qapp.processEvents()
+        assert rotations(win.view.session.doc) == [90, 0, 0]
+    finally:
+        while win.tabs.count():
+            win._close_tab(win.tabs.count() - 1, confirm=False)
+            qapp.processEvents()

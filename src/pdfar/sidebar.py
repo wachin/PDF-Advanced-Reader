@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
@@ -128,7 +128,12 @@ class ThumbnailDelegate(QStyledItemDelegate):
 
 
 class ThumbnailList(QListWidget):
-    """Page thumbnails in one centered column, regardless of sidebar width."""
+    """Page thumbnails in one centered column, regardless of sidebar width.
+
+    The strip takes a *pick*, not only a jump: extended selection is what lets a
+    reader gather the three sideways pages of a scan and turn them in one edit, and
+    it costs nothing beside that — a plain click still selects one page.
+    """
 
     def __init__(self, settings: ThumbnailSettings,
                  parent: Optional[QWidget] = None) -> None:
@@ -140,6 +145,8 @@ class ThumbnailList(QListWidget):
         self.setIconSize(QSize(settings.width, settings.height))
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setItemDelegate(self.delegate)
+        self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
     def apply_settings(self, settings: ThumbnailSettings) -> None:
         self.delegate.settings = settings
@@ -231,6 +238,9 @@ class Sidebar(QWidget):
     # page is where to look, this is what to look at.
     annotation_activated = pyqtSignal(str)
     thumbnail_size_changed = pyqtSignal(int)
+    # Pages to turn, and by how much.  The strip knows which sheets were picked; the
+    # window turns them through the view, which owns the undo step and the re-render.
+    page_rotation_requested = pyqtSignal(object, int)
     # The window owns saving: it is the one place that can explain a refusal, and
     # a second opinion from here would only be able to say "failed".
     save_requested = pyqtSignal()
@@ -256,6 +266,7 @@ class Sidebar(QWidget):
         # ---- thumbnails -------------------------------------------------
         self.thumbs = ThumbnailList(self._thumb_settings)
         self.thumbs.itemDoubleClicked.connect(self._on_thumb)
+        self.thumbs.customContextMenuRequested.connect(self._on_thumbs_context_menu)
         self.thumbs_tab = QWidget()
         thumbs_layout = QVBoxLayout(self.thumbs_tab)
         thumbs_layout.setContentsMargins(0, 0, 0, 0)
@@ -637,6 +648,52 @@ class Sidebar(QWidget):
         page = item.data(Qt.ItemDataRole.UserRole)
         if isinstance(page, int):
             self.goto_page_requested.emit(page)
+
+    # --------------------------------------------- page rotation, from the strip
+    def _picked_pages(self, pos: QPoint) -> Tuple[int, ...]:
+        """Every page the request at *pos* points at, in page order.
+
+        A pick wins: the reader who spent three clicks gathering pages 1, 2 and 3
+        means all of them.  With no pick it is the page the request arrived on, and
+        blank space below the last thumbnail names nothing at all.
+        """
+        picked = [item.data(Qt.ItemDataRole.UserRole)
+                  for item in self.thumbs.selectedItems()]
+        pages = {index for index in picked if isinstance(index, int)}
+        if pages:
+            return tuple(sorted(pages))
+        item = self.thumbs.itemAt(pos)
+        if item is None:
+            return ()
+        index = item.data(Qt.ItemDataRole.UserRole)
+        return (index,) if isinstance(index, int) else ()
+
+    def _page_rotation_menu(self, pages: Tuple[int, ...]) -> QMenu:
+        """Offer the turn that goes into the file, named with the pages it moves."""
+        menu = QMenu(self)
+        name = "Rotate Page" if len(pages) == 1 else f"Rotate {len(pages)} Pages"
+        self._add_rotation_actions(menu, pages, name)
+        menu.addSeparator()
+        # The scanned book that arrived sideways end to end: asking a reader to
+        # click five hundred thumbnails is work the menu is standing there to do.
+        self._add_rotation_actions(menu, tuple(range(self.doc.page_count)),
+                                   "Rotate All Pages")
+        return menu
+
+    def _add_rotation_actions(self, menu: QMenu, pages: Tuple[int, ...],
+                              name: str) -> None:
+        for delta, side in ((-90, "Left"), (90, "Right")):
+            action = menu.addAction(f"{name} {side}")
+            action.triggered.connect(
+                lambda _checked=False, pages=pages, delta=delta:
+                self.page_rotation_requested.emit(pages, delta))
+
+    def _on_thumbs_context_menu(self, pos: QPoint) -> None:
+        pages = self._picked_pages(pos)
+        if not pages:
+            return
+        menu = self._page_rotation_menu(pages)
+        menu.exec(self.thumbs.viewport().mapToGlobal(pos))
 
     def _on_outline(self, item: QTreeWidgetItem, _col: int) -> None:
         page = item.data(0, Qt.ItemDataRole.UserRole)

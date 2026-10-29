@@ -1438,10 +1438,17 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       enabled by a document and survive reflow, and the pre-existing pair is now
       **Rotate View Left / Right** with tooltips that say the file keeps its own turn
       (**F10-4c**)
-- [ ] Reach the turn from the pages themselves: a thumbnail context menu acting on the
-      selected pages (the list is single-select today), and *Rotate All Pages* for the
-      scanned book that arrived sideways end to end (**F10-4d**)
-- [ ] Delete, extract, duplicate, move, reverse
+- [x] Reach the turn from the pages themselves: the thumbnail strip takes a **pick**
+      (`ExtendedSelection`, where a plain click still selects one page) and its right-click
+      menu turns every page in it — `Rotate Page Left / Right` for one, `Rotate N Pages`
+      for a pick, and **Rotate All Pages** for the scanned book that arrived sideways end to
+      end. The strip names the pages and asks; the window answers through
+      `view.apply_edit(RotatePages(...))`, connected per tab and dropped with it, so one
+      pick stays one undo step and a hidden document's strip cannot turn the file on screen
+      (**F10-4d**)
+- [ ] Delete, extract, duplicate, move, reverse — on the strip's pick (F10-4d), and
+      keeping that pick across the rebuild it causes, which a rotation could afford to
+      lose and a deletion cannot
 - [ ] Insert blank page
 - [ ] Split, merge/combine
 - [ ] Page boxes (crop)
@@ -1584,9 +1591,10 @@ on the pixels MuPDF actually paints them on (F10-4a). The turn itself has follow
 `RotatePages` writes the angle into the page's own node, undoably, and the view, the
 thumbnails and the saved file all agree on the page that comes out (F10-4b) — and it is
 now a command, Tools ▸ Rotate Page Left / Right, on the page the user is looking at
-(F10-4c). Next in order: reaching the same edit from the pages themselves — a thumbnail
-menu for the selected pages and *Rotate All Pages*, F10-4d — after which the rest of
-page manipulation (delete, extract, reorder) has its module and its pattern to grow into.
+(F10-4c), and a pick in the thumbnail strip turns every page in it, all the pages included
+(F10-4d). Next in order: the operations that need more than one page to make sense —
+delete, extract, reorder, F10-4's remaining lines — which have their module and their
+pattern to grow into.
 
 Goal:
 
@@ -4697,6 +4705,100 @@ attribute reads and a construction.
 the same trap in a smaller place — the thumbnail context menu and multi-page selection,
 and *Rotate All Pages*: all F10-4d. Also not here: a confirmation, which an undoable
 edit does not need.
+
+---
+
+### F10-4d The turn reaches the pages — [x] Implemented
+
+**Completed**: 2026-10-29
+
+**What landed**: the thumbnail strip takes a *pick* and turns it. `ThumbnailList` is
+`ExtendedSelection` with a `CustomContextMenu`, and right-clicking it offers **Rotate
+Page Left / Right** for one page, **Rotate N Pages Left / Right** for a pick and, under
+a separator, **Rotate All Pages Left / Right** (`src/pdfar/sidebar.py`). The strip emits
+`page_rotation_requested(pages, delta)`; `MainWindow._rotate_pages` answers with
+`view.apply_edit(RotatePages(...))`, connected to whichever tab is on screen in
+`_connect_tab` and dropped with it in `_disconnect_tab` (`src/pdfar/main.py`).
+
+**Why the strip asks instead of editing**: it has a `session` in reach and could write
+the angle itself, and that would be the bug — the file turns while the view goes on
+painting the page it already drew, with nothing on the undo stack and no dirty marker.
+Everything an edit owns already comes from the view (F10-1's adopt-and-invalidate, the
+re-render, the thumbnails, the title), so the sidebar's job stops at naming the pages.
+A mutation that makes the strip apply the edit itself fails a test on purpose.
+
+**Why *Rotate All Pages* is a menu item and not a dialog**: PdfCraft keeps the same
+choice in a dialog field — *which*, current or all, beside a from/to range
+(`crates/ui-egui/src/commands.rs:689-695`) — and dispatches the plain command on
+`targets`, the pages selected in its organize surface (`:360-365`). For the book that
+arrived sideways end to end the answer is one click, and a dialog that asks *which
+pages* before doing the one thing the reader meant is a step the menu can skip. The
+range is the part PDFAR still does not have.
+
+**Measured Qt behaviour, every one of it load-bearing**: a right click on a page that is
+*not* part of a pick replaces the pick, and on a page that *is* one leaves it whole, so
+the "N Pages" in the label is honest about what the reader is looking at and
+`_picked_pages` does not have to second-guess the mouse; the offscreen platform never
+turns a right click into a `QContextMenuEvent` — `QTest.mouseClick(…, RightButton)`
+moves the selection and stops — so the tests hand the viewport the event themselves;
+`QTest.mouseDClick` does not reach `itemDoubleClicked` either, in either selection mode,
+so the jump test sends press, release, double click, release; and `QMenu.exec` blocks,
+while PyQt allows the attribute to be replaced, so a fixture records the menu instead of
+putting it on the screen.
+
+**Files changed**: `src/pdfar/sidebar.py`, `src/pdfar/main.py`,
+`tests/test_page_rotate.py`, `ROADMAP.md`, `docs/pdfcraft-editing-analysis.md`.
+
+**Tests**: **10 new** in the strip group — a plain click still picks one page and
+`Ctrl` adds and drops another; the double click still asks for the jump (the gesture the
+selection change was most able to break quietly); the menu acts on the whole pick in page
+order whatever the click order, on the page under the cursor with no pick, and on nothing
+in the blank tail below the last thumbnail; the labels count the pages they will move and
+the separator sits where it belongs; the menu *asks* — `((0, 2), -90)` and
+`((0, 1, 2), 90)` out of the signal, and the file untouched behind it; a right click from
+the mouse to a menu on the screen; blank space opens nothing; the picked pages are the
+pages that turn in the real window, the view's own turn stays where it was and one undo
+returns both; *Rotate All Pages* turns every page of the document in one step; and a
+sidebar whose tab is no longer on screen cannot turn the document that is. **Twelve
+mutations**, each caught by the test that names it: the pick staying single, the menu
+policy or its connection missing (2), the pick ignored for the last page clicked, a page
+invented where the click landed on nothing, a menu opened on blank space, the count
+dropping out of the label, *All* meaning the pick, the strip editing through its own
+session, the jump connection lost, the request turning the *view* instead of the file,
+and the connection outliving its tab. One honest note:
+`test_the_blank_space_below_the_pages_offers_nothing` **passes before the feature
+exists** — nothing opens a menu when nothing is connected — so its green means nothing
+until its mutation is tried, and it is written down here rather than counted as evidence.
+
+**Suite**: **1086 passed, three consecutive runs** (140.9 / 129.9 / 123.7 s). Ruff
+unchanged at the 7 pre-existing errors; mypy **551 in 16 files**, +2 over F10-4c and
+both of them new lines
+joining families the same file already had: `QMenu.addAction()` is typed Optional, which
+the bookmarks handler has already been charged for, and `viewport()` is typed Optional,
+which the three other context handlers have been charged for. No new kind of error.
+
+**Verified by eye**: `/tmp/f104d/visual.py` drives the real window on a four-page
+landscape book. `/tmp/f104d/pick.png` shows pages 2 and 3 both highlighted in the strip
+after click and ctrl-click; `/tmp/f104d/menu.png` is the menu that opens on the right
+click, *Rotate 2 Pages Left / Right* over the separator and *Rotate All Pages Left /
+Right*; `/tmp/f104d/turned.png` has pages 2 and 3 as tall sheets, in the view and in
+their thumbnails, page 1 still lying landscape, the title marked dirty and the view's own
+turn unchanged; `/tmp/f104d/undone.png` returns all four to where they started. The strip
+loses the pick when the turn rebuilds it (printed empty after the edit) — see below.
+
+**Performance**: on the 540-page book, best of three, the new code is free — resolving
+the pick out of a 540-item strip **0.0 ms**, building a menu for a 300-page pick
+**0.2 ms**. What costs is what F10-4b measured: **50.2 ms** to turn one page, **228.2 ms**
+for all 540, **3.9 ms** to undo, plus the strip's `STRUCTURE` rebuild at **40–95 ms**.
+End to end — turn, rebuild, undo, rebuild — **458 ms** for one page and **703 ms** for
+the whole book.
+
+**What is not here**: the pick does not survive the turn. A `STRUCTURE` edit rebuilds the
+strip and the selection goes with it (measured above), which is harmless when the reader
+asked to turn those pages and is not when they asked to *delete* them — so keeping a pick
+across a rebuild is the next line's problem, not one to solve by holding thumbnails
+back. Also not here: a page range (PdfCraft's from/to dialog), the menu on any surface
+but the strip, and the other page operations, which now have a selection to build on.
 
 ---
 

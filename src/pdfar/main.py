@@ -1299,8 +1299,14 @@ class MainWindow(QMainWindow):
         own turn is untouched — this is not ``_rotate``.
         """
         if self.view:
-            self.view.apply_edit(
-                RotatePages(pages=(self.view.current_page,), delta=degrees))
+            self._rotate_pages((self.view.current_page,), degrees)
+
+    def _rotate_pages(self, pages: Tuple[int, ...], degrees: int) -> None:
+        """The same turn, for every page in *pages* — the strip's pick, or the whole
+        document.  One request stays one edit, so one undo returns them all.
+        """
+        if self.view:
+            self.view.apply_edit(RotatePages(pages=tuple(pages), delta=degrees))
 
     def _hit_prev(self) -> None:
         self._step_hit(-1)
@@ -2472,6 +2478,9 @@ class MainWindow(QMainWindow):
         tab.sidebar.annotation_activated.connect(tab.view.select_annotation)
         tab.sidebar.thumbnail_size_changed.connect(self._on_thumbnail_size_changed)
         tab.sidebar.save_requested.connect(self._save_annotations)
+        # The strip picks the pages, the view turns them: connected per tab because
+        # the handler answers for whichever document is on screen.
+        tab.sidebar.page_rotation_requested.connect(self._rotate_pages)
         # Connect annotation manager to sidebar
         tab.sidebar.set_annotation_manager(tab.view.annotation_manager)
         self._connected_tab = tab
@@ -2495,6 +2504,7 @@ class MainWindow(QMainWindow):
             tab.sidebar.annotation_activated.disconnect(tab.view.select_annotation)
             tab.sidebar.thumbnail_size_changed.disconnect(self._on_thumbnail_size_changed)
             tab.sidebar.save_requested.disconnect(self._save_annotations)
+            tab.sidebar.page_rotation_requested.disconnect(self._rotate_pages)
         except TypeError:
             pass
         tab.view.clear_numbering_preview()
