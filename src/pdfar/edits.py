@@ -68,7 +68,9 @@ class Renumbering:
     the document, so after the step it names another sheet.  None of it can be
     restored from a snapshot, because the reader may have changed it since the step
     went in — so the step carries a map instead, and both directions of the map are
-    exact for anything that points at a sheet which exists.
+    exact for anything that points at a sheet which exists.  :meth:`followed` asks
+    the same rule of a thing that is allowed to disappear, which is how a pick in
+    the thumbnail strip shrinks instead of landing on a neighbour.
     """
 
     #: Where each page came from; see above.
@@ -100,6 +102,27 @@ class Renumbering:
             # for the same delete, page minus the pages taken out below it.
             arrived = sum(1 for old in self.order if old < page)
             return max(0, min(arrived, len(self.order) - 1))
+
+    def followed(self, page: int) -> Optional[int]:
+        """The number the sheet on *page* wears once the step is taken, or ``None``.
+
+        One rule asked of a thing that has to survive and a thing that need not.
+        A reader cannot be nowhere, so :meth:`where` puts them on the sheet that
+        took the number of the one that went; a picked page that went is simply
+        not picked any more, and the pick is allowed to shrink.  Wherever the
+        sheet is still there the two give the same answer, and a test says so.
+        """
+        if self.backward:
+            if not 0 <= page < len(self.order):
+                return None
+            home = self.order[page]
+            # ``-1`` is a sheet the step invented: undoing takes it out, and
+            # anything held on it goes with it rather than going home.
+            return None if home < 0 else home
+        try:
+            return self.order.index(page)
+        except ValueError:
+            return None
 
 
 class Edit(ABC):

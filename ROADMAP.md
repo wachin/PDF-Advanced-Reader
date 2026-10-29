@@ -1484,7 +1484,7 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
             reader's own page already follows (F10-4f).  Undo moves every bookmark back along
             the bijection rather than restoring a snapshot, so a bookmark the reader makes
             between a delete and its undo keeps its page instead of being overwritten.
-      - [ ] **F10-4h** — *The reading position, and the reader's page across undo.*
+      - [x] **F10-4h** — *The reading position, and the reader's page across undo.*
             `viewState/<path>` holds `PDFView.get_state()`'s 0-based page, written on tab change
             and on close and never by an edit; and after an *undo* the reader keeps the number
             they had, which now names another sheet — the gap F10-4f left for the pick too.  One
@@ -1501,6 +1501,21 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
             numbering; an import of such a file into a shortened document skips the entries whose
             pages are gone and lands the rest on sheets that moved.  Record the page count an
             export was written against and say at import what disagrees.
+      - [ ] **F10-4k** — *The strip says "here" and "picked" with one channel.*
+            `QListWidget.setCurrentItem(item)` selects as well as making the row current, and the
+            delegate paints only `State_Selected`, so the reader's own row is drawn as a one-page
+            pick: `selected_pages()` cannot tell a gathered range from the place the view happens
+            to be, which is why a pick that shrinks to nothing reads back as page 1 picked
+            (F10-4h's test says so out loud, and its `Current | NoUpdate` marking is the stopgap).
+            Give "you are here" its own paint role so a marking can never edit a pick and
+            `_picked_pages` can tell the two answers apart.
+      - [ ] **F10-4l** — *The saved position is written against a tree the file may never have.*
+            `viewState/<path>` is written on a tab change and on close from the **live** document,
+            so a delete that is then discarded leaves the store holding a page number for a page
+            tree the file on disk does not have, and reopening lands the reader a sheet over.
+            F10-4h fixed the number for the tree the reader is looking at; this is the case where
+            the two documents are different.  Write the position against the saved revision, or
+            re-aim it through the steps that were dropped.
 - [ ] The search-results dock keeps each hit's 0-based page in `UserRole` and is cleared only by
       a new search or a tab change, while the view's own hit list *is* cleared by
       `Scope.STRUCTURE` — so after a delete the dock still offers pages that have moved, out of
@@ -1665,9 +1680,14 @@ first state the reader owns *outside* the document follows its sheets too: a pag
 what it did to the numbering, carries that statement between the undo and redo stacks, and the
 session publishes it for the generation that exists now — so a bookmark moves with its page, is
 written back to the settings store, and moves home again on undo, without a snapshot that would
-overwrite a mark made since the step (F10-4g). Next in order: the reading position and the
-reader's page across an undo (F10-4h), the numbering range that saves its own clamped values
-back (F10-4i), and the XFDF sidecar exported before a delete (F10-4j).
+overwrite a mark made since the step (F10-4g). The same map now answers for the reader: the view
+re-aims the page they were on when a step moves the sheets — including the undo, which is not a
+command and was the gap — the strip's pick follows the sheets it named and is allowed to shrink, and
+the position written to `viewState/<path>` is right because the view is (F10-4h). Next in order: the
+numbering range that saves its own clamped values back (F10-4i), the XFDF sidecar exported before a
+delete (F10-4j), and the two the reading-position step found behind it — the strip's one channel for
+"here" and "picked" (F10-4k) and the saved position written against a tree the file may not have
+(F10-4l).
 
 Goal:
 
@@ -5085,8 +5105,9 @@ almost nothing on top of the edit.
 **What is not here**: the numbers the *user* owns outside the document — saved bookmarks, the
 reading position in `QSettings`, the page-numbering range and an XFDF sidecar exported before
 the delete — none of which the document's own undo reaches, and which are the next line.  The
-bookmarks are that line's first consumer and have landed with it (**F10-4g**, below); what is
-still not here is the saved reading position and the reader's page across an *undo*, the
+bookmarks are that line's first consumer and have landed with it (**F10-4g**, below), and so has the
+saved reading position and the reader's page across an *undo* (**F10-4h**, below); what is still not
+here is the
 numbering range, and the sidecar. Also
 not here: the **assemble** permission, which PdfCraft consults before any page-tree edit
 (`crates/engine/src/edit.rs:880-895`) and PDFAR still never asks at edit time; the pick across
@@ -5176,6 +5197,104 @@ costs **4.3 ms** at 1 000 marks and writes no settings file.
 undo (**F10-4h**), which is the same map's second consumer; the numbering range that echoes
 clamped values back (**F10-4i**); the XFDF sidecar (**F10-4j**); and the search dock's stale hit
 pages. Inserting a page is also where `-1` first gets used — a delete cannot produce it.
+
+---
+
+### F10-4h The reading position, and the reader's page across undo — [x] Implemented
+
+**What landed.** The map F10-4g published has two more consumers, and the rule F10-4f worked out
+inside the delete command now lives on the **step**, which is the only place every way a page tree
+moves has to pass.
+
+* `Renumbering.followed(page)` (`edits.py`) is `where` asked of a thing that may not survive: the
+  same answer wherever the sheet is still there, `None` where it went out with the cut, and `None`
+  on the way back for a sheet the step invented. A reader cannot be nowhere; a pick can. A test
+  walks both directions over four orders and asserts the two agree wherever `followed` answers at
+  all, because one rule under two names is only safe while nobody lets them drift.
+* `PDFView` carries the reader. `invalidate` takes the page *before* the geometry is re-measured —
+  `_measure_pages` clamps `current_page` into the new count and emits nothing — and after the
+  relayout asks the step where that sheet is now, then goes there with the same `goto_page` the
+  command used, so the page is announced to the number box and the strip rather than corrected in
+  silence. A step that renumbers nothing publishes no map and moves nobody, which is the case
+  `Scope.STRUCTURE` alone cannot tell from a delete: a turn is a structure edit too.
+* `Sidebar` carries the pick. `_carried_pick` is asked *before* `thumbs.clear()`, because that is
+  the moment the rows the reader picked by number stop existing, and the answer is put back after
+  the rebuild. With no move to follow it comes back as it was, so a turn or a drag of the thumbnail
+  width no longer drops a gather of pages on the floor — the cost F10-4d measured and accepted for
+  the turn, which this step cannot leave in place for the delete.
+* One spent-once key for the whole sidebar (`_page_tree_move`), handing the same map to the pick and
+  to the bookmarks: a second spend would move a mark past its sheet *and* shrink a pick that had
+  already been shrunk. `_renumber_bookmarks` now takes the map it was given instead of reading the
+  session a second time, which is what makes the two consumers one decision.
+* `set_current_page` marks the reader's row without editing a pick that exists
+  (`Current | NoUpdate` of `QItemSelectionModel`), which is what lets a restored pick survive the
+  `page_changed` that a count change announces. Measured first: a plain `setCurrentItem` on a strip
+  holding the pick (1, 3) with the view landing on page 5 leaves the pick **(1, 4)** — the marking
+  edits the selection through the same channel the reader gathered pages on.
+* `MainWindow._delete_pages` keeps its own `shifted_index` arithmetic for the moment and is now
+  redundant with the view; a test pins the two to the same landing, so the duplicate cannot drift
+  before the step that removes it.
+
+**Why the rule moved off the command.** F10-4f could put it there because the command was the only
+way a page tree moved. Undo is the second way and it is not a command: `session.undo()` adopts an
+older document, `invalidate` re-measures it, and the reader keeps the *number* they had, which after
+an undo names the sheet below the one they were reading. Copying the same three lines into
+`_step_edit` would be a second home for a formula that has to agree with the step's own map, and
+the extract, insert and reorder steps would each add one. On the step, any path that moves sheets
+moves the reader with them whether or not anyone remembered to ask.
+
+**The saved position needed no new mechanism** — `get_state()` copies `current_page`, so a view
+that is on the right sheet writes the right number — but it needed saying, because
+`viewState/<path>` is the third thing that holds a page number outside the document and the only one
+written on a tab change and on close rather than by an edit. A test asserts that the number stored
+after a delete names the sheet the reader was on. What is still wrong with that store — it is
+written against a tree the file on disk may never have — is F10-4l.
+
+**Tests**: `tests/test_reading_position.py`, 25 of them, over the six-page book whose sheets name
+themselves, so an assertion asks *which sheet does the reader reach* rather than comparing a number
+against the arithmetic that produced it. `followed`'s shapes including its domain boundary; the
+reader across a delete above, below and on their own page, a cut that takes the end of the book with
+them (the case that separates "carry the sheet" from "clamp the number"), the undo, the redo, two
+deletes undone in sequence, a turn, a second rebuild at the same generation, the number box, the
+command and the view landing in the same place; the pick across the same moves and a comment's
+scope; and the position written to the store.
+
+**Mutations**: 18 of the new guards, **15 caught**. The three survivors are one shape — a guard
+today's edits cannot step on — and are said here rather than quietly dropped: keying the spend by
+*value* instead of identity needs two distinct steps publishing equal orders, which `DeletePages`
+cannot produce because its order's length is the page count and every step changes it; asking the
+map at any painted scope rather than STRUCTURE only needs an unspent map at a non-STRUCTURE rebuild,
+which cannot happen because the step that publishes a map always invalidates with STRUCTURE; and
+re-marking a row that is already current is a no-op in either channel. All three become reachable
+with the insert and move steps, which is where the identity key earns its keep, so all three stay.
+
+**Suite**: **1194 passed, three consecutive runs** (162.6 / 155.1 / 155.1 s). Ruff unchanged
+at the 7 pre-existing errors; mypy unchanged at **553 in 16 files**, and none of them falls on a
+line this step wrote.
+
+**Verified by eye**: `/tmp/f104h/visual.py` drives the real window over a nine-page book whose
+sheets name themselves, and reads the strip back out of its own **pixels** — the rows painted with
+the palette highlight, sampled beside the sheet where only the row background can be that colour —
+rather than from the selection model. Reading page 4 with pages 1, 3 and 5 picked, the painted rows
+are those three; after page 2 goes out the same three *sheets* are painted under the numbers 1, 2
+and 4, the reader is still on `PAGE FOUR` and the box says 3 of 8 (`/tmp/f104h/2-delete.png`). Undo
+returns nine sheets, the pick as it was named and the box at 4. A turn of page 2 leaves all three
+untouched. A cut that takes the whole pick leaves the reader's own row and nothing else. The
+**Delete Page** command lands where the view lands, on the same sheets.
+
+**Performance**: on the 540-page book, the map is one scan of the order per thing held by number, so
+a select-all pick is 540 scans — **2.45 ms** for the whole book, against a delete command of
+**385 ms** and a delete-and-undo round trip of **747 ms**. With the two new lookups stubbed out the
+same delete costs 369 ms and the same round trip 719 ms, so the rule is **+16 ms** and **+28 ms** at
+the worst pick the feature can be handed, and the undo is where it is cheapest because the map is
+half the length. A turn, which has no map to read, is **312 ms** and unchanged. For scale, putting a
+539-row pick back over 540 rows is **55 ms** on top of a rebuild that costs **93 ms**.
+
+**What is not here**: `MainWindow._delete_pages` still works its own copy of the shift, which the
+next step can now delete; the strip says "here" and "picked" through one channel, so a pick that
+shrank to nothing reads as a one-page pick (**F10-4k**); the saved position is written against a
+tree the file may never have (**F10-4l**); the numbering range (**F10-4i**) and the XFDF sidecar
+(**F10-4j**) still hold numbers no step reaches; and the search dock's hit pages are unmoved.
 
 ---
 

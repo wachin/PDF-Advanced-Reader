@@ -38,7 +38,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .cache import PageCache
-from .edits import Edit, EditError, Scope
+from .edits import Edit, EditError, Renumbering, Scope
 from .geometry import (
     display_size, map_point, map_rect, normalize_rotation, unmap_delta,
     unmap_point, unmap_rect,
@@ -215,6 +215,10 @@ class PDFView(QAbstractScrollArea):
                 raise ValueError("encrypted")
         self.session = DocumentSession(doc, doc_path, password, authenticated)
         self._invalidated_version = self.session.version
+        #: The page-tree move the reader has already been carried across.
+        #: Identity, not value: two steps can describe the same move and both are
+        #: meant to be spent.  See :meth:`invalidate`.
+        self._spent_renumbering: Optional[Renumbering] = None
 
         self.zoom = 1.0
         self.zoom_step = 0.10           # additive step for buttons / shortcuts
@@ -433,6 +437,10 @@ class PDFView(QAbstractScrollArea):
             version = self.session.content_changed()
         self._invalidated_version = version
         counted = self.page_count
+        # Where the reader was, before anything below is allowed to clamp it: a
+        # page-tree step re-aims the view onto the sheet they were reading, which
+        # is not the same number once the sheets above the cut have moved down.
+        reading = self.current_page
         # The document is the annotation store, so a document we have never read
         # is an annotation list we have never read: re-derive it (F10-3).
         self.annotation_manager.reload_from_document()
@@ -454,6 +462,13 @@ class PDFView(QAbstractScrollArea):
             if self.reflow_mode and scope & (Scope.STRUCTURE | Scope.CONTENT):
                 self._enter_reflow()
             self._request_visible()
+            if scope & Scope.STRUCTURE:
+                # After the relayout, which is what makes the scroll position the
+                # one :meth:`goto_page` reads, and after ``_request_visible``, so
+                # the pages asked for are the ones the reader ends up on.
+                landing = self._carried_reading(reading)
+                if landing != self.current_page:
+                    self.goto_page(landing)
         self.content_changed.emit(version, int(scope))
         if self.page_count != counted:
             # A document of a different length is a different place to be reading:
@@ -470,6 +485,25 @@ class PDFView(QAbstractScrollArea):
     # not move a pixel or a word.
     _PAINTED = Scope.STRUCTURE | Scope.CONTENT | Scope.COMMENTS | Scope.FORM
     _STALE_TEXT = Scope.STRUCTURE | Scope.CONTENT
+
+    def _carried_reading(self, reading: int) -> int:
+        """The number the sheet the reader was on wears after the step.
+
+        ``reading`` is the page as it was *before* the document moved, so the
+        answer is a number in the document that exists now: a delete that took the
+        reader's own page lands them on the sheet that took its number, and one
+        below the reading leaves them where they were.
+
+        Spent once, by the identity of the map rather than its value — a second
+        spend of the same step would carry the reader another page further from
+        their sheet, and the rebuild that asks for it is not always an edit (the
+        strip resizes at ``Scope.FULL`` with the numbering untouched).
+        """
+        move = self.session.renumbering
+        if move is None or move is self._spent_renumbering:
+            return reading
+        self._spent_renumbering = move
+        return move.where(reading)
 
     def _measure_pages(self, doc: fitz.Document) -> None:
         """Re-read the page count, both page sizes and each page's own turn.

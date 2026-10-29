@@ -10,7 +10,7 @@ try:
 except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 from PyQt6.QtCore import (
-    QPoint, QRect, QSettings, QSize, Qt, pyqtSignal,
+    QItemSelectionModel, QPoint, QRect, QSettings, QSize, Qt, pyqtSignal,
 )
 from PyQt6.QtGui import (
     QColor, QIcon, QPen, QPixmap,
@@ -254,9 +254,9 @@ class Sidebar(QWidget):
         self.pool = pool
         self._thumb_zoom: Dict[int, float] = {}
         self._thumb_settings = ThumbnailSettings.load()
-        #: The page-tree move the bookmarks have already been re-counted with.
+        #: The page-tree move the sidebar has already re-counted with.
         #: Identity, not value: two steps can describe the same move, and both are
-        #: meant to be spent.  See :meth:`_renumber_bookmarks`.
+        #: meant to be spent.  See :meth:`_page_tree_move`.
         self._spent_renumbering: Optional[Renumbering] = None
 
         self.bookmark_manager = BookmarkManager(session)
@@ -583,13 +583,20 @@ class Sidebar(QWidget):
         if not affected & self._THUMB_SCOPES:
             return
         if affected & Scope.STRUCTURE:
-            # The page tree itself moved: the list can be the wrong length.
+            # The page tree itself moved: the list can be the wrong length, and
+            # the pick was gathered from rows numbered in the tree that came out.
+            # One map answers for both the pick and the marks; read it before the
+            # rebuild, which is the moment the rows it names stop existing.
+            move = self._page_tree_move()
+            picked = self._carried_pick(move)
             self.thumbs.clear()
             self._thumb_zoom.clear()
             self._build_thumbs()
             self.outline.clear()
             self._build_outline()
-            self._renumber_bookmarks()
+            self._renumber_bookmarks(move)
+            if picked:
+                self.select_pages(picked)
         else:
             for i in range(self.thumbs.count()):
                 item = self.thumbs.item(i)
@@ -736,10 +743,25 @@ class Sidebar(QWidget):
             self.goto_page_requested.emit(page)
 
     def set_current_page(self, page: int) -> None:
-        """Keep the thumbnail list roughly in sync with the view."""
+        """Keep the thumbnail list roughly in sync with the view.
+
+        A marking is not a pick.  With nothing picked the row the view is on is the
+        only thing to show, so it is marked the way the delegate paints it — as a
+        selection.  While the reader *has* picked pages a plain ``setCurrentItem``
+        would edit that pick as it marks, leaving one gathered range for the sheet
+        the view happened to land on after a delete, so the current row is moved
+        with a flag that marks without touching the selection.
+        """
         if 0 <= page < self.thumbs.count():
             item = self.thumbs.item(page)
-            if item is not None and self.thumbs.currentItem() is not item:
+            if item is None or self.thumbs.currentItem() is item:
+                return
+            if self.thumbs.selectedItems():
+                self.thumbs.setCurrentItem(
+                    item,
+                    QItemSelectionModel.SelectionFlag.Current
+                    | QItemSelectionModel.SelectionFlag.NoUpdate)
+            else:
                 self.thumbs.setCurrentItem(item)
 
     # ------------------------------------------------------------------ bookmarks
@@ -764,19 +786,52 @@ class Sidebar(QWidget):
         self.bookmarks_tree.addTopLevelItem(user_root)
         self.bookmarks_tree.expandAll()
 
-    def _renumber_bookmarks(self) -> None:
-        """Move the user's marks onto the numbers their sheets wear now.
+    def _page_tree_move(self) -> Optional[Renumbering]:
+        """The step whose re-numbering this sidebar has not followed yet.
 
         Spent once per step, keyed to the step's own map: a structure rebuild is
         not always an edit — dragging the thumbnail size rebuilds the strip at
         ``Scope.FULL`` — and the map the last page-tree step published is still the
-        session's answer then.  Spending it twice takes every mark a page further
+        session's answer then.  Spending it twice takes every number a page further
         from the sheet it was made on, and the second spend is silent.
+
+        One key for the whole sidebar on purpose: the pick, the marks and the rows
+        are all re-counted by this same rebuild, and a map spent by one of them is
+        spent.
         """
         move = self.session.renumbering
         if move is None or move is self._spent_renumbering:
-            return
+            return None
         self._spent_renumbering = move
+        return move
+
+    def _carried_pick(self, move: Optional[Renumbering]) -> Tuple[int, ...]:
+        """The pages that are still picked once *move* has been taken.
+
+        Asked before the rebuild, while the rows still carry the numbers the reader
+        picked them by.  A pick is allowed to shrink where a reader is not: a sheet
+        that went out with the cut takes its pick with it, and ``followed`` says so.
+
+        ``None`` is a rebuild where the numbering did not move — a turn, or dragging
+        the thumbnail width — and those rows come back naming the same sheets, so the
+        pick comes back as it was rather than being lost to ``thumbs.clear()``.
+        """
+        pages = self.selected_pages()
+        if move is None:
+            return pages
+        return tuple(where for where in (move.followed(page)
+                                         for page in pages)
+                     if where is not None)
+
+    def _renumber_bookmarks(self, move: Optional[Renumbering]) -> None:
+        """Move the user's marks onto the numbers their sheets wear now.
+
+        ``move`` is the step this rebuild has already been handed, or ``None`` when
+        nothing re-counted: marks that stay put must not rewrite the settings file,
+        which would otherwise happen for the turn of one page.
+        """
+        if move is None:
+            return
         self.bookmark_manager.renumber(move.where)
         self._build_bookmarks()
 
