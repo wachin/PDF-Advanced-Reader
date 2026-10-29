@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -45,6 +46,35 @@ SHEET = (200.0, 100.0)
 
 #: A box on that sheet, clear of the sample page's square and its text.
 MARK = (30.0, 12.0, 130.0, 42.0)
+
+
+def wait_until(app, predicate, timeout=20.0):
+    """Pump the event loop until *predicate* holds; reflow runs on a worker."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return False
+
+
+@pytest.fixture(autouse=True)
+def no_modal_dialogs(monkeypatch):
+    """Closing a turned page asks whether to keep the turn; a test says no.
+
+    ``QMessageBox`` would block the offscreen run forever, and the answer does not
+    matter here — the document under test is a fixture, not the user's work.
+    """
+    from PyQt6.QtWidgets import QMessageBox
+
+    for name in ("warning", "critical", "information"):
+        monkeypatch.setattr(
+            QMessageBox, name,
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.Ok))
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Discard))
 
 
 # ------------------------------------------------------------------- the file, read back
@@ -475,4 +505,142 @@ def test_the_thumbnail_is_measured_against_the_page_as_it_lies(tmp_path, qapp):
         pool.shutdown()
         bar.deleteLater()
         session.close()
+        qapp.processEvents()
+
+
+# --------------------------------------------------------------------------- the command
+@pytest.fixture
+def window(qapp, sample_pdf):
+    """The real main window with the sample document open."""
+    from pdfar.main import MainWindow
+
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    win.open_document(sample_pdf)
+    qapp.processEvents()
+    try:
+        yield win
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_command_turns_the_page_the_user_is_on(window, qapp):
+    """Tools ▸ Rotate Page works on the current page, and on no other."""
+    win = window
+    win.view.goto_page(1)
+    qapp.processEvents()
+    assert win.view.current_page == 1
+    assert rotations(win.view.session.doc) == [0, 0, 0]
+
+    win.act_page_rotl.trigger()
+    qapp.processEvents()
+    assert rotations(win.view.session.doc) == [0, 270, 0]
+    # A turn of the page is not a turn of the view: what was upright stays upright.
+    assert win.view.rotation == 0
+
+
+def test_the_page_command_and_the_view_command_stay_apart(window, qapp):
+    """Ctrl+Shift+Left writes the file; Ctrl+Left only turns what is on the screen."""
+    win = window
+    win._rotate(90)
+    qapp.processEvents()
+    assert win.view.rotation == 90
+    assert rotations(win.view.session.doc) == [0, 0, 0]
+    assert win.view.session.dirty is False
+
+    win.act_page_rotr.trigger()
+    qapp.processEvents()
+    assert win.view.rotation == 90
+    assert rotations(win.view.session.doc) == [90, 0, 0]
+
+
+def test_one_command_is_one_undo_step(window, qapp):
+    win = window
+    win.act_page_rotr.trigger()
+    win.act_page_rotr.trigger()
+    qapp.processEvents()
+    assert rotations(win.view.session.doc) == [180, 0, 0]
+    assert win.act_undo.isEnabled()
+
+    win._undo_edit()
+    qapp.processEvents()
+    assert rotations(win.view.session.doc) == [90, 0, 0]
+    win._redo_edit()
+    qapp.processEvents()
+    assert rotations(win.view.session.doc) == [180, 0, 0]
+
+
+def test_a_turned_page_leaves_the_document_dirty(window, qapp):
+    """The turn is in the session, not yet in the file — the title says so."""
+    win = window
+    win.act_page_rotr.trigger()
+    qapp.processEvents()
+    assert win.view.session.dirty is True
+    assert win._active_tab().dirty is True
+
+
+def test_the_page_commands_need_a_document(qapp, tmp_path):
+    from pdfar.main import MainWindow
+
+    path = build_sample_pdf(tmp_path / "doc.pdf", pages=1)
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        assert win.act_page_rotl.isEnabled() is False
+        assert win.act_page_rotr.isEnabled() is False
+        win.open_document(path)
+        qapp.processEvents()
+        assert win.act_page_rotl.isEnabled() is True
+        assert win.act_page_rotr.isEnabled() is True
+    finally:
+        win._close_document()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_turned_page_still_reads_in_reflow(window, qapp):
+    """Reflow is another rendering of the same tree, so the turn reaches it.
+
+    The command is not one of the tools reflow has to give up: it changes the
+    page, and the rebuilt reading is taken from the page that comes back.
+    """
+    win = window
+    win._toggle_reflow()
+    assert wait_until(qapp, lambda: win.view._reflow_worker is None)
+    assert win.view.reflow_mode
+    assert win.act_page_rotr.isEnabled() is True
+
+    win.act_page_rotr.trigger()
+    qapp.processEvents()
+    assert rotations(win.view.session.doc) == [90, 0, 0]
+    assert win.view.reflow_mode
+
+
+def test_the_commands_sit_beside_the_view_rotation(qapp, sample_pdf):
+    """Menu placement is documentation: the two kinds of turn, next to each other."""
+    from PyQt6.QtWidgets import QMenu
+
+    from pdfar.main import MainWindow
+
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+    try:
+        menus = {menu.title(): menu for menu in win.menuBar().findChildren(QMenu)}
+        tools = menus["&Tools"].actions()
+        order = [a for a in tools if a in (win.act_rotate_left, win.act_rotate_right,
+                                           win.act_page_rotl, win.act_page_rotr)]
+        assert order == [win.act_rotate_left, win.act_rotate_right,
+                         win.act_page_rotl, win.act_page_rotr]
+        assert win.act_page_rotl.shortcut().toString() == "Ctrl+Shift+Left"
+        assert win.act_page_rotr.shortcut().toString() == "Ctrl+Shift+Right"
+    finally:
+        win.close()
+        win.deleteLater()
         qapp.processEvents()

@@ -370,8 +370,10 @@ def test_toolbar_icon_actions(qapp):
     try:
         for act, tip in ((win.act_prev, "Previous page (PgUp)"),
                          (win.act_next, "Next page (PgDown)"),
-                         (win.act_rotl, "Rotate left"),
-                         (win.act_rotr, "Rotate right")):
+                         (win.act_rotl,
+                          "Turn the view left; the file keeps its own turn"),
+                         (win.act_rotr,
+                          "Turn the view right; the file keeps its own turn")):
             assert not act.icon().isNull()
             assert act.icon().pixmap(win.toolbar.iconSize()).size() == win.toolbar.iconSize()
             assert act.toolTip() == tip

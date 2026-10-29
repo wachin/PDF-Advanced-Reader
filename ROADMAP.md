@@ -1431,10 +1431,16 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       whose turn it only *inherits* is carried into its own value instead of counted
       twice. It reaches the view, the thumbnails and the saved file, and refuses a
       non-quarter angle, an empty list and an out-of-range page whole (**F10-4b**)
-- [ ] Put the turn under the user's hands: *Rotate Page(s)* in the Tools menu, the
-      toolbar and the page-list context menu, plus *Rotate All Pages*, each wired to
-      `apply_edit(RotatePages(...))` so undo/redo and the re-render come free
-      (**F10-4c**; today only the *view* rotation is reachable)
+- [x] Put the turn under the user's hands: Tools ▸ **Rotate Page Left / Right**
+      (`Ctrl+Shift+Left` / `Ctrl+Shift+Right`) apply `RotatePages` to the page on screen
+      through `view.apply_edit`, so the undo step, the re-render, the thumbnails and the
+      dirty marker all come from F10-1 rather than new plumbing; the two commands are
+      enabled by a document and survive reflow, and the pre-existing pair is now
+      **Rotate View Left / Right** with tooltips that say the file keeps its own turn
+      (**F10-4c**)
+- [ ] Reach the turn from the pages themselves: a thumbnail context menu acting on the
+      selected pages (the list is single-select today), and *Rotate All Pages* for the
+      scanned book that arrived sideways end to end (**F10-4d**)
 - [ ] Delete, extract, duplicate, move, reverse
 - [ ] Insert blank page
 - [ ] Split, merge/combine
@@ -1576,9 +1582,11 @@ that carries its own `/Rotate` — the ordinary case in a scanned book, which is
 PDFAR is being built for — now puts its marks, its words, its hits and its clicks
 on the pixels MuPDF actually paints them on (F10-4a). The turn itself has followed:
 `RotatePages` writes the angle into the page's own node, undoably, and the view, the
-thumbnails and the saved file all agree on the page that comes out (F10-4b). Next in
-order: the command under the user's hands, F10-4c — today only the *view* rotation is
-reachable, so the edit exists in the library and nowhere else.
+thumbnails and the saved file all agree on the page that comes out (F10-4b) — and it is
+now a command, Tools ▸ Rotate Page Left / Right, on the page the user is looking at
+(F10-4c). Next in order: reaching the same edit from the pages themselves — a thumbnail
+menu for the selected pages and *Rotate All Pages*, F10-4d — after which the rest of
+page manipulation (delete, extract, reorder) has its module and its pattern to grow into.
 
 Goal:
 
@@ -4611,6 +4619,84 @@ the library and the window. Also not here: the other page operations that will s
 `pages.py` (delete, extract, duplicate, move, reverse, insert, split/merge, page boxes),
 the tree flattening that has to precede any reorder, and a file whose `/Rotate` is not
 a multiple of 90 — PDF forbids it, PyMuPDF folds it, and the edit refuses to write one.
+
+---
+
+### F10-4c The turn reaches the menu — [x] Implemented
+
+**Completed**: 2026-10-29
+
+**What landed**: Tools ▸ **Rotate Page Left** and **Rotate Page Right**
+(`Ctrl+Shift+Left` / `Ctrl+Shift+Right`) in `src/pdfar/main.py`, each one line of
+real work — `view.apply_edit(RotatePages(pages=(view.current_page,), delta=±90))` —
+and the two commands that were already called *Rotate Left* and *Rotate Right* are now
+**Rotate View Left** / **Rotate View Right**, with tooltips that say the page keeps the
+turn the file states.
+
+**Why the rename is part of the feature**: a menu that reads *Rotate Left · Rotate
+Right · Rotate Page Left · Rotate Page Right* is a trap, and the trap is the one this
+feature set exists to spring — a user who means the screen and gets the file has
+changed a document they only wanted to look at differently. The old pair's labels were
+the only place the distinction was not already stated: `viewer.py` says `rotation`,
+`pages.py` says `/Rotate`, and the tests say view turn and page turn. The toolbar's two
+buttons, which are the same view commands, are renamed with them; `test_toolbar_icon_actions`
+asserts their tooltips word for word, so the old wording was pinned in a test and had to
+be moved on purpose rather than by accident.
+
+**Why the current page, and not a chooser**: the smallest thing that reaches the edit.
+A page-range dialog, a thumbnail multi-selection and *Rotate All Pages* each need
+surface that PDFAR does not have yet (the thumbnail list is single-select), and none of
+it is needed to answer "this page is upside down". They are F10-4d.
+
+**Enablement**: the commands need a document and nothing else — no selection, no tool
+mode. Reflow is the interesting case rather than an edge case: turning a page changes
+the tree the reflowed reading is taken from, and `invalidate()` already rebuilds it
+(`Scope.STRUCTURE` is in both `_PAINTED` and `_STALE_TEXT`, and reflow re-enters
+through `_enter_reflow()`), so the command stays live where the drawing tools do not.
+
+**Files changed**: `src/pdfar/main.py`, `tests/test_page_rotate.py`,
+`tests/test_main.py` (the toolbar tooltips, which the rename moves), `ROADMAP.md`,
+`docs/pdfcraft-editing-analysis.md`.
+
+**Tests**: **7 new** in the command group — the page under the user's eyes is the one
+that turns and its neighbours do not (and the view turn stays where it was), the page
+command and the view command are different things (`Ctrl+Right` leaves the file
+untouched and un-dirtied), one command is one undo step, the document goes dirty and
+the title marker follows, the commands are dead without a document, they sit beside the
+view pair with the shortcuts the tooltips promise, and a turned page still reads in
+reflow. **Six mutations** of the wiring each fail the group: turning page 1 whatever the
+user is on (1 test), left and right collapsing to the same turn (1), the page command
+turning the view instead (5), the commands staying live with no document (1), leaving
+the menu (1), and giving up under reflow (1). The reflow case is worth the note because
+the first version of that test **passed while proving nothing**: it entered reflow
+through `view.set_reflow_mode()` directly, which never re-ran the window's gating, so
+the enablement assertion was reading a stale `True`. Driving it through the window's own
+`_toggle_reflow()` is what makes the mutation land.
+**1076 passed, three consecutive runs** (158.2 / 155.3 / 185.7 s). Ruff unchanged at the 7
+pre-existing errors; mypy **549 in 16 files**, +2 over F10-4b and both of them the two
+new `tools_menu.addAction()` lines joining the 46 already counted in `_build_menus()`
+for the same reason — `menuBar()` and `addMenu()` are typed Optional, so every line
+that hangs an action off a menu is a `union-attr`. No new kind of error, and fixing the
+family is a typing pass this sprint has not taken.
+
+**Verified by eye**: `/tmp/f104c/verified.py` opens the real window on a three-page
+document with a mark on page 2 and grabs it. Before: three landscape sheets, page 2
+carrying its rectangle. After `Ctrl+Shift+Right`: page 2 is a tall sheet with its text
+running down it and the rectangle still on the words it was drawn over, while pages 1
+and 3 have not moved. After undo: page 2 is landscape again with the mark where it was.
+`/tmp/f104c/tools_menu.png` is the menu itself, showing the four commands and the two
+shortcut pairs.
+
+**Performance**: nothing new in the hot path. The command is the edit measured in
+F10-4b — 48.8 ms to turn one page of the 540-page book against a 40.4 ms floor — plus
+the re-render every `Scope.STRUCTURE` edit already pays; the action itself is two
+attribute reads and a construction.
+
+**What is not here**: page commands *in* the toolbar — its two rotate buttons stay the
+*view* pair, now labelled as such, because a third and fourth icon beside them would be
+the same trap in a smaller place — the thumbnail context menu and multi-page selection,
+and *Rotate All Pages*: all F10-4d. Also not here: a confirmation, which an undoable
+edit does not need.
 
 ---
 

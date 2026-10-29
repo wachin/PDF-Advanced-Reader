@@ -46,6 +46,7 @@ from .page_numbers import (
     EraseSettings, PageNumbersPanel, PageNumberSettings, erase_copy,
     erased_copy_path, numbered_copy_path, stamp_copy,
 )
+from .pages import RotatePages
 from .save import ProtectionError, SaveError, SaveReport, save_document
 from .search import (
     SearchParams, SearchWorker, compile_regex, highlight_spans, normalize_space,
@@ -686,15 +687,31 @@ class MainWindow(QMainWindow):
         self.act_ctrl_wheel_step.triggered.connect(self._toggle_ctrl_wheel_step)
 
         # Tools menu actions
-        self.act_rotate_left = QAction("Rotate Left", self)
+        self.act_rotate_left = QAction("Rotate View Left", self)
         self.act_rotate_left.setShortcut("Ctrl+Left")
-        self.act_rotate_left.setToolTip("Rotate left (Ctrl+Left)")
+        self.act_rotate_left.setToolTip(
+            "Turn the view left; the page keeps the turn the file states "
+            "(Ctrl+Left)")
         self.act_rotate_left.triggered.connect(self._rot_left)
 
-        self.act_rotate_right = QAction("Rotate Right", self)
+        self.act_rotate_right = QAction("Rotate View Right", self)
         self.act_rotate_right.setShortcut("Ctrl+Right")
-        self.act_rotate_right.setToolTip("Rotate right (Ctrl+Right)")
+        self.act_rotate_right.setToolTip(
+            "Turn the view right; the page keeps the turn the file states "
+            "(Ctrl+Right)")
         self.act_rotate_right.triggered.connect(self._rot_right)
+
+        self.act_page_rotl = QAction("Rotate Page Left", self)
+        self.act_page_rotl.setShortcut("Ctrl+Shift+Left")
+        self.act_page_rotl.setToolTip(
+            "Turn the page on screen left, into the document (Ctrl+Shift+Left)")
+        self.act_page_rotl.triggered.connect(self._page_rot_left)
+
+        self.act_page_rotr = QAction("Rotate Page Right", self)
+        self.act_page_rotr.setShortcut("Ctrl+Shift+Right")
+        self.act_page_rotr.setToolTip(
+            "Turn the page on screen right, into the document (Ctrl+Shift+Right)")
+        self.act_page_rotr.triggered.connect(self._page_rot_right)
 
         self.act_add_bookmark = QAction("Add Bookmark", self)
         self.act_add_bookmark.setShortcut("Ctrl+B")
@@ -821,6 +838,8 @@ class MainWindow(QMainWindow):
         tools_menu.addSeparator()
         tools_menu.addAction(self.act_rotate_left)
         tools_menu.addAction(self.act_rotate_right)
+        tools_menu.addAction(self.act_page_rotl)
+        tools_menu.addAction(self.act_page_rotr)
         tools_menu.addAction(self.act_save_annotations)
         tools_menu.addSeparator()
         tools_menu.addAction(self.act_settings)
@@ -894,10 +913,10 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
 
         # Rotation
-        self.act_rotl = QAction("Rotate Left", self)
-        self.act_rotl.setToolTip("Rotate left")
-        self.act_rotr = QAction("Rotate Right", self)
-        self.act_rotr.setToolTip("Rotate right")
+        self.act_rotl = QAction("Rotate View Left", self)
+        self.act_rotl.setToolTip("Turn the view left; the file keeps its own turn")
+        self.act_rotr = QAction("Rotate View Right", self)
+        self.act_rotr.setToolTip("Turn the view right; the file keeps its own turn")
         self.act_rotl.triggered.connect(self._rot_left)
         self.act_rotr.triggered.connect(self._rot_right)
         tb.addAction(self.act_rotl)
@@ -1267,6 +1286,21 @@ class MainWindow(QMainWindow):
 
     def _rot_right(self) -> None:
         self._rotate(90)
+
+    def _page_rot_left(self) -> None:
+        self._rotate_page(-90)
+
+    def _page_rot_right(self) -> None:
+        self._rotate_page(90)
+
+    def _rotate_page(self, degrees: int) -> None:
+        """Turn the page under the user's eyes *for keeps*: the angle is written
+        into the file, so another reader sees the page the same way.  The view's
+        own turn is untouched — this is not ``_rotate``.
+        """
+        if self.view:
+            self.view.apply_edit(
+                RotatePages(pages=(self.view.current_page,), delta=degrees))
 
     def _hit_prev(self) -> None:
         self._step_hit(-1)
@@ -3111,6 +3145,10 @@ class MainWindow(QMainWindow):
         self.act_sel_area.setEnabled(selection_ok)
         self.act_sel_table.setEnabled(selection_ok)
         self.act_draw.setEnabled(selection_ok)
+        # A page turn needs a document and nothing else: no selection, no tool,
+        # and reflow notwithstanding — it changes the tree the reading is taken from.
+        self.act_page_rotl.setEnabled(has_doc)
+        self.act_page_rotr.setEnabled(has_doc)
         for action in self._shape_actions.values():
             action.setEnabled(selection_ok)
         for action in self._stamp_actions.values():
