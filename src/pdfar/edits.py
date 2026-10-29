@@ -70,6 +70,20 @@ class Edit(ABC):
     pages: Optional[Tuple[int, ...]] = None
 
     @property
+    def changed(self) -> Optional[Tuple[int, ...]]:
+        """Which pages a cache keyed by page number has to look at again.
+
+        Not the same question as :attr:`pages`, which names the pages the *user*
+        asked about.  An edit that works on the page tree moves the numbers of the
+        pages that stay: delete page 2 of five and pages 3 and 4 are now 2 and 3,
+        so their marks, their thumbnails and their place in the outline all sit
+        under a number that no longer means what it said.  Such an edit overrides
+        this to ``None`` — the honest answer when the set is "everything from the
+        cut onwards" — and keeps :attr:`pages` for the label and the caller.
+        """
+        return self.pages
+
+    @property
     @abstractmethod
     def label(self) -> str:
         """Human-readable name for the undo/redo menu entry."""
@@ -154,7 +168,7 @@ class _Step:
     label: str
     scope: Scope
     before: Snapshot
-    pages: Optional[Tuple[int, ...]] = None
+    changed: Optional[Tuple[int, ...]] = None
 
     @property
     def size(self) -> int:
@@ -185,7 +199,7 @@ class EditHistory:
     # ------------------------------------------------------------- recording
     def record(self, edit: Edit, before: Union[Snapshot, bytes, str]) -> None:
         """Store the pre-edit state for ``edit`` and clear the redo branch."""
-        step = _Step(edit.label, edit.scope, _as_snapshot(before), edit.pages)
+        step = _Step(edit.label, edit.scope, _as_snapshot(before), edit.changed)
         self._undo.append(step)
         self._bytes += step.size
         self._bytes -= sum(s.size for s in self._redo)
@@ -250,7 +264,7 @@ class EditHistory:
             raise EditError("Nothing to undo")
         step = self._undo.pop()
         self._bytes -= step.size
-        parked = _Step(step.label, step.scope, _as_snapshot(current), step.pages)
+        parked = _Step(step.label, step.scope, _as_snapshot(current), step.changed)
         self._redo.append(parked)
         self._bytes += parked.size
         self._trim_redo()
@@ -262,7 +276,7 @@ class EditHistory:
             raise EditError("Nothing to redo")
         step = self._redo.pop()
         self._bytes -= step.size
-        parked = _Step(step.label, step.scope, _as_snapshot(current), step.pages)
+        parked = _Step(step.label, step.scope, _as_snapshot(current), step.changed)
         self._undo.append(parked)
         self._bytes += parked.size
         self._trim()

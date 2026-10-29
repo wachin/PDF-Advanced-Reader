@@ -1446,9 +1446,31 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       `view.apply_edit(RotatePages(...))`, connected per tab and dropped with it, so one
       pick stays one undo step and a hidden document's strip cannot turn the file on screen
       (**F10-4d**)
-- [ ] Delete, extract, duplicate, move, reverse — on the strip's pick (F10-4d), and
-      keeping that pick across the rebuild it causes, which a rotation could afford to
-      lose and a deletion cannot
+- [x] Take pages out: `DeletePages { pages }` removes the pick as **contiguous runs**,
+      highest run first, because MuPDF's cost is one page-tree rebuild per call rather
+      than per page — a hundred-page block of the 540-page book goes in 62 ms where the
+      same hundred removed one at a time took 2055 ms. It refuses an empty list, a
+      **negative** index (`delete_page(-1)` silently deletes the *last* page) and a request
+      that would leave no pages, which MuPDF does not notice until the save. The outline
+      rows MuPDF leaves pointing at `-1` are pruned, and a tree the prune would break — a
+      first row deeper than level 1, a step of two levels — is lifted rather than refused.
+      `Edit.changed` now says what a cache keyed by page number must re-read, which for a
+      delete is not the list it named: the marks above the cut move, and follow their pages
+      (**F10-4e**)
+- [ ] Reach the delete from the strip: **Delete Page** on the pick (F10-4d), with the
+      confirmation none of the page commands so far needed, the pick kept across the
+      rebuild it causes (a rotation could afford to lose it; a deletion removes the very
+      thumbnails the pick was made of) and the reader lands on the sheet that took the
+      deleted page's place
+- [ ] Shift what the *user's own* state keys on a page number, which no document-level
+      undo reaches: the saved bookmarks and reading position (`QSettings`, per file), the
+      page-numbering range, and an XFDF sidecar exported before the delete
+- [ ] Extract, duplicate, move, reverse — the same runs against the same pick, and for a
+      move the inherited-attribute push-down below
+- [ ] The **assemble** permission asked before a page-tree edit, as PdfCraft gates
+      `DeletePages` / `MovePages` / `RotatePages` on the document's `/P` flags: PDFAR keeps
+      a file's permissions through a save and never consults them at edit time, so a
+      document that forbids assembling accepts a delete like any other
 - [ ] Insert blank page
 - [ ] Split, merge/combine
 - [ ] Page boxes (crop)
@@ -1592,9 +1614,12 @@ on the pixels MuPDF actually paints them on (F10-4a). The turn itself has follow
 thumbnails and the saved file all agree on the page that comes out (F10-4b) — and it is
 now a command, Tools ▸ Rotate Page Left / Right, on the page the user is looking at
 (F10-4c), and a pick in the thumbnail strip turns every page in it, all the pages included
-(F10-4d). Next in order: the operations that need more than one page to make sense —
-delete, extract, reorder, F10-4's remaining lines — which have their module and their
-pattern to grow into.
+(F10-4d). Taking pages out follows the same shape and is where the page tree first stops
+being a cosmetic affair: what a delete changes is the *number* of every page above it, so
+this is also where an edit learned to say what it invalidated separately from what it named
+(F10-4e). Next in order: reaching that delete from the strip, and shifting the state that is
+keyed to a page number outside the document at all — the reader's bookmarks and their place
+in the book.
 
 Goal:
 
@@ -4799,6 +4824,113 @@ asked to turn those pages and is not when they asked to *delete* them — so kee
 across a rebuild is the next line's problem, not one to solve by holding thumbnails
 back. Also not here: a page range (PdfCraft's from/to dialog), the menu on any surface
 but the strip, and the other page operations, which now have a selection to build on.
+
+---
+
+### F10-4e Pages out, and the numbers that move — [x] Implemented
+
+**What landed**: `DeletePages { pages }` in `src/pdfar/pages.py`, and a distinction the
+rest of F10-4 will keep needing: `Edit.changed`, *what a cache keyed by page number has
+to look at again*, separated from `Edit.pages`, *what the user named*. Nothing in the UI
+reaches the delete yet — this is the edit, its refusals and its invalidation, with no
+surface attached.
+
+**Why runs rather than pages**: MuPDF's cost is one page-tree rebuild per call, not per
+page. Measured on the 540-page book: one page out **44 ms**, a hundred-page block out
+**45 ms**, the same hundred removed one at a time **2055 ms**. So the pick is cut into
+`contiguous_runs` and each run goes through `delete_pages(start, end)` — which also fixes
+the order, because a delete shifts the numbers above it and working from the front would
+spend the rest of the list on the wrong sheets. PdfCraft does the same job in one rebuild
+(`crates/organize/src/lib.rs:265-293` rewrites `/Kids` from the keepers); the runs are what
+PyMuPDF's API allows, and they make the common case — a block — cost the same single
+rebuild.
+
+**Why the refusals are here rather than left to MuPDF**, measured case by case:
+
+* an empty list, refused with the same sentence `RotatePages` uses;
+* a **negative** index. `delete_page(-1)` is *accepted* and removes the last page — MuPDF
+  counts a negative index from the end. The range form `delete_pages(-1, -1)` does refuse,
+  with `bad page number(s)`, so the check buys the wording and the fact that nothing is cut
+  before it, not the corruption itself; the test therefore reads the sentence
+  (`is not in this document`) rather than the exception type, which MuPDF would also raise;
+* a request that would leave **no pages**. MuPDF takes the last page out without comment
+  and raises `cannot save with zero pages` at the save — after the edit was accepted,
+  undoable and shown as done. PdfCraft refuses the same thing up front
+  (`OrganizeError::WouldRemoveAllPages`, `lib.rs:269-271`).
+
+**Why the outline is repaired, not just pruned**: MuPDF leaves an entry whose page went
+reading `page == -1` with its destination demoted to kind 0 — a row the sidebar draws and
+no click can follow — while entries naming survivors are already shifted. Dropping the dead
+rows is not enough, because the tree that is left can be one MuPDF refuses to write: a
+first entry deeper than level 1 (`hierarchy level of item 0 must be 1`) once the row above
+it went, and a step of two levels (`bad hierarchy level in row N`) once the row in between
+went. One clamp fixes both — no entry may sit more than one level below the entry before it
+— and levels, titles and destination points all survive the round trip through
+`set_toc(simple=False)`. The tree is rewritten only when something actually died, since
+`set_toc` writes every entry again. Links need nothing: measured, a link to a deleted page
+is gone from the file on its own.
+
+**Why `changed` exists**: `pages` for a delete is the list that went, and that is the wrong
+answer for the annotation list, the thumbnails and the panel, because every page *above* the
+cut now means a different sheet. With the deleted indices handed over as the invalidation
+set, the marks above the cut keep the page numbers they were read under — the mutation is
+caught by `test_a_deletion_restamps_the_marks_that_moved_up`, which is the only test in this
+step that watches behaviour rather than a refusal. The cost of saying nothing is a full
+re-read: **155 ms** against **49 ms** for a one-page read on the 540-page book. A cheaper
+correct answer exists — everything from the lowest named page onwards — and is left for the
+day an edit can be pointed at a page near the end of a big book and called out on it.
+
+**Files changed**: `src/pdfar/pages.py` (`DeletePages`, `contiguous_runs`),
+`src/pdfar/edits.py` (`Edit.changed`, `_Step.changed`), `src/pdfar/session.py` (the two
+places that publish the invalidation set), `tests/test_page_delete.py` (new).
+
+**Tests**: **26 new**. The pages that leave and the order the rest keep, named by the text
+each page carries rather than by a page count that could be right by luck; a page named
+twice leaving once; every refusal, each with its sentence; the runs themselves as a pure
+function, and the number of rebuilds watched on a recording document (the cost contract is
+otherwise only visible on a clock); the outline losing its dead row, keeping its levels and
+its destination points, being promoted when its head went, being lifted when a row was left
+two levels deep, and being left alone when nothing died; `scope`/`pages`/`changed`/`label`;
+the marks re-stamped; undo returning every page with its marks and its outline, redo taking
+them again; and the file on disk holding what the session holds. **Twelve mutations, all
+caught**: the lower bound of the range check dropped, an empty request allowed, a document
+emptied, nothing deduplicated (both sites at once — either one alone hides it), a run broken
+into single deletes, the runs going lowest first, the dead outline rows left, the levels
+unrepaired, the outline rewritten when nothing died, `changed` answering `pages`, the
+session asking `pages`, and the pre-check removed whole. One methodological note the sweep
+itself produced: the first pass reported a mutation *missed* that had silently edited
+`RotatePages`'s identical guard instead, which is a reminder that an anchor has to be unique
+in the file, not just in the class.
+
+**Suite**: **1112 passed, three consecutive runs** (120.6 / 120.2 / 119.8 s). Ruff unchanged
+at the 7 pre-existing errors; mypy unchanged at **551 in 16 files** — no new line joined a
+family, which is the first step of F10-4 that can say that.
+
+**Verified by eye**: `/tmp/f104e/visual.py` deletes page 2 of a ruled four-page book and
+paints the sheet before and after (`/tmp/f104e/before.png.png`, `/tmp/f104e/after.png.png`):
+PAGE 2 gone, PAGE 3 sitting at position 2 with the outline row *Same chapter* naming it and
+PAGE 4 at 3 with *Chapter two*. The same run, on a book whose level-1 row named the deleted
+page, prints the outline as `[[1, 'Same chapter', 2], [1, 'Chapter two', 3]]` — the orphan
+promoted rather than refused.
+
+**Performance**: on the 540-page book, best of three, through the session: one page out
+**77.9 ms**, a hundred-page block out **61.8 ms** (flat, as the raw measurement predicted),
+**40 scattered pages 707.7 ms** — forty runs, forty rebuilds, the honest worst case —
+**undo 3.4 ms**, the strip's `STRUCTURE` rebuild **73.4 ms**. A rotate of one page is
+**50.2 ms**, so a delete costs about a rotation and a rebuild of the page tree.
+
+**What is not here**: the surface. No menu item, no confirmation, and the reader cannot ask
+for a delete yet — which is deliberate, because the two things a delete needs and a rotation
+could do without are both UI-side and both belong to the next line: the pick has to survive
+the rebuild that removes the picked thumbnails, and a page command that destroys work needs
+to say so. Also not here: the state that is keyed to a page number *outside* the document —
+the saved bookmarks, the reading position, the page-numbering range and an XFDF sidecar
+exported before the delete — none of which the document's own undo reaches, and which are
+the reason a delete is not simply wired up today. What *is* already handled: the deleted
+page's own objects do not survive a save, because an adopted edit forces the staged writer,
+which runs `garbage=2` — measured, the page's object and its content stream are gone from
+the file F10-2's save path writes, and are exactly what an incremental save would have left
+behind.
 
 ---
 

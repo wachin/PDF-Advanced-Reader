@@ -78,9 +78,10 @@ class DocumentSession:
         # (annotation references, page handles) must rebind on the latter.
         self.generation = 0
         #: Which pages the step that produced this generation wrote to, or ``None``
-        #: when that step could not say.  A cache keyed by page can re-read just
-        #: those instead of the document, so long as it is keeping up: fall behind
-        #: by two steps and this describes only the newer one.
+        #: when that step could not say — which is what :attr:`Edit.changed` is for.
+        #: A cache keyed by page can re-read just those instead of the document, so
+        #: long as it is keeping up: fall behind by two steps and this describes
+        #: only the newer one.
         self.changed_pages: Optional[Tuple[int, ...]] = None
         self.history = EditHistory(on_release=self._release_revision)
         self.encryption = Encryption.capture(doc, self.password, authenticated)
@@ -162,7 +163,7 @@ class DocumentSession:
         self._adopt(clone)
         if staged:
             self._revision = staged
-        self.changed_pages = edit.pages
+        self.changed_pages = edit.changed
         self.history.record(edit, before)
         return self.version, edit.scope
 
@@ -188,7 +189,7 @@ class DocumentSession:
         self._adopt(clone)
         if target.before.path:
             self._revision = target.before.path
-        self.changed_pages = target.pages
+        self.changed_pages = target.changed
         if direction == "undo":
             history.take_undo(leaving)
         else:
