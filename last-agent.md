@@ -1,4 +1,6 @@
 
+20261028 21:30 qoder with Qwen3.8-Flash Model 200K ctx 
+
 20261023 21:30 qoder with Qwen3.8-Flash Model 200K ctx 
 
 20261023 09:00 qoder with DeepSeek-Flash Model 200K ctx   
