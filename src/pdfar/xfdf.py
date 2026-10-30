@@ -478,6 +478,12 @@ def export_xfdf(manager: AnnotationManager) -> str:
     open, and a path a reader cannot resolve is a worse answer than no path.  A
     form-field container is left out for the same kind of reason: an empty
     ``<fields>`` could be read as instructions to clear every field in the file.
+
+    What does go in is the document's *size*: every mark here names its page by
+    number, so a file about a six-page book read into a four-page one is not a
+    smaller exchange but a shifted one, and nothing else in the file says so.  The
+    count is a ``pdfar:`` attribute on the root, which a conforming reader treats
+    as somebody else's business and an older PDFAR never asks for.
     """
     doc = manager.doc
     anchors: Dict[int, Optional[Tuple[float, float]]] = {}
@@ -491,7 +497,8 @@ def export_xfdf(manager: AnnotationManager) -> str:
             elements.append(element)
     lines = [HEADER,
              f'<xfdf xmlns="{XFDF_NAMESPACE}" xmlns:pdfar="{PDFAR_NAMESPACE}"'
-             ' xml:space="preserve">',
+             ' xml:space="preserve"'
+             f' pdfar:pages="{int(doc.page_count)}">',
              "<annots>", *elements, "</annots>", "</xfdf>"]
     return "\n".join(lines) + "\n"
 
@@ -658,6 +665,20 @@ def _number_in(text: Optional[str]) -> Optional[float]:
     except ValueError:
         return None
     return value if math.isfinite(value) else None
+
+
+def _recorded_pages(root: ET.Element) -> Optional[int]:
+    """How many pages the writer of this file had in front of it, if it said.
+
+    ``None`` when the file says nothing — every file from another reader, and
+    every PDFAR export written before the count was kept — and ``None`` for a
+    value that could not be a page count, because a number nobody wrote, or one
+    that cannot be read, is no evidence of a disagreement to report.
+    """
+    value = _number_in(_extension(root, "pages"))
+    if value is None or value < 0 or value != int(value):
+        return None
+    return int(value)
 
 
 def _color(text: Optional[str]) -> str:
@@ -1134,6 +1155,12 @@ class ImportPlan:
 
     edits: Tuple[Edit, ...] = ()
     skipped: Tuple[Tuple[str, str], ...] = ()
+    #: The page count the file says its own document had, or ``None``.
+    written_against: Optional[int] = None
+    #: The page count the file was read against, which is the document the plan
+    #: would be applied to.  Marks name their page by number, so the two numbers
+    #: being different is the whole of what the plan cannot know.
+    document_pages: int = 0
 
     @property
     def count(self) -> int:
@@ -1143,6 +1170,28 @@ class ImportPlan:
     def edit(self) -> Edit:
         """Every mark of the file as one edit: all of it, or none of it."""
         return AddImportedMarks(marks=self.edits)
+
+    @property
+    def pages_disagree(self) -> bool:
+        """The file was written against a document of another size.
+
+        Only ever true when the file *said* a count: a mark that named a page
+        this document lacks is reported on its own, and a file that never
+        promised a size has nothing to be contradicted about.
+        """
+        return (self.written_against is not None
+                and self.written_against != self.document_pages)
+
+    def page_notice(self) -> str:
+        """What to say when :attr:`pages_disagree`."""
+        if not self.pages_disagree:
+            return ""
+        return (
+            f"This file was written against a document of "
+            f"{self.written_against} pages; this one has "
+            f"{self.document_pages} pages. Marks name their page by number, so "
+            "any that named a page this document lacks were left out, and the "
+            "rest may sit on sheets that moved.")
 
     def summary(self) -> str:
         """What the file gave, and what it did not, for the user to be told."""
@@ -1194,8 +1243,9 @@ def parse_xfdf(text: str, anchors: Sequence[Optional[Tuple[float, float]]],
         raise XfdfError("That file is not XFDF: it says otherwise in its "
                         f"namespace, “{namespace}”.")
     annots = _child(root, "annots")
+    written = _recorded_pages(root)
     if annots is None:
-        return ImportPlan()
+        return ImportPlan(written_against=written, document_pages=len(anchors))
     reader = _Reader(anchors, taken)
     edits: List[Edit] = []
     skipped: List[Tuple[str, str]] = []
@@ -1207,7 +1257,8 @@ def parse_xfdf(text: str, anchors: Sequence[Optional[Tuple[float, float]]],
             edits.append(_build(reader, element))
         except _Skip as skip:
             skipped.append((_describe(_local(element), element), str(skip)))
-    return ImportPlan(edits=tuple(edits), skipped=tuple(skipped))
+    return ImportPlan(edits=tuple(edits), skipped=tuple(skipped),
+                      written_against=written, document_pages=len(anchors))
 
 
 # ----------------------------------------------------------------------- file

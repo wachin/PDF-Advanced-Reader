@@ -1625,13 +1625,20 @@ class MainWindow(QMainWindow):
             return False
         if plan is None:
             return False
-        if plan.skipped:
+        if plan.skipped or plan.pages_disagree:
             # Every mark the file carried that did not arrive, because a comment
-            # that silently disappears is indistinguishable from one never sent.
+            # that silently disappears is indistinguishable from one never sent —
+            # and, when the two documents are different sizes, the one thing no
+            # per-mark reason can say: the marks that *did* arrive may have
+            # arrived on the wrong sheet.
             lead = f"Took {plan.summary()}" if plan.count else "Nothing was imported"
-            QMessageBox.information(self, "Import Comments",
-                                    f"{lead}.\n\nLeft out:\n"
-                                    f"{skipped_report(plan.skipped)}")
+            notice = plan.page_notice()
+            body = f"{lead}."
+            if notice:
+                body += f"\n\n{notice}"
+            if plan.skipped:
+                body += f"\n\nLeft out:\n{skipped_report(plan.skipped)}"
+            QMessageBox.information(self, "Import Comments", body)
         name = os.path.basename(path)
         self.status_left.setText(
             f"Imported {plan.summary()} from {name}" if plan.count

@@ -44,10 +44,18 @@ from test_xfdf import (SCALE, TOLERANCE, build_offset_page, draw_every_kind)
 HEIGHT = 100.0
 
 
-def envelope(*marks: str, namespaced: bool = True) -> str:
-    """A whole XFDF file holding *marks*."""
+def envelope(*marks: str, namespaced: bool = True, pages=None) -> str:
+    """A whole XFDF file holding *marks*.
+
+    *pages*, when given, is the count the file claims its document had -- written
+    the way PDFAR's own export writes it, in PDFAR's namespace on the root.  It
+    stays text rather than an int so a file can be written saying something a
+    count never would.
+    """
+    extra = "" if pages is None else f' pdfar:pages="{pages}"'
     root = (f'<xfdf xmlns="{xfdf.XFDF_NAMESPACE}" '
-            f'xmlns:pdfar="{xfdf.PDFAR_NAMESPACE}">') if namespaced else "<xfdf>"
+            f'xmlns:pdfar="{xfdf.PDFAR_NAMESPACE}"{extra}>') if namespaced \
+        else "<xfdf>"
     return ('<?xml version="1.0" encoding="UTF-8"?>\n' + root
             + "<annots>" + "".join(marks) + "</annots></xfdf>")
 

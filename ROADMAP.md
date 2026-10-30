@@ -1496,11 +1496,17 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
             path saves the clamped pair straight back — so deleting the tail of a book
             permanently narrows a range the user set.  Keep the stored range authoritative and
             clamp only where it is used.
-      - [ ] **F10-4j** — *An XFDF sidecar exported before the delete.* The sidecar is named from
+      - [x] **F10-4j** — *An XFDF sidecar exported before the delete.* The sidecar is named from
             the PDF's path, so a later export overwrites the file that holds the pre-delete
             numbering; an import of such a file into a shortened document skips the entries whose
             pages are gone and lands the rest on sheets that moved.  Record the page count an
-            export was written against and say at import what disagrees.
+            export was written against and say at import what disagrees.  The export writes
+            `pdfar:pages` on the root — PDFAR's own namespace, so a conforming reader treats it
+            as somebody else's business and an older PDFAR ignores an attribute it never asked
+            for — and the plan carries both counts, so the window can say "written against 6,
+            this has 5" beside the list of what was left out.  A file that says nothing is not
+            held to it, and the notice is never a refusal: a file about a longer book still
+            carries real comments.
       - [ ] **F10-4k** — *The strip says "here" and "picked" with one channel.*
             `QListWidget.setCurrentItem(item)` selects as well as making the row current, and the
             delegate paints only `State_Selected`, so the reader's own row is drawn as a one-page
@@ -1516,6 +1522,13 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
             F10-4h fixed the number for the tree the reader is looking at; this is the case where
             the two documents are different.  Write the position against the saved revision, or
             re-aim it through the steps that were dropped.
+      - [ ] **F10-4m** — *The export overwrites the only copy of the older numbering.*
+            F10-4j makes an old sidecar honest about itself, but the export still writes straight
+            over `name.xfdf` — the file that held the numbering the document no longer has.  After
+            a delete and a second export, the one record of where those marks used to sit is gone,
+            and with it the reader's only way to work out which sheet a mark meant.  Ask before
+            replacing a sidecar that is not ours any more (or keep the one being replaced), so the
+            exchange can be undone by the reader rather than by a history that closed with the tab.
 - [ ] The search-results dock keeps each hit's 0-based page in `UserRole` and is cleared only by
       a new search or a tab change, while the view's own hit list *is* cleared by
       `Scope.STRUCTURE` — so after a delete the dock still offers pages that have moved, out of
@@ -1687,10 +1700,14 @@ the position written to `viewState/<path>` is right because the view is (F10-4h)
 reader owns outside the document now stays theirs rather than the open book's: the panel's two boxes
 still stop at the page count in front of them, and the range the copy is stamped with — and saved
 back to the global store — is the pair the reader asked for, clamped where it is used and not where
-it is remembered (F10-4i). Next in order: the XFDF sidecar exported before a
-delete (F10-4j), and the two the reading-position step found behind it — the strip's one channel for
-"here" and "picked" (F10-4k) and the saved position written against a tree the file may not have
-(F10-4l).
+it is remembered (F10-4i). The exchange that travels beside the document now says
+which edition of the document it describes: an export records the page count it was
+written against in PDFAR's own namespace on the XFDF root, and an import that disagrees
+with the book in hand says so beside the marks it could not take — a notice, never a
+refusal, and silence for a file that says nothing because every other reader's file
+says nothing (F10-4j). Next in order: the strip's one channel for "here" and "picked"
+(F10-4k), the saved position written against a tree the file may not have (F10-4l), and
+the sidecar the next export overwrites (F10-4m).
 
 Goal:
 
@@ -5391,6 +5408,116 @@ could move, and it does not register.
 file that holds a pre-delete numbering (**F10-4j**); the strip saying "here" and "picked" through one
 channel (**F10-4k**); `viewState/<path>` written against a tree the file may never have
 (**F10-4l**); the search dock's hit pages; and `MainWindow._delete_pages`'s duplicate shift.
+
+---
+
+### F10-4j A comments file says which edition of the document it was written for — [x] Implemented
+
+**What landed.** The file now carries the one fact about itself that no mark inside it can state:
+how big the document was when it was written.
+
+* `export_xfdf` puts `pdfar:pages="<count>"` on the root element (`xfdf.py:501`), beside the two
+  declarations it already wrote. It is the document's page count, not the number of marks — a file
+  of three comments written about a six-page book says six — and it is written for a book with
+  nothing on it too, because an empty exchange still names pages and still has to be able to say
+  what it was empty *about*.
+* It travels in PDFAR's own namespace (`urn:pdfar:xfdf:1`, `xfdf.py:83`), which is the channel the
+  per-mark extensions already use for `scale`, `unit`, `precision` and `measure`. A conforming XFDF
+  reader treats an attribute in a namespace it does not know as somebody else's business, and a
+  PDFAR from before this step never asks for it, so the file is no less readable for the sentence
+  added to it. This is the first of PDFAR's extensions to sit on the root rather than on a mark: a
+  mark's scale belongs to the mark, and a document's size belongs to the document.
+* `_recorded_pages` reads it back (`xfdf.py:670`) through `_extension`, so an unprefixed `pages` —
+  some other vendor's attribute — is not a page count, and returns `None` for anything that could
+  not be one: `many`, `-2`, `3.5`, `1e2.5`, the empty string, whitespace. A number nobody wrote, or
+  one that cannot be read, is no evidence of a disagreement, and `0` is the one value that *is* a
+  claim a document of any size at all can contradict.
+* `ImportPlan` carries both counts (`xfdf.py:1159`, `xfdf.py:1163`), and the pair answers the
+  question the window cannot ask on its own: `pages_disagree` (`xfdf.py:1175`) is true only when the
+  file *said* a count and it is not this document's count, and `page_notice()` (`xfdf.py:1185`) is
+  the sentence for it — empty, always, when there is nothing to disagree about. `parse_xfdf` works
+  the claimed count out once, before it looks at any mark, and hands both numbers on both of its
+  returns, including the one for a file with no `<annots>` at all.
+* `MainWindow._import_tab_comments` raises its box on `plan.skipped or plan.pages_disagree`
+  (`main.py:1628`) and puts the notice *above* the list of marks left out, because the list answers
+  "what did not come" and the notice answers the larger question of what did: the marks that
+  arrived may have arrived on the wrong sheet. With no notice the text is byte for byte what this
+  command said before, so the older tests never noticed the change.
+
+**Why a notice and not a refusal.** A file written about a six-page book, read into a five-page one,
+still carries five real comments. Refusing the file would throw away somebody's annotations over a
+numbering question the reader can judge far better than the code can — they are the one who knows
+whether this is the same report with a sheet taken out, or a different report entirely. What the
+reader cannot judge is what they are not told, and until now nothing was: a mark that lands on the
+sheet its number reaches looks exactly like a mark that was always meant to be there. So the import
+proceeds and says what it cannot know.
+
+**Why silence for a file that says nothing** is the same rule from the other side. Acrobat, Okular
+and every PDFAR export before this step write no count, and an absent attribute is not a claim that
+turns out to be wrong — it is the absence of a claim. A reader who imports a foreign file into a
+document of another size gets the box they got before, listing the marks whose pages were gone, and
+no warning about a number the file never stated.
+
+**Tests**: 28 in `tests/test_xfdf_page_count.py`. The export side: the count is the document and not
+the marks, a one-page document says `1` rather than nothing, an empty document still says what it
+held, the export stays a pure function of the document, and a file the export wrote imports without
+a word. The read side: a longer book and a shorter book are both contradicted, a matching book and a
+foreign file are both silent, seven junk counts are no evidence (`many`, `-2`, `3.5`, ``, `  `,
+`0x4`, `1e2.5`), an unprefixed `pages` is another vendor's business, `pages="0"` is a claim, and the
+disagreement is still said when *nothing* was skipped — the case where every mark arrived and the
+only thing wrong is where they landed. The window side: the box for a disagreement alone, silence
+when the counts match or the file is foreign, one box with the notice ahead of `Left out:`, and a
+notice when nothing at all was imported. Two end-to-end runs in the real window carry the story: a
+sidecar written before a delete, imported after it, and the same file imported into a copy of the
+book it was written for.
+
+**Mutations**: 17 of the new guards, **all caught**. Two of them are worth the telling. The sweep
+stops at the first failure (`-x`), so the test it prints is the first in file order rather than the
+only one: reading the claimed count off the `<annots>` element instead of the root — where the
+attribute is not — fails **11** of the 28, because a file that said a number is then read as saying
+nothing. And the two mutations that *invent* a count where the file stated none (`written =
+_recorded_pages(root) or len(anchors)`, and dropping the `is not None` half of `pages_disagree`) are
+both killed by `test_a_file_from_another_reader_says_nothing_about_pages` — a silence test, not a
+disagreement one. That is the only shape that can pin an absence: no assertion about what is said
+can catch a warning that should not have been raised.
+
+**Suite**: **1238 passed, three consecutive runs** (164.9 / 146.6 / 138.9 s). Ruff unchanged at the
+7 pre-existing errors; mypy unchanged at **553 in 16 files**.
+
+**Verified by eye**: `/tmp/f104j/visual.py` drives the real window over a six-page report whose
+sheets print their own names (`SHEET 1` … `SHEET 6`), one note on each, exported — the root comes
+back `<xfdf xmlns="…" xmlns:pdfar="…" xml:space="preserve" pdfar:pages="6">` — and imported into a
+copy with the third sheet taken out. The box says it in one paragraph
+(`/tmp/f104j/box-1.png`):
+
+> Took 5 marks, 1 not taken.
+>
+> This file was written against a document of 6 pages; this one has 5 pages. Marks name their page by
+> number, so any that named a page this document lacks were left out, and the rest may sit on sheets
+> that moved.
+>
+> Left out:
+> • text on page 6: names a page this document does not have
+
+and the strip behind it shows where they came to rest: the notes for sheets 3, 4 and 5 now stand on
+the sheets that moved up into their numbers, `SHEET 4` carrying *a note about SHEET 3*
+(`/tmp/f104j/3-after-import.png`). The same file imported into a copy of the six-page book raises no
+box at all (`/tmp/f104j/4-matching-book.png`).
+
+**Performance**: none, measured rather than asserted. The export adds one attribute to a line it
+already wrote and the parse reads one attribute from a root it already parsed — per *file*, not per
+mark, which is the only reason the round trip does not slow down with the document. On a 540-page
+book carrying 540 notes, before and after, in warm passes: `export_xfdf` **124.6–136.2 ms** against
+**124.0–125.4 ms**; `parse_xfdf` **11.97–12.17 ms** against **12.04–13.08 ms**; the whole round trip
+**136.4–137.1 ms** against **136.9–137.3 ms**; and a foreign file with the namespace stripped
+**12.03–12.42 ms** against **12.15–13.70 ms**, which is the same read with the lookup missing. Every
+spread overlaps the other; the export's minimum is 119.5 ms after against 121.1 ms before.
+
+**What is not here**: the export still writes straight over `name.xfdf`, so the second export after a
+delete destroys the only record of the numbering the first one used (**F10-4m**); the strip saying
+"here" and "picked" through one channel (**F10-4k**); `viewState/<path>` written against a tree the
+file may never have (**F10-4l**); the search dock's hit pages; and `MainWindow._delete_pages`'s
+duplicate shift.
 
 ---
 
