@@ -57,7 +57,8 @@ from .sidebar import (
 )
 from .tabs import DocumentTab
 from .viewer import PDFView, MEMORY_LEVELS, VIEW_MODE_LABELS
-from .xfdf import (XfdfError, comments_file_for, export_xfdf, load_xfdf)
+from .xfdf import (XfdfError, comments_file_for, export_xfdf, keep_previous_sidecar,
+                   load_xfdf)
 
 ZOOM_STEP_PRESETS = (0.025, 0.05, 0.075, 0.10, 0.125,
                      0.15, 0.175, 0.20, 0.225, 0.25)
@@ -1565,6 +1566,13 @@ class MainWindow(QMainWindow):
         document with nothing on it still writes a valid, empty exchange — the
         other reader is told there was nothing to send rather than left wondering
         why no file appeared.
+
+        What is there already is kept first when it describes a document of
+        another size, because that file is the only record of what the numbers in
+        it meant (:func:`pdfar.xfdf.keep_previous_sidecar`, F10-4m), and the write
+        would otherwise be the second harm: the marks shifted under the reader's
+        own export, and the numbering that could explain them went with the bytes.
+        A keep that cannot be made stops the export instead of being skipped.
         """
         path, _ = QFileDialog.getSaveFileName(
             self, "Export Comments", comments_file_for(tab.doc_path),
@@ -1573,7 +1581,17 @@ class MainWindow(QMainWindow):
             return False
         if not path.lower().endswith(".xfdf"):
             path += ".xfdf"
-        text = export_xfdf(tab.view.annotation_manager)
+        manager = tab.view.annotation_manager
+        text = export_xfdf(manager)
+        try:
+            kept = keep_previous_sidecar(path, int(manager.doc.page_count))
+        except OSError as exc:
+            QMessageBox.critical(
+                self, "Export Comments",
+                "The comments file that is there describes a document of another "
+                "size, and it could not be kept, so nothing was written:\n"
+                f"{exc}")
+            return False
         try:
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(text)
@@ -1581,7 +1599,15 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Export Comments",
                                  f"Could not write the comments file:\n{exc}")
             return False
-        self.status_left.setText(f"Comments exported to {path}")
+        if kept is None:
+            self.status_left.setText(f"Comments exported to {path}")
+        else:
+            copy, claim = kept
+            was = (f"written against {claim} pages" if claim is not None
+                   else "whose numbering is not this document's")
+            self.status_left.setText(
+                f"Comments exported to {path}; the file that was there, "
+                f"{was}, is kept as {os.path.basename(copy)}")
         return True
 
     def _import_comments(self) -> None:

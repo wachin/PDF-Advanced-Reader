@@ -424,14 +424,15 @@ def test_a_sidecar_written_before_a_delete_says_what_it_cannot_know(
 
 def test_the_export_after_a_delete_is_the_cure_and_the_loss(
         win, monkeypatch, tmp_path, seen):
-    """Re-exporting makes the notice go away, by destroying the file that had it.
+    """Re-exporting makes the notice go away, and keeps what made it.
 
     The sidecar keeps the document's name, not its edition, so the second write
     below replaces a six-page numbering with a four-page one and the import that
-    follows is silent -- which is the right answer for the file that exists now,
-    and the loss of the one that used to.  Stopping that needs a question in
-    front of the overwrite, which is F10-4m; what this step settles is that the
-    file that survives says how many pages it was written against.
+    follows is silent -- which is the right answer for the file that exists now.
+    The older record is no longer lost with it: F10-4m copies a sidecar that does
+    not describe this document aside before overwriting it, and the assertions
+    under the seam below are what that leaves behind.  What this step settled is
+    that the file that survives says how many pages it was written against.
     """
     long_book = str(build_sample_pdf(tmp_path / "report.pdf", pages=6))
     assert win.open_document(long_book)
@@ -454,6 +455,12 @@ def test_the_export_after_a_delete_is_the_cure_and_the_loss(
         written = handle.read()
     assert 'pdfar:pages="4"' in written, written
     assert 'pdfar:pages="6"' not in written, written
+
+    # ...and the numbering that went is readable beside it, whole.
+    with open(str(tmp_path / "report.previous.xfdf"), encoding="utf-8") as handle:
+        older = handle.read()
+    assert 'pdfar:pages="6"' in older, older
+    assert "note 1" in older, older
 
     # Opened again from disk: the mark the file describes was never saved, so
     # this document is empty and the sidecar that fits it says nothing.

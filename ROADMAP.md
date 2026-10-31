@@ -1529,13 +1529,20 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
             since the save and forward through the ones an undo parked.  A close writes that
             answer, and writes nothing at all when the walk cannot finish; a tab switch keeps the
             live view on the tab, which is who reads it back.
-      - [ ] **F10-4m** — *The export overwrites the only copy of the older numbering.*
+      - [x] **F10-4m** — *The export overwrites the only copy of the older numbering.*
             F10-4j makes an old sidecar honest about itself, but the export still writes straight
             over `name.xfdf` — the file that held the numbering the document no longer has.  After
             a delete and a second export, the one record of where those marks used to sit is gone,
             and with it the reader's only way to work out which sheet a mark meant.  Ask before
             replacing a sidecar that is not ours any more (or keep the one being replaced), so the
             exchange can be undone by the reader rather than by a history that closed with the tab.
+            **Landed**: the export asks the file that is there what it was written against, and
+            keeps a copy beside it before writing over anything that does not answer with this
+            document's own count — a different count, no count, a file that is not XFDF, a file
+            PDFAR will not read.  The keep is a file in the folder the reader already chose, named
+            `name.previous.xfdf` and stepped past a name already taken; the status line says which
+            numbering went into it; and a copy that cannot be made stops the export, because the
+            alternative is a numbering lost with no record that it was ever there.
 - [ ] The search-results dock keeps each hit's 0-based page in `UserRole` and is cleared only by
       a new search or a tab change, while the view's own hit list *is* cleared by
       `Scope.STRUCTURE` — so after a delete the dock still offers pages that have moved, out of
@@ -1717,8 +1724,11 @@ two channels: a frame the delegate paints from item data, and a selection the
 reader alone makes — so a marking cannot edit a pick, and a pick that has lost
 every sheet it named answers as the nothing it is (F10-4k). The stored reading
 position now names a sheet the *file* has, walked back through the steps the
-session took after the save (F10-4l). Next in order: the sidecar the next export
-overwrites (F10-4m).
+session took after the save (F10-4l). And the export no longer eats the record of
+the numbering it replaces: a sidecar already at the target that does not describe
+this document is copied to ``name.previous.xfdf`` first, and an export that cannot
+make that copy does not write at all (F10-4m). Next in order: the search dock's
+hit pages, which are still live numbers written to disk.
 
 Goal:
 
@@ -5720,6 +5730,107 @@ dominates is reopening documents, and six tab opens measured **489 ms** either w
 outline jumps take their pages from the loaded document the same way; and
 `MainWindow._delete_pages` still works its own copy of the page shift instead of asking the
 history.
+
+### F10-4m The export keeps the numbering it is about to replace — [x] Implemented
+
+**What landed.** `name.xfdf` is both the file the next import reads and the file the last export
+truncated, so the second export after a delete destroyed the one record of what the numbers in the
+first one had meant. The write now asks the file that is there what it was written against, and
+keeps a copy of anything that does not answer with this document's own count.
+
+* `pages_written_against(path)` (`xfdf.py:1312`) is that question, asked of the disk: the same
+  `pdfar:pages` claim `parse_xfdf` reads on the way in, taken without building a plan out of every
+  mark in the file. It needs the root and nothing else, so the rule that decides what counts as
+  XFDF — the bounds, the parse, the element's name and namespace — moved out of `parse_xfdf` into
+  `_root_element` (`xfdf.py:1217`), which both now share. Two copies of that rule would drift, and
+  the drift would be a file one path calls XFDF and the other refuses.
+* `keep_previous_sidecar(path, pages)` (`xfdf.py:1347`) answers `(kept copy, the count it claimed)`
+  or `None`. It is called between the name the chooser handed back and the write that truncates it
+  (`main.py:1587`), so the record is safe before anything is destroyed.
+* `previous_comments_file(path)` (`xfdf.py:1328`) names the copy `name.previous.xfdf` beside the
+  file being replaced, stepping to `-2`, `-3` past a name already taken (`xfdf.py:1341`). Beside
+  the target rather than beside the document, because that is the folder the reader pointed at; and
+  stepped past rather than reused, because overwriting one record to save another is the loss this
+  exists to stop. The revision store's private directory was the other candidate and is the wrong
+  one: it is released when the tab closes, and a numbering that survives only as long as the
+  session is a numbering the reader cannot go back to.
+* The equality test is `written == pages` (`xfdf.py:1375`) — the count the export is about to write
+  — and an unknown claim fails towards keeping: no count at all (`xfdf.py:1371-1374`, another
+  reader's file or a PDFAR export from before F10-4j), a claim that is not a number, a file that is
+  not XFDF, a file PDFAR will not read. Absent evidence is not agreement: a mark names a page by
+  number, and a file that never said how many numbers there were does not say which sheet it was.
+* A copy that cannot be made stops the export (`main.py:1588-1594`) with the reason in the box, and
+  the file that was there is left byte-for-byte alone. A half copy is deleted on the way out
+  (`xfdf.py:1380-1385`): a truncated file wears the name of a kept one, and the reader would trust
+  it.
+* The status line says what went where (`main.py:1602-1610`) — *the file that was there, written
+  against 6 pages, is kept as report.previous.xfdf* — because a keep nobody mentions is a file the
+  reader finds by accident.
+
+**Why keep rather than ask.** The roadmap allowed either, and asking is the weaker of the two here.
+The native save dialog already asks "replace?" for every overwrite and cannot be told anything
+about what is inside the file, so a second question would be asked by someone who cannot say
+whether the answer matters; and an answer given to a prompt that cannot distinguish ours from
+somebody else's is not the reader's decision, it is a coin toss with a button on it. Keeping asks
+the same question with the evidence: it costs one file in the folder the reader is already looking
+at, it is silent in the ordinary case — re-exporting the same book writes the same numbering and
+keeps nothing — and it cannot be dismissed wrong by reflex.
+
+**The lie it ends.** `test_the_export_after_a_delete_is_the_cure_and_the_loss`
+(`tests/test_xfdf_page_count.py:425`) was written to *record* the destruction: it asserted that the
+six-page claim vanished from `report.xfdf` and deferred the remedy to this step by name. It now
+asserts both halves — the file standing at the target describes four pages, and
+`report.previous.xfdf` still describes six and still carries the note that was on them.
+
+**Tests**: 23 in `tests/test_previous_sidecar.py`. The claim: a file that says a number, one that
+says nothing, one that is refused rather than guessed at. The keep: a missing target is nothing to
+keep, ours is not copied, an older numbering is copied whole and the copy still says what it was
+written against; five kinds of unknown — no claim, a claim that is not a count, an envelope without
+the namespace, XML that is not XFDF, bytes that are not text — all fail towards keeping; a file too
+large to read is kept on the byte count rather than the parse; two keeps do not share a name; the
+copy lands beside the target; a copy that fails halfway leaves nothing behind. Through the window:
+the first export keeps nothing, a re-export of the same document keeps nothing, an export over
+another numbering keeps it and says so, a foreign sidecar is kept before it is replaced, and a keep
+that cannot be made returns `False` with the target untouched — then the kept copy, imported back
+into the six-page book it was written for, lands all six notes with no disagreement reported, which
+is the whole point in one test.
+
+**Mutations**: 14 of the new guards, **all 14 caught** — never keeping, keeping nothing for a file
+that cannot be read (counted as ours) or for one with no claim, treating a missing target as a file
+to keep, reusing the first kept name, numbering the keeps from the wrong place, moving instead of
+copying, leaving a half copy, copying without reporting, accepting any root element as XFDF, writing
+before the keep, asking about the wrong document, ignoring a failed keep, and dropping the keep
+from the status line.
+
+**Suite**: **1306 passed, three consecutive runs** (144.1 / 144.2 / 145.5 s). Ruff unchanged at the
+7 pre-existing errors; mypy unchanged at **553 in 16 files**.
+
+**Verified by eye**: `/tmp/f104m/verify.py` and `/tmp/f104m/pictures.py` drive the real window over
+a six-sheet book. Six notes, export (`pdfar:pages="6"`, no `.previous` file, plain status line);
+one sheet taken out, export again — the target now claims 5, `report.previous.xfdf` claims 6 and
+holds all six notes, and the status bar reads *"Comments exported to …/report.xfdf; the file that
+was there, written against 6 pages, is kept as report.previous.xfdf"*
+(`/tmp/f104m/pics/1-kept.png`); a third export changes nothing in the folder. The kept copy then
+goes back into the six-page book through the import command: six marks on pages 0 to 5, and no
+notice, because the numbering in the file and the numbering of the book agree again
+(`/tmp/f104m/pics/2-restored.png`). With the copy refused, the export returns `False`, names the
+reason, and the target reads byte-for-byte as it did.
+
+**Performance**: the keep is one parse of the file being replaced plus a copy, paid only when
+something already sits at the target. On the six-sheet book: **11.0 ms** for the first export,
+**2.3 ms** for the one that kept, **1.1 ms** for a re-export that kept nothing. On a 4000-mark,
+0.20 MB sidecar: **11.7 ms** to read its claim and **10.6 ms** for the keep and its copy together
+(the copy alone is **0.24 ms**), against **0.11 ms** for the write that followed and **10.7 ms** for
+a keep that decided to copy nothing — the read is the cost, bounded by the same `MAX_INPUT_CHARS`
+an import is bounded by. On a document of any real size the marks dominate: building the text for
+200 pages of them is tens of milliseconds before this step touched anything.
+
+**What is not here**: a sidecar whose claim matches a document whose tree moved anyway — two pages
+out, two pages in — is still ours by the only test the file offers, and the epoch and depth from
+F10-4l, which do know that case, are not written into the sidecar; the search dock's hit pages and
+the bookmarks are still live numbers written to disk; a kept copy is never cleaned up, so a reader
+who exports over many editions accumulates `.previous-N`; and `MainWindow._delete_pages` still
+works its own copy of the page shift.
 
 ---
 

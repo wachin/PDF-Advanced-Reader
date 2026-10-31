@@ -49,6 +49,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import shutil
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -1213,6 +1214,28 @@ def page_anchors(doc: fitz.Document) -> List[Optional[Tuple[float, float]]]:
     return [_anchor(doc, index, cache) for index in range(doc.page_count)]
 
 
+def _root_element(text: str) -> ET.Element:
+    """The ``xfdf`` root of *text*, or the reason it has none.
+
+    The whole of what makes a file XFDF — the bounds, the parse, the element's
+    own name and namespace — and nothing of what is inside it, which is the part
+    a reader that only wants to know what the file *says* about its document has
+    no business walking.
+    """
+    _guard(text)
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as exc:
+        raise XfdfError(f"That file is not XML PDFAR can read: {exc}") from exc
+    if _local(root) != "xfdf":
+        raise XfdfError("That file has no xfdf element, so it is not XFDF.")
+    namespace = _namespace(root.tag)
+    if namespace and namespace != XFDF_NAMESPACE:
+        raise XfdfError("That file is not XFDF: it says otherwise in its "
+                        f"namespace, “{namespace}”.")
+    return root
+
+
 def parse_xfdf(text: str, anchors: Sequence[Optional[Tuple[float, float]]],
                taken: Iterable[str] = ()) -> ImportPlan:
     """An XFDF file as the edits that would put its marks on the page.
@@ -1231,17 +1254,7 @@ def parse_xfdf(text: str, anchors: Sequence[Optional[Tuple[float, float]]],
     byte.  Marks the file repeats, or names a mark the document already has, are
     left out too, so an import twice is the import once.
     """
-    _guard(text)
-    try:
-        root = ET.fromstring(text)
-    except ET.ParseError as exc:
-        raise XfdfError(f"That file is not XML PDFAR can read: {exc}") from exc
-    if _local(root) != "xfdf":
-        raise XfdfError("That file has no xfdf element, so it is not XFDF.")
-    namespace = _namespace(root.tag)
-    if namespace and namespace != XFDF_NAMESPACE:
-        raise XfdfError("That file is not XFDF: it says otherwise in its "
-                        f"namespace, “{namespace}”.")
+    root = _root_element(text)
     annots = _child(root, "annots")
     written = _recorded_pages(root)
     if annots is None:
@@ -1293,3 +1306,81 @@ def load_xfdf(path: str) -> str:
         raise XfdfError("That file is not text PDFAR can read.") from exc
     except OSError as exc:
         raise XfdfError(f"Could not read that file:\n{exc}") from exc
+
+
+# ------------------------------------------------------- the file being replaced
+def pages_written_against(path: str) -> Optional[int]:
+    """How many pages the comments file at *path* says its document had.
+
+    The same evidence :func:`parse_xfdf` reads on the way in, taken off the disk
+    on its own: :class:`XfdfError` for a file that is not XFDF or not text, and
+    ``None`` for one that is XFDF and says nothing — another reader's export, or
+    a PDFAR file from before the count was kept.  A mark-by-mark plan is not
+    wanted here, and building one would read a file to ask it one question.
+    """
+    return _recorded_pages(_root_element(load_xfdf(path)))
+
+
+#: The name a kept sidecar takes: ``name.previous.xfdf``, then ``-2``, ``-3``.
+PREVIOUS_INFIX = ".previous"
+
+
+def previous_comments_file(path: str) -> str:
+    """A name beside *path* for the copy of what is being replaced.
+
+    The reader looks for a lost comments file where the file they lost used to
+    be, so it is kept in that folder and named from that stem rather than parked
+    in private storage a session drops when the tab closes.  A name already taken
+    is stepped past: the copy being kept now is worth the same as the one kept
+    before it, and overwriting one record to save another is the loss all this
+    exists to stop.
+    """
+    base, _ = os.path.splitext(path)
+    candidate = f"{base}{PREVIOUS_INFIX}.xfdf"
+    step = 2
+    while os.path.exists(candidate):
+        candidate = f"{base}{PREVIOUS_INFIX}-{step}.xfdf"
+        step += 1
+    return candidate
+
+
+def keep_previous_sidecar(path: str,
+                          pages: int) -> Optional[Tuple[str, Optional[int]]]:
+    """Copy *path* aside when it does not describe a document of *pages*.
+
+    Called between the name the chooser handed back and the write that truncates
+    it.  Returns ``(kept copy, the count it claimed)`` when something was kept,
+    and ``None`` when nothing was there or what was there is the numbering this
+    export is about to repeat — re-exporting the same book is the ordinary case,
+    and a file behind it every time would train the reader to ignore the one that
+    matters.
+
+    The claim is the whole test, and an unknown claim fails towards keeping: a
+    file with no count, a file that is not XFDF, a file PDFAR will not read.  That
+    is not suspicion of other readers' work but the arithmetic of it — a mark
+    names a page by number, and nothing in a file that never said how many numbers
+    there were says which sheet that was.
+
+    :class:`OSError` from the copy means the caller must not write.  A folder that
+    will not take the copy is a folder whose file would have been destroyed for
+    nothing, and the reader deserves to hear about a missing numbering from an
+    error rather than from the absence of a file they meant to keep.
+    """
+    if not os.path.isfile(path):
+        return None
+    try:
+        written = pages_written_against(path)
+    except XfdfError:
+        written = None          # Nothing here can say the numbering is this one.
+    if written == pages:
+        return None
+    target = previous_comments_file(path)
+    try:
+        shutil.copyfile(path, target)
+    except OSError:
+        try:
+            os.remove(target)   # Half a copy is a file that lies about its age.
+        except OSError:
+            pass
+        raise
+    return target, written
