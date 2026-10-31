@@ -1560,8 +1560,8 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       they always did, one map is spent once by its identity, and when the cut takes the
       reader's current match the notice goes blank instead of counting matches the reader is
       not on.
-- [ ] Extract, duplicate, move, reverse — the same runs against the same pick, and for a
-      move the inherited-attribute push-down below
+- [ ] Extract, duplicate, move, reverse — the same runs against the same pick, each
+      settling the page tree with F10-4o first
 - [ ] The **assemble** permission asked before a page-tree edit, as PdfCraft gates
       `DeletePages` / `MovePages` / `RotatePages` on the document's `/P` flags: PDFAR keeps
       a file's permissions through a save and never consults them at edit time, so a
@@ -1569,8 +1569,36 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
 - [ ] Insert blank page
 - [ ] Split, merge/combine
 - [ ] Page boxes (crop)
-- [ ] Inherited page-tree attributes (`/Resources`, `/MediaBox`, `/CropBox`,
-      `/Rotate`) pushed down and the tree flattened before any reorder
+- [x] **F10-4o** — *Inherited page-tree attributes (`/Resources`, `/MediaBox`,
+      `/CropBox`, `/Rotate`) pushed down onto every page before any reorder.*
+      A `/Page` does not have to state how big it is or how far it is turned: those
+      four keys are **inheritable**, so a producer writes them once on the `/Pages`
+      node above five hundred sheets.  MuPDF resolves the chain every time it draws
+      one, which makes the reference a page hangs from the place the page gets its
+      geometry from — and a reorder splices that reference into another node's
+      `/Kids`.  Measured: moving a cropped sheet to the front of the fixture made it
+      400×300 with the other ancestor's turn, and moving a turned sheet to the back
+      took its turn away and cropped it, with nothing raised and no word moved.
+      **Landed**: `SettlePageTree` in `pages.py` — every page is handed, in its own
+      dictionary, the `/MediaBox`, `/CropBox` and `/Rotate` it was resolving, read up
+      the page's own `/Parent` links the way the renderer resolves them (nearest node
+      first, and the standard's default pinned where the whole chain states nothing),
+      and **the tree left exactly where the producer put it**.  The library's
+      own push-down was measured and rejected: `Document.select` builds a sub-PDF and
+      its catalog comes back without `/Metadata` (on every one of the five documents
+      tried), `/PageLabels`, `/Lang`, `/AcroForm`, `/OpenAction`, `/Info`,
+      `/PageMode`, `/Threads`, `/MarkInfo`, `/ViewerPreferences` or `/OutputIntents`
+      — and without `/Outlines` on two of the four licensed papers — damage that
+      survives the save.  A page that states its own geometry no
+      longer cares what node it hangs from, so the rebuild bought nothing.
+      `/Resources` is refused by name on an *intermediate* node rather than copied,
+      because it inherits per sub-dictionary and a page cannot be handed a faithful
+      copy of one; a tree holding a `/Group`, a `/Kids` entry that is not a page, a
+      page list that cannot be counted or a chain that loops — down through `/Kids`
+      or up through `/Parent` — is refused whole.  It rewrites nothing when the
+      document already states everything, which is the ordinary case.  Nothing
+      reorders pages yet, so this is the step that the extract/duplicate/move/reverse
+      item above has to call first; see `### F10-4o`.
 - [ ] Cross-document copy that rewires parents, destinations and fields, and
       drops links whose target was not copied
 - [ ] Metadata and outline preserved; outline entries pointing at deleted pages
@@ -1744,9 +1772,30 @@ make that copy does not write at all (F10-4m). The last number a reader holds
 outside the document is the one in front of each search result: a step that only
 re-counted the sheets carries every surviving match to the number its own sheet
 wears now — the view re-aims, the dock is told, and a row whose sheet left the book
-is taken out rather than handed to the neighbour that took its number (F10-4n).
+is taken out rather than handed to the neighbour that took its number (F10-4n).  The
+first thing a reorder needs is not a carry but a document whose pages state their own
+geometry: a `/Page` that inherits its box or its turn from the node above it changes
+shape silently the moment it is spliced under a different one — measured on a
+three-sheet book with two ancestors, one turned and one cropped, where moving the
+cropped sheet to the front redrew it 400×300 and moving the turned sheet to the back
+took its turn away, with no command raised and no word moved.  So `SettlePageTree`
+hands each page, in its own dictionary, the `/MediaBox`, `/CropBox` and `/Rotate` it
+was resolving — read up the page's own `/Parent` links, because that is the walk the
+renderer takes and a book whose `/Kids` were rewritten without them is drawn by
+`/Parent`, not by the tree — nearest node first, and the standard's default pinned
+where the whole chain states nothing, because a page that resolves to `0` is exactly
+as exposed to a new ancestor that says `90` as one that was being shown `90`.  The
+tree is left where the producer put it: `Document.select`, the library's own
+push-down, was measured and rejected because it builds a sub-PDF whose catalog no
+longer names the numbering, the properties, the form or the outline it was given, and
+that loss survives the save.
+Once every page states its own geometry the node it hangs from stops mattering, so the
+rebuild would be a cost with nothing to buy — and an ancestor holding a `/Group` or a
+`/Resources`, which a page cannot be handed a faithful copy of, is refused by name
+rather than flattened into a change of appearance (F10-4o).
 Next in order: extract, duplicate, move and reverse, which run the same carry
-against the same pick — and for a move, the inherited-attribute push-down.
+against the same pick — and each of which settles the tree with F10-4o's step
+before it touches a page reference.
 
 Goal:
 
@@ -5962,6 +6011,183 @@ rows will feel the **12 ms** per cut; `followed`'s linear scan is the reason the
 milliseconds rather than microseconds, and a single-pass inverse belongs on `Renumbering` itself,
 where it would serve F10-4g, F10-4h and F10-4l too — a step of its own rather than part of this one;
 and extract, duplicate, move and reverse will run this same carry against the same pick.
+
+### F10-4o Every page states its own geometry before anything moves it — [x] Implemented
+
+**What landed.** `SettlePageTree` in `src/pdfar/pages.py`: the step every reorder has to
+run first, because a page that inherits how big it is has its geometry stored in *where it
+hangs*, and a reorder is exactly the thing that changes where it hangs. Measured on a
+three-sheet book with two intermediate `/Pages` nodes — one stating the box and a
+`/Rotate 90`, one stating the box and a crop:
+
+```
+move the cropped page to the front:  260x360 → 400x300, its crop gone
+move the turned page to the back:    400x300 → 260x360, its turn gone
+```
+
+nothing raised, `page_count` unchanged, no word moved. Every page number F10-4g through 4n
+spent making honest would still have been honest while the sheet in front of the reader
+changed shape under them.
+
+* `INHERITABLE_KEYS` / `PUSHABLE_KEYS` / `TREE_KEYS` (`pages.py:223-229`) put ISO 32000-1
+  Table 30 in the file: four keys may be left to an ancestor, three of them are a value a
+  page can hold for itself, and the fourth is a dictionary.
+* `_pages_root` (`pages.py:232`) reads the tree's root off the catalog and refuses a
+  document whose `Pages` entry is not a reference.
+* `_stated` (`pages.py:242`) is the one question the whole step asks, in the one spelling
+  MuPDF and the standard both agree on: an absent key and an explicit `null` both read as
+  "not stated here, ask above".
+* `_walk_tree` (`pages.py:252`) decides **which objects the document counts as pages**, in
+  tree order: a node that names itself is a refusal, a `/Kids` entry that resolves to no
+  dictionary is a refusal, an empty node is a refusal, and a sheet listed twice is a
+  document (`copy_page` puts the *same* object in two slots, so four pages hang off three
+  objects and the count still agrees).
+* `_parent_chain` (`pages.py:299`) decides **what each of those pages was being shown**.
+* `apply` (`pages.py:420`) runs in the order that makes a refusal mean something: count the
+  tree, read the chains, refuse every node that holds a key a page cannot hold for itself
+  or a `/Resources`, then write. Nothing is written before every check has passed, so a
+  refusal leaves the session where it was — `not doc.is_dirty` is the proof, and a test
+  takes it.
+
+**Why the page's own `/Parent` and not the tree.** MuPDF resolves an inherited attribute by
+walking `/Parent`, not by walking down from the root, and the two are the same document only
+while somebody kept them consistent. Building a 540-sheet book whose `/Kids` were rewritten
+under it without touching the pages' `/Parent` made the difference visible: every sheet sat
+below a node stating `/MediaBox [0 0 595 842] /Rotate 90` and drew **612×792, upright**,
+because the node `/Parent` named — the root — states neither. The first version of this step
+copied the *tree's* values onto those pages and gave every one of them a box and a turn it
+had never been drawn with: a settle that itself needed settling. Found by measurement, not by
+a test, and `test_a_page_the_two_walks_disagree_about_keeps_what_it_renders` is what keeps it
+found. The tree walk still owns the question the reorder is about — which objects are the
+pages, and how many — and the writes follow `/Parent`.
+
+**Why not `Document.select`.** It is the obvious way to ask MuPDF for a push-down, it does
+the push-down correctly, and it is nine times faster: **47.2 ms** on the 540-sheet inherited
+book against this step's **441 ms**. What it costs is the rest of the document. `select`
+builds a sub-PDF (`pdf_rearrange_pages2`), and the catalog that comes back no longer names
+what went in:
+
+| document | pages | keys `select` dropped from the catalog |
+|---|---|---|
+| GS262 | 540 | `/Lang`, `/MarkInfo`, `/Metadata`, `/OutputIntents`, `/PageMode`, `/ViewerPreferences` |
+| arxiv-2610.30749 | 8 | `/Metadata`, `/OpenAction`, `/PageLabels`, `/PageMode` |
+| frontiers-fgene-2024-1387588 | 11 | `/Metadata`, `/Outlines`, `/PageLabels` |
+| frontiers-fpsyg-2025-1558407 | 6 | `/Lang`, `/MarkInfo`, `/Metadata`, `/ViewerPreferences` |
+| frontiers-fpsyt-2024-1366186 | 11 | `/Metadata`, `/OpenAction`, `/Outlines`, `/PageLabels`, `/PageMode`, `/Threads` |
+| the nested book with one form field | 3 | `/AcroForm`, `/Info`, `/Lang`, `/PageLabels`, `/PageMode`, `/ViewerPreferences` |
+
+`/Metadata` — the XMP — went on all five files that had one, `/Outlines` on two of the four
+licensed papers, and the loss is still there after a save: the book with one form field keeps
+its widget and loses the catalog's `/AcroForm`, so the box to type in stays and the form is
+gone. A step whose job is to let a reorder happen must not be the thing that deletes the
+numbering, the properties and the outline.
+
+MuPDF's own transform *is* reachable — `pdf_flatten_inheritable_page_items()` on a
+`PdfObj`, through `fitz._as_pdf_document` and `mupdf.pdf_load_page` — but it is a private
+binding, and the pair that would balance the reference it hands back (`pdf_put_page`,
+`pdf_drop_page`) is not exposed at all, so every page it loads would leak into MuPDF's own
+page cache. The application uses no private bindings anywhere but `FzErrorBase`
+(`annotations.py:153`), and this is not the step to start.
+
+**Why the tree is left alone.** Once every page states its own box and turn, the node it
+hangs from says nothing about how it draws, so flattening has no benefit left to buy — and
+the only two ways to flatten it are the catalog damage above and a hand-built rewrite of
+`/Kids` and `/Parent` behind MuPDF's page-tree cache, which is the kind of thing that shows
+up as a stale page count later rather than as an error now. `test_the_tree_is_left_where_the_producer_put_it`
+pins the shape: the root's `/Kids` and every page's `/Parent` are the file's own, and the
+only objects that grew are the pages.
+
+**Why a pinned default.** A page that states nothing and resolves to `0` is exactly as
+exposed to a new ancestor that says `90` as a page that was being shown `90`, so leaving the
+key out is not neutral. `_resolves_to` (`pages.py:484`) writes the two defaults the standard
+writes down — `/Rotate 0`, and `/CropBox` as the `/MediaBox` the page resolves — and stops
+there: `/MediaBox` has no default, so a page whose whole chain omits one is left omitting
+one rather than being handed MuPDF's invention of a size. A key **no node in the document**
+states is skipped outright, because it cannot start meaning something else when the page
+moves. Both halves were found the same way: `test_a_move_after_the_settle_cannot_reshape_a_page`
+failed against the first version, which pinned nothing and left a sheet that states no turn
+free to adopt whatever its new ancestor said.
+
+**Why an identity map and `changed = ()`.** `page_order` (`pages.py:409`) returns
+`tuple(range(before_count))` rather than staying silent, because a step that says nothing is
+read downstream as a tree that changed in a way nobody can describe — which is exactly how
+F10-4n's search carries end up on the wrong sheet. No sheet moves, so every page number a
+bookmark, the strip's pick or the reader holds is already right, and the carries stay alive.
+`changed` is honestly empty for the same reason: what this step touches is a *node's*
+dictionary, and every per-page cache (words, images, links, annotations) reads the same
+values back.
+
+**Refusals**, all by name, all before any write: an intermediate holding `/Group` (a
+subtree's transparency is a property of the group, not of a page, and moving those pages
+changes how they blend); an intermediate holding `/Resources`, which inherits *per
+sub-dictionary* — measured with a page `/Font << /helv >>` under an ancestor
+`/Font << /TIM >>`, a content stream naming both draws both — so the nearest copy is not a
+faithful one and a merge would write an object the producer never had. The **root's**
+`/Resources` is exempt on purpose: every page in the document shares the root, and no
+reorder inside one document changes that. Plus a page tree whose pages cannot be counted, a
+`/Kids` entry that is not a page, a chain that loops down through `/Kids`, and a sheet whose
+`/Parent` chain comes back around.
+
+**Tests**: 36 in `tests/test_page_settle.py` — the harm measured (a move under the other
+ancestor, and the words and page count surviving even so), what the settle does (nothing
+renders differently, every page states what its ancestors used to state, the crop and the
+turn it inherited, a three-deep tree, a sheet listed twice, a turn and a settle composing in
+either order), what must come along (marks, links, outline, properties, an ancestor's font,
+and the whole catalog), the refusals, when to bother (an ordinary flat book is not rewritten
+at all), the step's word (`Scope.STRUCTURE`, `changed == ()`, the identity map, the saved
+file, undo bringing the inheritance back), and the four licensed papers — renders, catalog
+keys and the root's own `/Kids` all unchanged.
+
+**Mutations**: 11 of the new rules, **all 11 caught** — dropping `/MediaBox` from the
+push-down, dropping the `/Group` refusal, dropping the `/Resources` refusal, letting
+`page_order` say nothing, dropping the count guard, the not-a-page guard, the tree loop
+guard and the chain loop guard (this one hangs, which is the guard's whole job), skipping the
+whole-tree test, dropping the default pinning, and resolving inheritance from the root only
+so the tree outranks `/Parent` — 10 tests, including "nothing renders differently".
+
+**Suite**: **1371 passed, three consecutive runs** (157.49 / 159.82 / 159.29 s). Ruff
+unchanged at the 7 pre-existing errors; mypy unchanged at **553 errors in 16 files**.
+
+**Verified by eye.** `/tmp/f104o/eye3.py` photographs the three-sheet book three ways: as it
+opens (`before-p0…2`), after `move_page(2, 0)` with nothing settled (`harm-p0…2`, where the
+sheet that was 260×360 is 400×300 and its crop is gone — `harm-p0.png` against
+`before-p2.png`), and after the settle followed by the same move (`settled-move-p0.png`,
+byte-for-byte the pixels of `before-p2.png`, with the two neighbours matching the harm set,
+so the only difference in the book is the one that was supposed to be there). The same
+script renders the 540-sheet book whose `/Parent` links were left behind before and after —
+`big-before-p0/p300` and `big-after-p0/p300` are identical, at 612×792.
+
+`/tmp/f104o/window.py` drives the real window: the view's measured page sizes are
+`[(400, 300), (300, 400), (260, 360)]` before `win.view.apply_edit(SettlePageTree())` and the
+same three after, `win.view.grab()` is pixel-identical (`5-view-before.png` /
+`6-view-after-settle.png`, difference bounding box `None`) and so is the Pages strip
+(`2-strip-before.png`, `4-strip-after-settle.png`). Over the whole window the only pixels
+that move are the tab's unsaved-changes asterisk — `book.pdf` becoming `* book.pdf`, a 90×32
+box at (287, 53) — with `act_undo` going from not offered to offered
+(`1-window-before.png`, `3-window-after-settle.png`, `toolbar-diff.png`). The step is
+invisible where the reader looks.
+
+**Performance**: the ordinary case is a document that already states everything, and it pays
+the walk and nothing else — **103 ms** on the 540-page GS262 with `is_dirty` still false,
+**0.9–3.1 ms** on the four licensed papers. A book whose 540 sheets really do inherit their
+geometry pays **441 ms** for 540 sets of reads and writes, and the adrift book, which needs
+three writes and no box, **228 ms**; re-applying the settle to a settled book costs **160 ms**
+and writes nothing. That is a once-per-reorder cost against a delete that already takes
+~100 ms to rebuild the tree, and it is paid by `xref_get_key` calls that parse a dictionary
+each time — which is also why every node is asked once per key rather than once per page
+(hoisting that one read halved GS262, 191 → 103 ms). `select` was **47 ms** on the same
+book; the difference is what the extra four hundred milliseconds buy, and the table above is
+the receipt.
+
+**What is not here**: nothing calls this step yet — there is no reorder in the application to
+put it in front of, which is the next item; `/Resources` on an intermediate is refused rather
+than merged, and the merge (a new dictionary per page, or a shared one with the union) is a
+decision for whoever needs it; a page whose `/Parent` chain stops short of the root is
+settled by that chain instead of refused, because what it resolves to today is still what the
+reader sees; a `/Page` that is used as an ancestor, or a node that is a dictionary but has no
+`/Type`, is walked as whatever the walk makes of it rather than diagnosed; and the same
+three keys stay inheritable in a document this step has settled — the *nodes* still hold
+them, and only the pages have grown their own copies.
 
 ---
 
