@@ -3094,13 +3094,20 @@ class PDFView(QAbstractScrollArea):
                 # Continuous and stacked grids restore their scroll offset.
                 # Set the page last: scrolling would otherwise overwrite it.
                 self._relayout()
-                vscroll = state.get("vscroll", 0)
-                hscroll = state.get("hscroll", 0)
-                if vscroll:
-                    vbar.setValue(vscroll)
-                if hscroll:
-                    hbar.setValue(hscroll)
-                self.current_page = page
+                if "vscroll" not in state:
+                    # A position saved as a sheet rather than as a pixel row:
+                    # the offset that went with it belonged to a page tree this
+                    # file never had, so put the named sheet on screen instead
+                    # of a row of the wrong one (F10-4l).
+                    self.goto_page(page, center=False)
+                else:
+                    vscroll = state.get("vscroll", 0)
+                    hscroll = state.get("hscroll", 0)
+                    if vscroll:
+                        vbar.setValue(vscroll)
+                    if hscroll:
+                        hbar.setValue(hscroll)
+                    self.current_page = page
             # Emit page_changed after all state is restored
             self.page_changed.emit(page)
             self._request_visible()

@@ -94,6 +94,14 @@ class DocumentSession:
         #: way back, when the step is undone.
         self.renumbering: Optional[Renumbering] = None
         self.history = EditHistory(on_release=self._release_revision)
+        #: Where the file on disk stands in the history, as ``(epoch, depth)``.
+        #: ``depth`` is :attr:`EditHistory.depth` at the moment the bytes reached
+        #: the file; ``epoch`` moves when a branch throws those steps away, which
+        #: leaves a file no walk can reach.  Anything that holds a page number
+        #: across a session — ``viewState/<path>`` above all — has to be written
+        #: against that tree rather than the one on screen (F10-4l).
+        self._epoch = 0
+        self._saved_at: Tuple[int, int] = (0, self.history.depth)
         self.encryption = Encryption.capture(doc, self.password, authenticated)
         self._disk_stamp = _disk_stamp(path)
         self._snapshot: Optional[bytes] = None
@@ -122,9 +130,30 @@ class DocumentSession:
         if path:
             self.path = path
         self._saved_version = self.version
+        self._saved_at = (self._epoch, self.history.depth)
         # Our own write is not a stranger's: re-stamp so the next save can tell
         # the difference between itself and another program.
         self._disk_stamp = _disk_stamp(self.path)
+
+    def page_in_file(self, page: int) -> Optional[int]:
+        """The number *page* wears in the file on disk, or ``None``.
+
+        The reader may be looking at a tree only this session has: a delete not
+        yet saved, an undo that left a saved step behind.  A page number kept
+        outside the document — the stored reading position most of all — is
+        written for the file, so the history walks it back (or forward, through
+        the steps an undo parked) to the numbering the bytes on disk carry.
+
+        ``None`` says the walk cannot be finished: the sheet has no number in the
+        file, a step the walk needs was dropped from a bounded stack, or a branch
+        replaced the saved steps entirely.  Whoever asked is holding a number for
+        a tree the file may never have, and the honest answer is that no number
+        is better than one that names another sheet.
+        """
+        epoch, depth = self._saved_at
+        if epoch != self._epoch:
+            return None
+        return self.history.map_page(page, depth)
 
     def require_saved_file_unchanged(self) -> None:
         """Refuse to overwrite a file someone else has changed since we opened it.
@@ -182,6 +211,12 @@ class DocumentSession:
         # a delete must not leave the delete's map published for the next rebuild
         # to spend on the bookmarks again.
         self.renumbering = Renumbering(order) if order is not None else None
+        # A record throws the redo branch away.  When the file was written at a
+        # state inside that branch, the tree on disk is now behind a door with no
+        # key: the steps back to it are gone, and a new step at the same depth is
+        # a different document.  Say so once, here, so page_in_file stops walking.
+        if self.history.depth < self._saved_at[1]:
+            self._epoch += 1
         self.history.record(edit, before, order)
         return self.version, edit.scope
 

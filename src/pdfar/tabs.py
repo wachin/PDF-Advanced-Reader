@@ -37,6 +37,12 @@ class DocumentTab(QWidget):
         layout.addWidget(self.view)
         self.view.content_changed.connect(self._on_content_changed)
 
+    #: The view as the reader left it, kept on the tab rather than in the
+    #: settings.  ``viewState/<path>`` holds the position in the *file's* page
+    #: tree, and a tab with unsaved page edits is showing a different tree than
+    #: that, so switching back has to read this instead (F10-4l).
+    view_state: Optional[dict] = None
+
     @property
     def doc_path(self) -> str:
         return self.view.session.path

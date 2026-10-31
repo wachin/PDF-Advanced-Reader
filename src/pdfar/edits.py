@@ -256,6 +256,10 @@ class _Step:
     #: It belongs to the step rather than to the session, so it travels with the
     #: step between the undo and the redo stacks.
     order: Optional[Tuple[int, ...]] = None
+    #: How many edits had been applied when this one was.  A step is found in
+    #: either stack by that number rather than by its position, which a bounded
+    #: stack changes by dropping its oldest member.
+    depth: int = 0
 
     @property
     def size(self) -> int:
@@ -282,6 +286,11 @@ class EditHistory:
         self._undo: List[_Step] = []
         self._redo: List[_Step] = []
         self._bytes = 0
+        #: How many edits are applied right now, counted from the document as it
+        #: was opened.  Undo lowers it, redo and a new edit raise it; a dropped
+        #: step does not, because it is a hole in the record, not a step back.
+        #: :meth:`map_page` reads a page between two of these.
+        self.depth = 0
 
     # ------------------------------------------------------------- recording
     def record(self, edit: Edit, before: Union[Snapshot, bytes, str],
@@ -292,8 +301,9 @@ class EditHistory:
         off the edit while it still holds the count from *before*, because after
         the adoption the document cannot be asked what it used to be.
         """
+        self.depth += 1
         step = _Step(edit.label, edit.scope, _as_snapshot(before), edit.changed,
-                     order)
+                     order, self.depth)
         self._undo.append(step)
         self._bytes += step.size
         self._bytes -= sum(s.size for s in self._redo)
@@ -357,9 +367,10 @@ class EditHistory:
         if not self._undo:
             raise EditError("Nothing to undo")
         step = self._undo.pop()
+        self.depth = step.depth - 1
         self._bytes -= step.size
         parked = _Step(step.label, step.scope, _as_snapshot(current), step.changed,
-                       step.order)
+                       step.order, step.depth)
         self._redo.append(parked)
         self._bytes += parked.size
         self._trim_redo()
@@ -370,9 +381,10 @@ class EditHistory:
         if not self._redo:
             raise EditError("Nothing to redo")
         step = self._redo.pop()
+        self.depth = step.depth
         self._bytes -= step.size
         parked = _Step(step.label, step.scope, _as_snapshot(current), step.changed,
-                       step.order)
+                       step.order, step.depth)
         self._undo.append(parked)
         self._bytes += parked.size
         self._trim()
@@ -395,3 +407,50 @@ class EditHistory:
         self._undo.clear()
         self._redo.clear()
         self._bytes = 0
+        self.depth = 0
+
+    # -------------------------------------------------------------- numbering
+    def map_page(self, page: int, depth: int) -> Optional[int]:
+        """The number *page* wears in the tree standing at *depth*, or ``None``.
+
+        The steps between are read from the stacks rather than replayed: each
+        carries what it did to the numbers (F10-4h), so a walk from
+        :attr:`depth` to *depth* spends those maps — backward for the steps
+        below, forward for the ones an undo left on the redo stack.  Both stacks
+        are contiguous runs of that walk, newest first, so running out of steps
+        short of the target is what a dropped step looks like: :meth:`record`
+        cannot leave a hole behind it, and :meth:`_trim` only opens one at the
+        far end.
+
+        ``None`` is an answer, not a failure.  It means the sheet has no number
+        there — a page the step invented, one it deleted — or that the walk was
+        cut short.  Carrying a number over that gap would name some other sheet,
+        and callers ask precisely so they do not have to guess which one.
+        """
+        at = self.depth
+        if depth < at:
+            for step in reversed(self._undo):
+                if at == depth:
+                    break
+                moved = self._carry(step, page, backward=True)
+                if moved is None:
+                    return None
+                page = moved
+                at -= 1
+        elif depth > at:
+            for step in reversed(self._redo):
+                if at == depth:
+                    break
+                moved = self._carry(step, page, backward=False)
+                if moved is None:
+                    return None
+                page = moved
+                at += 1
+        return page if at == depth else None
+
+    @staticmethod
+    def _carry(step: _Step, page: int, backward: bool) -> Optional[int]:
+        """Apply one step's numbering to one page, in the direction walked."""
+        if step.order is None:
+            return page
+        return Renumbering(step.order, backward=backward).followed(page)

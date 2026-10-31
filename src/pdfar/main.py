@@ -2591,8 +2591,12 @@ class MainWindow(QMainWindow):
     def _on_tab_changed(self, index: int) -> None:
         # Save state for the previously active tab before switching
         if self._connected_tab is not None:
-            self._save_tab_state(self._connected_tab)
-            self._disconnect_tab(self._connected_tab)
+            leaving = self._connected_tab
+            # The live view travels with the tab; the settings key gets the
+            # file's numbering, which is what the next session reads (F10-4l).
+            leaving.view_state = leaving.view.get_state()
+            self._save_tab_state(leaving, for_file=True)
+            self._disconnect_tab(leaving)
         tab = self.tabs.widget(index)
         if not isinstance(tab, DocumentTab):
             return
@@ -2602,8 +2606,13 @@ class MainWindow(QMainWindow):
             tab.sidebar.show()
             self.side_dock.setVisible(self.act_sidebar.isChecked())
         self._connect_tab(tab)
-        # Restore saved view state for the newly active tab (immediate for tab switching)
-        self._restore_tab_state(tab.view, tab.doc_path, deferred=False)
+        # Restore the view state for the newly active tab: what the reader left
+        # here, if this session has been here, otherwise what the file was
+        # last opened at.
+        if tab.view_state is not None:
+            tab.view.restore_state(tab.view_state)
+        else:
+            self._restore_tab_state(tab.view, tab.doc_path, deferred=False)
 
         view = tab.view
         self.page_spin.blockSignals(True)
@@ -2725,11 +2734,30 @@ class MainWindow(QMainWindow):
                 return False
         return True
 
-    def _save_tab_state(self, tab: DocumentTab) -> None:
-        """Save the view state for a document tab."""
+    def _save_tab_state(self, tab: DocumentTab, for_file: bool = False) -> None:
+        """Save the view state for a document tab.
+
+        ``for_file`` asks for the position in the tree the *file* holds rather
+        than the one on screen.  The key outlives the session, so a number read
+        off a document with unsaved page edits would reopen onto another sheet
+        (F10-4l).  When the history cannot name that sheet, nothing is written:
+        the number already stored was honest when it went in, and a fresh one
+        that points at nothing is worse than a stale one that points at a sheet.
+        """
         if not tab or not tab.view:
             return
         state = tab.view.get_state()
+        if for_file:
+            page = tab.view.session.page_in_file(state["page"])
+            if page is None:
+                return
+            if page != state["page"]:
+                # The scroll offset is a row of the live tree, and the live tree
+                # is not the one on disk; the page number is all that carried
+                # over, so the restore scrolls to the sheet instead.
+                state.pop("vscroll")
+                state.pop("hscroll")
+            state["page"] = page
         self.settings.setValue(view_state_key(tab.doc_path), state)
 
     def _restore_tab_state(self, view: 'PDFView', doc_path: str, deferred: bool = True) -> None:
@@ -2761,7 +2789,7 @@ class MainWindow(QMainWindow):
         if isinstance(tab, DocumentTab):
             if confirm and not self._confirm_close(tab):
                 return False
-            self._save_tab_state(tab)
+            self._save_tab_state(tab, for_file=True)
         self.tabs.removeTab(index)
         if isinstance(tab, DocumentTab):
             self._disconnect_tab(tab)

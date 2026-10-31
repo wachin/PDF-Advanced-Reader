@@ -1516,13 +1516,19 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
             "Here" is now item data the delegate paints as a frame, while the current row still
             moves without touching a selection, so a marking can never edit a pick and
             `_picked_pages` answers only what the reader gathered — which may be nothing.
-      - [ ] **F10-4l** — *The saved position is written against a tree the file may never have.*
+      - [x] **F10-4l** — *The saved position is written against a tree the file may never have.*
             `viewState/<path>` is written on a tab change and on close from the **live** document,
             so a delete that is then discarded leaves the store holding a page number for a page
             tree the file on disk does not have, and reopening lands the reader a sheet over.
             F10-4h fixed the number for the tree the reader is looking at; this is the case where
             the two documents are different.  Write the position against the saved revision, or
             re-aim it through the steps that were dropped.
+            **Landed**: the session knows where the file sits in its own history — an edit count
+            and an epoch that moves when a branch throws the saved steps away — and answers
+            `page_in_file(page)` by walking the steps between, backward through the ones applied
+            since the save and forward through the ones an undo parked.  A close writes that
+            answer, and writes nothing at all when the walk cannot finish; a tab switch keeps the
+            live view on the tab, which is who reads it back.
       - [ ] **F10-4m** — *The export overwrites the only copy of the older numbering.*
             F10-4j makes an old sidecar honest about itself, but the export still writes straight
             over `name.xfdf` — the file that held the numbering the document no longer has.  After
@@ -1709,9 +1715,10 @@ refusal, and silence for a file that says nothing because every other reader's f
 says nothing (F10-4j). The strip's "you are here" and "you picked these" now travel
 two channels: a frame the delegate paints from item data, and a selection the
 reader alone makes — so a marking cannot edit a pick, and a pick that has lost
-every sheet it named answers as the nothing it is (F10-4k). Next in order: the
-saved position written against a tree the file may not have (F10-4l), and the
-sidecar the next export overwrites (F10-4m).
+every sheet it named answers as the nothing it is (F10-4k). The stored reading
+position now names a sheet the *file* has, walked back through the steps the
+session took after the save (F10-4l). Next in order: the sidecar the next export
+overwrites (F10-4m).
 
 Goal:
 
@@ -5617,6 +5624,102 @@ touched no selection at all; the new path emits **none** in either state.
 (**F10-4l**); the next export still overwrites the sidecar that holds an older numbering
 (**F10-4m**); the search dock's hit pages are unmoved; and `MainWindow._delete_pages` still works
 its own copy of the page shift.
+
+### F10-4l The stored reading position names a sheet the file has — [x] Implemented
+
+**What landed.** `viewState/<path>` was written straight off the live view, so a book reopened
+after a discarded delete landed on a sheet that belongs to the edited document and not to the file
+on disk. The session now knows where the file sits in its own history and answers for it.
+
+* `EditHistory.depth` (`edits.py:293`, back to 0 in `clear` at `edits.py:410`) counts the edits
+  applied since the document was opened, and every `_Step` carries the depth it left behind
+  (`edits.py:262`). A step is found by that number rather than by its place in a stack a bounded
+  history trims. `take_undo` sets the depth to `step.depth - 1`, `take_redo` to `step.depth`, and
+  the copy parked on the other stack keeps the same number — which is what makes the two stacks
+  one walk rather than two.
+* `EditHistory.map_page(page, depth)` (`edits.py:413`) walks one page between two depths: backward
+  through the undo stack, newest step first, or forward through whatever an undo parked on the
+  redo stack, oldest first. One step's numbering is applied by `_carry` (`edits.py:452`) through
+  `Renumbering.followed`, which answers `None` for a sheet with no number at that depth — one the
+  step invented, one it deleted. `None` is an answer, not a failure, and callers ask precisely so
+  they do not have to guess which sheet a stale number was reaching for.
+* `DocumentSession.page_in_file(page)` (`session.py:138`) is the only question the settings write
+  needs: what number this sheet wears in the tree that is on disk. It reads the pair
+  `_saved_at = (epoch, depth)` (`session.py:104`), refreshed whenever `mark_saved` runs
+  (`session.py:133`).
+* The epoch (`session.py:103`, bumped at `session.py:218`) is why a count alone would lie. A
+  record throws the redo branch away; when the file was saved inside that branch, the steps back
+  to it no longer exist and a new step at the same depth is a different document wearing the same
+  number. The bump happens only when a record actually discards the saved state — an ordinary
+  edit after an ordinary edit leaves the numbering walk intact — and across an epoch change
+  `page_in_file` answers `None` instead of carrying a page over an identity that never held.
+* `_save_tab_state(tab, for_file=True)` (`main.py:2737`) is the only writer that speaks to the
+  file, called when a tab is left (`main.py:2598`) and when it closes (`main.py:2792`). When the
+  walk cannot name the sheet, nothing is written at all: the number already stored was honest when
+  it went in, and a fresh one pointing at nothing is worse than a stale one pointing at a sheet.
+* A tab switch no longer routes through the file. The leaving view's state is kept on the tab
+  (`DocumentTab.view_state`, `tabs.py:44`, written at `main.py:2597`) and is read back in
+  preference to the settings (`main.py:2612`), so coming back returns the reader to the sheet they
+  were on, while the key holds the sheet the disk will still have next time.
+
+**Why the scroll offsets are dropped.** `vscroll` is a pixel row of the layout the live tree
+produced. A moved page number is the evidence that the two trees differ, and a row of one is not a
+row of the other, so the write pops `vscroll` and `hscroll` (`main.py:2758`) and `restore_state`
+reads that absence as an instruction (`viewer.py:3097`): `goto_page(page, center=False)`, which
+puts the named sheet near the top of the viewport instead of scrolling to a row that measured a
+document this file never was. A position whose page number did not move keeps both offsets exactly
+as before — nothing about the clean case changed.
+
+**The lie it ends.** Reading page 4 of a six-sheet book, cutting sheet 2 and not saving: the live
+index 2 is the sheet the reader is on, but the file's copy of that sheet wears number 3. The key
+now stores 3, and reopening shows `Page 4 content`; the old behaviour stored 2 and showed
+`Page 3 content` — a sheet the reader never asked for, one page of a book they had been reading.
+
+**Tests**: 25 in `tests/test_saved_view_state.py`. The history: depth counts applied edits, a
+clean document maps to itself, a delete moves the number upward, a turn moves nothing, a cut above
+the reader moves nothing, several steps compose in order, an invented sheet maps to `None`, and a
+step trimmed off a bounded stack is a hole rather than a guess. The epoch: an undo maps forward,
+a revert resets the numbering, and a branch that replaced the saved steps answers `None` even
+though the counts line up. The two walk orders are pinned separately
+(`test_the_walk_back_takes_the_newest_step_first`,
+`test_the_walk_forward_takes_the_oldest_step_first`) because a two-step case can agree both ways.
+Through the window: close stores the file's number, reopening lands on that sheet, a re-aimed
+position drops `vscroll` and an unmoved one keeps it, the reopened sheet is scrolled to its own
+top (probed against `_page_origin`, not a pixel count), window close behaves the same, saving makes
+live and file agree, an unmappable close leaves the last honest position standing, and the tab
+switch keeps the live sheet while the key keeps the file's.
+
+**Mutations**: 13 of the new guards, **all 13 caught**. The first sweep left three survivors, and
+two of them were lessons rather than tests. The `if step.depth != at: return None` guards inside
+the walk were unreachable: `record` cannot leave a hole behind it and `_trim` only opens one at the
+far end, so both stacks are contiguous runs by construction and the walk either reaches the target
+or runs out of steps — the guards were removed and the invariant documented in `map_page` instead.
+The two order survivors were a real gap: the existing two-step test's numbers happened to agree
+under both walk orders, which is why the dedicated pair above exists and was written against the
+implemented behaviour first (delete 1 then 3 maps live 2 to file 3, the wrong order to 4; forward
+2→1, 4→None, 5→3).
+
+**Suite**: **1283 passed, three consecutive runs** (142.6 / 142.1 / 142.4 s). Ruff unchanged at the
+7 pre-existing errors; mypy unchanged at **553 in 16 files**.
+
+**Verified by eye**: `/tmp/f104l/verify.py` drives the real window over a six-sheet book whose
+pages print their own names. It puts the view on `Page 4 content`, deletes sheet 2, reads the key
+back (3, not 2), reopens the file and screenshots the landing page (`/tmp/f104l/reopened.png`);
+the same run then writes the old number 2 and shows `Page 3 content` on screen, which is the
+before picture.
+
+**Performance**: the walk is a handful of array reads, so it was timed rather than assumed. On a
+600-page book with 50 applied edits, mapping one page across all 50 steps costs **56.9 µs**;
+20 real cuts cost **22.3 µs**. The settings write goes from **12.2 µs to 12.8 µs** on a clean
+document — the epoch check and one identity comparison — and to **36.4 µs** on a dirty one, which
+is the walk; both run on tab change and close, nowhere near a frame. The window-level cost that
+dominates is reopening documents, and six tab opens measured **489 ms** either way.
+
+**What is not here**: the next export still overwrites the sidecar that holds an older numbering
+(**F10-4m**); the search dock's hit pages are still live numbers written to disk; bookmarks and
+outline jumps take their pages from the loaded document the same way; and
+`MainWindow._delete_pages` still works its own copy of the page shift instead of asking the
+history.
 
 ---
 
