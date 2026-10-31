@@ -49,7 +49,8 @@ from .page_numbers import (
 from .pages import DeletePages, RotatePages, contiguous_runs, shifted_index
 from .save import ProtectionError, SaveError, SaveReport, save_document
 from .search import (
-    SearchParams, SearchWorker, compile_regex, highlight_spans, normalize_space,
+    SearchHit, SearchParams, SearchWorker, compile_regex, highlight_spans,
+    normalize_space,
 )
 from .sidebar import (
     Sidebar, ThumbnailSettings, THUMB_MAX_WIDTH, THUMB_MIN_WIDTH,
@@ -323,6 +324,10 @@ class MainWindow(QMainWindow):
         self.search_worker: Optional[SearchWorker] = None
         self._search_generation = 0
         self._search_params: Optional[SearchParams] = None
+        #: The matches the results dock has rows for, in row order.  The search's
+        #: own answer: the numbering is the view's to hold, and these are the
+        #: sentences each row quotes.
+        self._search_hits: List[SearchHit] = []
         self.settings = QSettings(APP_NAME, APP_NAME)
         self._ui_dark = False
         self._tool_mode = "text"
@@ -2563,6 +2568,7 @@ class MainWindow(QMainWindow):
         tab.view.page_changed.connect(self._on_page_changed)
         tab.view.zoom_changed.connect(self._on_zoom_changed)
         tab.view.hit_changed.connect(self._on_hit_changed)
+        tab.view.hits_renumbered.connect(self._on_hits_renumbered)
         tab.view.selection_changed.connect(self._update_status)
         tab.view.reflow_progress.connect(self._on_reflow_progress)
         tab.view.reflow_ready.connect(self._on_reflow_ready)
@@ -2591,6 +2597,7 @@ class MainWindow(QMainWindow):
             tab.view.page_changed.disconnect(self._on_page_changed)
             tab.view.zoom_changed.disconnect(self._on_zoom_changed)
             tab.view.hit_changed.disconnect(self._on_hit_changed)
+            tab.view.hits_renumbered.disconnect(self._on_hits_renumbered)
             tab.view.selection_changed.disconnect(self._update_status)
             tab.view.reflow_progress.disconnect(self._on_reflow_progress)
             tab.view.reflow_ready.disconnect(self._on_reflow_ready)
@@ -2660,6 +2667,7 @@ class MainWindow(QMainWindow):
         self._apply_numbering_preview()
         # search results belong to the previous document
         self._cancel_search()
+        self._search_hits = []
         self.results.clear()
         self.hit_label.setText("")
         self.setWindowTitle(f"{os.path.basename(tab.doc_path)}[*] — {APP_NAME}")
@@ -3641,17 +3649,10 @@ class MainWindow(QMainWindow):
 
         self.results.clear()
         params = self._search_params
+        self._search_hits = list(hits)
         for hit in hits:
-            prefix = f"Page {hit.page + 1}: "
-            item = QListWidgetItem(prefix + hit.snippet)
-            item.setData(Qt.ItemDataRole.UserRole, hit.page)
-            if params is not None:
-                offset = len(prefix)
-                spans = [(start + offset, end + offset)
-                         for start, end in highlight_spans(
-                             hit.snippet, params)]
-                if spans:
-                    item.setData(HIGHLIGHT_ROLE, spans)
+            item = QListWidgetItem()
+            self._fill_result_row(item, hit.page, hit.snippet, params)
             self.results.addItem(item)
 
         if self._search_tab is not None and self.tabs.indexOf(self._search_tab) != -1:
@@ -3668,6 +3669,59 @@ class MainWindow(QMainWindow):
             return
         self._show_search_error(message)
 
+    def _fill_result_row(self, item: QListWidgetItem, page: int, snippet: str,
+                         params: Optional[SearchParams]) -> None:
+        """Write what a row says about one match: the sheet, and the words on it.
+
+        The number, the sentence and the highlighted offsets are all set here
+        because the offsets are counted from the start of the number — which is
+        the one part a page-tree move rewrites, and a row that underlines the
+        wrong letters is a row nobody trusts again.
+        """
+        prefix = f"Page {page + 1}: "
+        item.setText(prefix + snippet)
+        item.setData(Qt.ItemDataRole.UserRole, page)
+        item.setData(HIGHLIGHT_ROLE,
+                     [(start + len(prefix), end + len(prefix))
+                      for start, end in highlight_spans(snippet, params)]
+                     if params is not None else [])
+
+    def _on_hits_renumbered(self) -> None:
+        """The sheets the matches sit on moved, so the rows go with them.
+
+        A step that only re-counted the pages left every survivor's words where
+        they were, and the view has already carried its own highlights across;
+        these rows are the same matches, so they come along the same way.  A row
+        whose own page went out is dropped rather than handed to the neighbour that
+        took its number — unlike a reader, a row can be nowhere, and one that quotes
+        a sentence its page does not hold is a lie with a page number on it.
+
+        The snippets come from the search's own answer rather than from the rows
+        being edited in place, because the view holds the numbering and nothing
+        else does, and two lists of the same numbers would drift.
+        """
+        view = self.view
+        if view is None or self.results.count() == 0:
+            return
+        pages = view.search_hit_pages()
+        params = self._search_params
+        alive = [(hit, page) for hit, page in zip(self._search_hits, pages)
+                 if page is not None]
+        gone = self.results.count() - len(alive)
+        # The hits the dock has rows for, in row order: the list is pruned with the
+        # rows it renders, so a second move pairs the same matches again.
+        self._search_hits = [hit for hit, _page in alive]
+
+        self.results.clear()
+        for hit, page in alive:
+            item = QListWidgetItem()
+            self._fill_result_row(item, page, hit.snippet, params)
+            self.results.addItem(item)
+        if gone:
+            self.status_left.setText(
+                f"{gone} search result(s) went with the page tree, "
+                f"{len(alive)} still name their sheet")
+
     def _on_result_clicked(self, item: QListWidgetItem) -> None:
         page = item.data(Qt.ItemDataRole.UserRole)
         if isinstance(page, int) and self.view:
@@ -3682,7 +3736,9 @@ class MainWindow(QMainWindow):
             self.view.goto_hit(step)
 
     def _on_hit_changed(self, current: int, total: int) -> None:
-        self.hit_label.setText(f"Hit {current} / {total}" if total else "")
+        # ``0`` means no match is the current one — which is what a re-aim leaves
+        # when the reader was standing on the sheet that went out with the edit.
+        self.hit_label.setText(f"Hit {current} / {total}" if current and total else "")
         if not current or not self.view:
             return
         page = self.view.hit_page(current - 1)

@@ -1543,10 +1543,23 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
             `name.previous.xfdf` and stepped past a name already taken; the status line says which
             numbering went into it; and a copy that cannot be made stops the export, because the
             alternative is a numbering lost with no record that it was ever there.
-- [ ] The search-results dock keeps each hit's 0-based page in `UserRole` and is cleared only by
-      a new search or a tab change, while the view's own hit list *is* cleared by
-      `Scope.STRUCTURE` — so after a delete the dock still offers pages that have moved, out of
-      step with the view it came from
+- [x] **F10-4n** — *The search dock's hits are held by the page number they were found under.*
+      A row of the results dock is a 0-based page and a sentence about it, and only the
+      sentence survives a page-tree step: the view's own hit list is dropped by
+      `Scope.STRUCTURE`, while the dock is cleared only by a new search or a tab change, so
+      after a delete it offered "Page 4" for a sheet that now wears 3 — and clicking it fell
+      through to `goto_page`, landing the reader on a neighbour that does not contain the
+      term at all. The fourth place PDFAR holds a page number outside the document
+      (bookmarks F10-4g, the reader and the strip F10-4h, the saved position F10-4l).
+      **Landed**: a step that only re-counted the sheets left every survivor's words exactly
+      where they were, so the published map is asked of each hit — the view re-aims its own
+      rectangles and one page per row, says so, and the rows are rebuilt from what it now
+      holds rather than from a second copy of the truth. A hit whose own sheet went is
+      dropped, not re-pointed: `followed` is the rule here and `where` would be a lie with a
+      page number on it. A turn and any edit that rewrote the pages end the highlights as
+      they always did, one map is spent once by its identity, and when the cut takes the
+      reader's current match the notice goes blank instead of counting matches the reader is
+      not on.
 - [ ] Extract, duplicate, move, reverse — the same runs against the same pick, and for a
       move the inherited-attribute push-down below
 - [ ] The **assemble** permission asked before a page-tree edit, as PdfCraft gates
@@ -1727,8 +1740,13 @@ position now names a sheet the *file* has, walked back through the steps the
 session took after the save (F10-4l). And the export no longer eats the record of
 the numbering it replaces: a sidecar already at the target that does not describe
 this document is copied to ``name.previous.xfdf`` first, and an export that cannot
-make that copy does not write at all (F10-4m). Next in order: the search dock's
-hit pages, which are still live numbers written to disk.
+make that copy does not write at all (F10-4m). The last number a reader holds
+outside the document is the one in front of each search result: a step that only
+re-counted the sheets carries every surviving match to the number its own sheet
+wears now — the view re-aims, the dock is told, and a row whose sheet left the book
+is taken out rather than handed to the neighbour that took its number (F10-4n).
+Next in order: extract, duplicate, move and reverse, which run the same carry
+against the same pick — and for a move, the inherited-attribute push-down.
 
 Goal:
 
@@ -5831,6 +5849,119 @@ F10-4l, which do know that case, are not written into the sidecar; the search do
 the bookmarks are still live numbers written to disk; a kept copy is never cleaned up, so a reader
 who exports over many editions accumulates `.previous-N`; and `MainWindow._delete_pages` still
 works its own copy of the page shift.
+
+---
+
+### F10-4n The search's matches move with their sheets — [x] Implemented
+
+**What landed.** A row of the results dock says *"page 4 holds this word, here"*, and the number is
+0-based against the tree as it stood when the search ran. The view dropped its own highlights on
+`Scope.STRUCTURE` while the dock kept offering rows, so after a delete the reader clicked "Page 4"
+and landed on a sheet that does not contain the term — the fallback `goto_page` answered for a hit
+the view no longer had. This is the fourth number PDFAR holds outside the document (bookmarks
+F10-4g, the reader and the strip F10-4h, the saved position F10-4l) and the last one a step can
+reach.
+
+* The view now records the numbering it searched against: `set_search_hits` keeps one page per hit
+  in the order the hits arrived (`viewer.py:2800`, held at `viewer.py:337`) and
+  `search_hit_pages()` (`viewer.py:2826`) hands that list back with `None` where a sheet left the
+  book. The order is the dock's row order, which is why the list is per *hit* rather than per
+  *page*.
+* `invalidate`'s text-stale branch calls `_carry_search_hits(scope)` (`viewer.py:463`) instead of
+  clearing on the spot. That method (`viewer.py:2836`) is the whole decision: a published map, not
+  yet spent, on a rebuild that is about the structure and not about the words — carry; anything
+  else — end the highlights exactly as they have always been ended.
+* `_renumber_hits` (`viewer.py:2869`) asks `followed` of every rectangle, of every per-hit page and
+  of the flat list the current-match indicator walks, carrying the reader's position by *place* in
+  that list rather than by value (two matches of the same word in the same book have the same
+  rectangle, and `list.index` answers with the first of them).
+* `hits_renumbered` (`viewer.py:197`) says so once, before the `hit_changed` that carries the new
+  count — the notice marks the reader's row by the page it names, so a row list still wearing the old
+  numbering would be marked in the wrong place and then wiped by the rebuild — and the dock rebuilds
+  its rows from the view's list plus the snippets the search itself returned (`main.py:3688`). The
+  dock holds no page number of its own beyond what the view says: `_search_hits` (`main.py:330`) is
+  the sentences, `search_hit_pages()` is the numbering, and one writer (`_fill_result_row`,
+  `main.py:3671`) puts the number, the text and the highlight offsets down together, because the
+  offsets are counted from the start of the number.
+* The reader's notice goes blank when the current match went out with the edit (`main.py:3740`) —
+  `Hit 1 / 5` over four matches that are not the one being looked at is the same lie in a smaller
+  font — and the status line counts what the cut cost (`main.py:3719`).
+
+**Why the view spends the map and the dock does not.** Two holders of the same numbering drift, and
+the drift is invisible until a row names the wrong sheet. So the view re-aims, says so, and the rows
+become a display of what it now holds. The guard that makes this safe is the one F10-4h and F10-4l
+already needed: *a structure rebuild is not proof that a step just ran*, so the map is spent by
+identity (`viewer.py:2859`) — a re-render, a theme change or a second `invalidate` at the same
+generation finds the last step's map still published and must not carry the matches across it twice.
+
+**Why `followed` and not `where`.** A reader cannot be nowhere, so `where` sends a lost page to the
+sheet that took its number. A row *can* be nowhere: it is a statement about a page's content, and a
+row that quotes a sentence its page does not hold is a lie with a page number on it. So a hit whose
+own sheet went is dropped, and the choice of rule is the difference between a search that survives
+an edit and a search that quietly starts pointing at neighbours.
+
+**A map that moves nothing is still spent.** Take the last page out and `Renumbering.order` is the
+identity — no number changed — and the match on that page still has nowhere to be. An earlier shape
+of the guard skipped the carry for an identity order, which survived every mutant that mistook a cut
+at the end of the book for a step that moved nothing; the condition is gone and two tests pin the
+case (`test_a_cut_at_the_end_takes_its_match_and_moves_no_other`,
+`test_a_cut_at_the_end_of_the_book_costs_its_own_match_only`).
+
+**Tests**: 29 in `tests/test_search_page_tree.py`, over a six-sheet book whose sheets name
+themselves so every assertion asks *which sheet holds the word* rather than checking a number
+against the arithmetic that produced it. The view: the starting state, a re-count leaving each match
+on its own sheet, a deleted sheet's match not handed to its neighbour, one page per row in build
+order, the current match following by position, a non-step rebuild not spending twice, a turn
+clearing, a cut at the end, undo sending survivors home, redo, two steps each by their own map, a
+cut that takes every matched sheet, an edit that rewrote the pages ending the highlights, a view
+that never searched saying nothing. The dock: a row naming the page its match sits on now, the row
+for a deleted sheet no longer offered, clicking a moved row landing on the word, the status line
+counting the cost, the end-of-book count, the notice blanking, a `Page 10:` prefix narrowing to
+`Page 9:` with the highlight still on the word, a turn keeping the rows, a cut below every match
+saying nothing, the dock and the view never disagreeing, two cuts in a row staying in step, the row
+the reader is on being selected after the move, matches that have no rectangles still moving their
+rows, an empty result set and an unsearched document both silent.
+
+**Mutations**: 17 of the new rules, **all 17 caught** — always clearing, `where` in place of
+`followed`, not pruning the last move's holes, doing the move and saying nothing, spending a map
+twice, treating a content edit as a re-count, mistaking a cut at the end for an identity step, never
+recording the pages, keeping the dead rows, relabelling the data without rewriting the text, holding
+the dock's own snippet list at the old length, marking the word without the prefix's width, saying
+nothing when results went, saying something when nothing moved, a notice that never blanks, counting
+the matches before the rows are rewritten, and gating the announcement on there being rectangles to
+paint.
+
+**Suite**: **1335 passed, three consecutive runs** (150.4 / 157.0 / 151.0 s). Ruff unchanged at the
+7 pre-existing errors; mypy unchanged at **553 in 16 files**.
+
+**Verified by eye**: `/tmp/f104n/pictures.py` drives the real window over a six-sheet book and
+photographs the Tools dock. Five rows for five sheets (`1-before.png`); the second sheet taken out —
+four rows, each naming the number its own sheet wears now, the row for the gone sheet gone, the
+notice blank and no row selected because the reader was standing on the match that left, and the line
+reading *"1 search result(s) went with the page tree, 4 still name their sheet"*
+(`2-after-cut.png`); a cut at the end of the book, which moves no number and still costs its match
+(`3-end-cut.png`); a turn, where the rows and the status line are untouched (`4-turned.png`); an
+eleven-sheet book cut once, where `Page 10:` becomes `Page 9:` and every row still highlights exactly
+the word `alpha` (`5-narrower-prefix.png`); and a cut *above* every match with the reader standing on
+the fourth — `Hit 4 / 5` still, the fourth row still marked, and that row now reading *"Page 4: Page
+5 content alpha beta gamma"* (`6-current-row-follows.png`).
+
+**Performance**: the carry is one `followed` per held number, and `followed` forward is a scan of the
+order, so on a 540-sheet book with a match on every sheet it costs **7.5 ms** (539 hits) and
+**18.1 ms** (2695 rectangles) — inside a delete that already takes ~100 ms to rebuild the tree, and
+measured end to end at **96.6 ms** carrying against **114.3 ms** clearing (the difference is noise on
+a cost this small). `search_hit_pages()` is a list copy at **1.9 µs**, and the dock's rebuild of 539
+rows is **12.3 ms**, which is the same cost a fresh search of that size already pays. A book with no
+search running pays nothing: the carry is gated on the view having a hit list.
+
+**What is not here**: an undo brings the sheets back and not the matches that went out with them —
+the search is not re-run over the returned pages, which is the limit of spending a step rather than
+deriving from the history, and a test pins it rather than letting it surprise anyone; the row rebuild
+clears and re-adds the whole list rather than editing rows in place, so a search with thousands of
+rows will feel the **12 ms** per cut; `followed`'s linear scan is the reason the carry is
+milliseconds rather than microseconds, and a single-pass inverse belongs on `Renumbering` itself,
+where it would serve F10-4g, F10-4h and F10-4l too — a step of its own rather than part of this one;
+and extract, duplicate, move and reverse will run this same carry against the same pick.
 
 ---
 

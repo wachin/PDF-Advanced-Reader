@@ -194,6 +194,7 @@ class PDFView(QAbstractScrollArea):
     zoom_changed = pyqtSignal(float)        # zoom factor
     selection_changed = pyqtSignal()
     hit_changed = pyqtSignal(int, int)      # (current_hit, total_hits), 1-based
+    hits_renumbered = pyqtSignal()          # the sheets the matches sit on moved
     doc_error = pyqtSignal(str)
     reflow_progress = pyqtSignal(int, int)  # (pages laid out, page count)
     reflow_ready = pyqtSignal(bool, int)    # (has_text, pages without content)
@@ -329,6 +330,13 @@ class PDFView(QAbstractScrollArea):
         self._hit_seq: List[Tuple[int, int]] = []
         self._hit_flat: List[Tuple[int, Tuple[float, float, float, float]]] = []
         self._hit_cur = -1
+        #: One page per hit, in the order the hits were handed over — which is the
+        #: order the results dock built its rows.  A row is a page number and a
+        #: sentence about it, so the dock asks this list where each of its rows
+        #: sits now rather than keeping a second copy of the numbering.
+        self._hit_pages: List[Optional[int]] = []
+        #: The page-tree move the matches have already been carried across.
+        self._spent_hit_map: Optional[Renumbering] = None
 
         self._errors: Dict[int, str] = {}
         self._press_pos = QPoint()
@@ -452,9 +460,7 @@ class PDFView(QAbstractScrollArea):
             self._errors.clear()
         if scope & self._STALE_TEXT:
             self._words.clear()
-            self._hit_rects.clear()
-            self._hit_seq.clear()
-            self._hit_flat.clear()
+            self._carry_search_hits(scope)
         if scope & Scope.STRUCTURE:
             self._refresh_page_geometry()
         if scope & self._PAINTED:
@@ -2791,6 +2797,7 @@ class PDFView(QAbstractScrollArea):
         self._hit_rects = {}
         self._hit_seq = []
         self._hit_cur = -1
+        self._hit_pages = [hit.page for hit in hits]
         for hit in hits:
             seq_index = len(self._hit_seq)
             rects = list(hit.rects)
@@ -2811,9 +2818,93 @@ class PDFView(QAbstractScrollArea):
         self._hit_rects = {}
         self._hit_seq = []
         self._hit_flat = []
+        self._hit_pages = []
         self._hit_cur = -1
         self.hit_changed.emit(0, 0)
         self.viewport().update()
+
+    def search_hit_pages(self) -> List[Optional[int]]:
+        """Where each row's match sits now, in the order the rows were built.
+
+        One entry per hit as the search returned it, so a caller holding a list of
+        rows in that same order can ask them one at a time.  ``None`` is a row
+        whose sheet left with the edit: the match is not on any page this document
+        has, and the only honest thing to do with it is take the row out.
+        """
+        return list(self._hit_pages)
+
+    def _carry_search_hits(self, scope: Scope) -> None:
+        """Move the matches with their sheets, or end them.
+
+        A step that only re-counted the pages left every survivor's text exactly
+        where it was — a delete takes sheets *out*, it does not rewrite the ones
+        that stay — so the match is still on the same sheet and only the number
+        the sheet wears has changed.  Those are the steps worth carrying across:
+        the reader keeps a search they ran for a page somewhere else leaving the
+        book.
+
+        Everything else ends the highlights the way they always have.  A turn says
+        nothing about the numbering at all — :meth:`Edit.page_order` answers
+        ``None`` for it — and a turned sheet's words are not where the search found
+        them; a content edit is not about the numbering either.  And a structure
+        rebuild that is not a step finds the last step's map still published, so
+        the identity of the map is what says whether it has been spent — see
+        :meth:`_carried_reading`.
+
+        A map that re-counts nothing is still spent, because a page-tree step can
+        vanish a sheet without moving a number: take the last page out and the map
+        is the identity, while the match that was on that page has nowhere to be.
+        """
+        move = self.session.renumbering
+        if (move is not None and move is not self._spent_hit_map
+                and scope & Scope.STRUCTURE and not scope & Scope.CONTENT):
+            self._spent_hit_map = move
+            self._renumber_hits(move)
+            return
+        self._hit_rects.clear()
+        self._hit_seq.clear()
+        self._hit_flat.clear()
+        self._hit_pages = []
+
+    def _renumber_hits(self, move: Renumbering) -> None:
+        """Put every match on the number the sheet holding it wears now."""
+        had = bool(self._hit_flat) or bool(self._hit_pages)
+        rects: Dict[int, List[Tuple[float, float, float, float]]] = {}
+        for page, page_rects in self._hit_rects.items():
+            where = move.followed(page)
+            if where is not None:
+                rects[where] = page_rects
+        self._hit_rects = rects
+        # Nothing reads the per-rect sequence, and the numbering it holds is not
+        # this one; the next search rebuilds it.
+        self._hit_seq = []
+        # One entry per row the dock has.  A sheet that went out at the *last*
+        # move took its row out of the dock already, so those holes go before this
+        # step is applied — and the holes this one makes stay in, because dropping
+        # the rows they name is what the dock is told to do below.
+        stayed = [page for page in self._hit_pages if page is not None]
+        self._hit_pages = [move.followed(page) for page in stayed]
+        # The old list walked in the reader's order, so the match they were on is
+        # found by where it sits rather than by what it is: two matches on the same
+        # word in the same book have the same rectangle, and asking a list of those
+        # for the index of a value answers with the first of them.
+        flat: List[Tuple[int, Tuple[float, float, float, float]]] = []
+        cur = -1
+        for position, (page, rect) in enumerate(self._hit_flat):
+            where = move.followed(page)
+            if where is None:
+                continue
+            if position == self._hit_cur:
+                cur = len(flat)
+            flat.append((where, rect))
+        self._hit_flat = flat
+        self._hit_cur = cur
+        if had:
+            # The rows first, then the count: the notice marks the reader's match by
+            # the page it names, and a row list still wearing the old numbering
+            # either marks the wrong row or loses the mark to the rebuild.
+            self.hits_renumbered.emit()
+            self.hit_changed.emit(cur + 1 if cur >= 0 else 0, len(flat))
 
     def _current_hit_rect(self) -> Optional[Tuple[int, Tuple[float, float, float, float]]]:
         flat = getattr(self, "_hit_flat", [])
