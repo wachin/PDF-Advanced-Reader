@@ -35,8 +35,9 @@ Four measured facts carry this, and a fifth found on the way.
   page 5 comes out as (1, 4).  The mark cannot simply stop selecting, because the
   delegate paints only `State_Selected` and an unselected current row is invisible;
   so a pick whose pages have all gone out reads as a one-row pick, and the test
-  that would have said "no pick" says what the strip can tell.  Splitting the
-  channel is F10-4k.
+  that would have said "no pick" says what the strip can tell.  **F10-4k split it**:
+  the mark is item data the delegate paints as a frame, so an empty pick reads as
+  the nothing it is.
 
 The rule therefore moves off the command and onto the step: the view and the strip
 read `DocumentSession.renumbering`, the same map the bookmarks follow, and each
@@ -58,6 +59,7 @@ from PyQt6.QtWidgets import QMessageBox
 
 from pdfar.edits import Renumbering, Scope
 from pdfar.pages import DeletePages, RotatePages
+from pdfar.sidebar import CURRENT_ROLE
 
 #: How many pages the fixtures are built with; each sheet names itself.
 PAGES = 6
@@ -343,6 +345,12 @@ def picked(bar):
     return bar.selected_pages()
 
 
+def marked(bar):
+    """The rows the strip paints as "you are here" -- never a pick (F10-4k)."""
+    return tuple(index for index in range(bar.thumbs.count())
+                 if bar.thumbs.item(index).data(CURRENT_ROLE) is not None)
+
+
 def test_a_pick_moves_with_the_sheets_it_named(win):
     win.sidebar.select_pages((0, 2))
     delete(win, (1,))
@@ -361,19 +369,21 @@ def test_an_undo_puts_the_pick_back_on_the_sheets_it_named(win):
 def test_a_pick_whose_pages_all_went_is_not_carried_onto_their_neighbours(win):
     """A selection is allowed to shrink; a reader is not allowed to be nowhere.
 
-    Nothing is picked after a cut that took every picked sheet, and what the strip
-    shows instead is the row the reader is on: the marker for "here" and the pick
-    are the same channel in this widget, so an empty pick reads as that one row
-    rather than as nothing.  Splitting the two is a roadmap line of its own; what
-    this guards is that the sheets *beside* the cut are not quietly picked instead,
-    which is what answering with ``where`` would have done.
+    Nothing is picked after a cut that took every picked sheet, and that is now the
+    whole answer: since F10-4k the row the reader is on is marked through a channel
+    of its own, so an empty pick reads as the nothing it is rather than as a
+    one-row pick.  What this guards is still that the sheets *beside* the cut are
+    not quietly picked instead, which is what answering with ``where`` would have
+    done.
     """
     win.sidebar.select_pages((1, 2, 3))
     delete(win, (1, 2, 3))
-    assert picked(win.sidebar) == (0,), "the reader's own row, and nothing else"
+    assert picked(win.sidebar) == ()
+    mark = marked(win.sidebar)
+    assert mark == (win.view.current_page,), "the reader is still here"
     win.view.undo_edit()
     # The sheets came back and the pick is still gone: what went, went.
-    assert picked(win.sidebar) == (0,)
+    assert picked(win.sidebar) == ()
 
 
 def test_a_pick_partly_deleted_keeps_the_sheets_that_stayed(win):

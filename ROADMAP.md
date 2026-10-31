@@ -1507,14 +1507,15 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
             this has 5" beside the list of what was left out.  A file that says nothing is not
             held to it, and the notice is never a refusal: a file about a longer book still
             carries real comments.
-      - [ ] **F10-4k** — *The strip says "here" and "picked" with one channel.*
+      - [x] **F10-4k** — *The strip says "here" and "picked" with two channels.*
             `QListWidget.setCurrentItem(item)` selects as well as making the row current, and the
             delegate paints only `State_Selected`, so the reader's own row is drawn as a one-page
             pick: `selected_pages()` cannot tell a gathered range from the place the view happens
             to be, which is why a pick that shrinks to nothing reads back as page 1 picked
             (F10-4h's test says so out loud, and its `Current | NoUpdate` marking is the stopgap).
-            Give "you are here" its own paint role so a marking can never edit a pick and
-            `_picked_pages` can tell the two answers apart.
+            "Here" is now item data the delegate paints as a frame, while the current row still
+            moves without touching a selection, so a marking can never edit a pick and
+            `_picked_pages` answers only what the reader gathered — which may be nothing.
       - [ ] **F10-4l** — *The saved position is written against a tree the file may never have.*
             `viewState/<path>` is written on a tab change and on close from the **live** document,
             so a delete that is then discarded leaves the store holding a page number for a page
@@ -1705,9 +1706,12 @@ which edition of the document it describes: an export records the page count it 
 written against in PDFAR's own namespace on the XFDF root, and an import that disagrees
 with the book in hand says so beside the marks it could not take — a notice, never a
 refusal, and silence for a file that says nothing because every other reader's file
-says nothing (F10-4j). Next in order: the strip's one channel for "here" and "picked"
-(F10-4k), the saved position written against a tree the file may not have (F10-4l), and
-the sidecar the next export overwrites (F10-4m).
+says nothing (F10-4j). The strip's "you are here" and "you picked these" now travel
+two channels: a frame the delegate paints from item data, and a selection the
+reader alone makes — so a marking cannot edit a pick, and a pick that has lost
+every sheet it named answers as the nothing it is (F10-4k). Next in order: the
+saved position written against a tree the file may not have (F10-4l), and the
+sidecar the next export overwrites (F10-4m).
 
 Goal:
 
@@ -5518,6 +5522,101 @@ delete destroys the only record of the numbering the first one used (**F10-4m**)
 "here" and "picked" through one channel (**F10-4k**); `viewState/<path>` written against a tree the
 file may never have (**F10-4l**); the search dock's hit pages; and `MainWindow._delete_pages`'s
 duplicate shift.
+
+---
+
+### F10-4k The strip separates "you are here" from "you picked these" — [x] Implemented
+
+**What landed.** The strip had one way to show anything — a selection — so the page the view was
+on was also, always, a one-page pick. It now has two.
+
+* `CURRENT_ROLE` (`sidebar.py:48`) is item data on the row that is "here", and the delegate paints
+  it as a frame `CURRENT_FRAME` pixels thick in the highlight colour (`sidebar.py:106-113`);
+  `State_Selected` is still the fill (`sidebar.py:104-105`). Same colour, different shape: a filled
+  band is a page the reader gathered, an outlined one is where they are reading. A row can be both
+  at once, which is why the mark is a frame and not a second fill — one would cover the other.
+* The frame is drawn from the row, not from the thumbnail, so it is there before the sheet has
+  rendered, which is every row of a book that has just opened.
+* `Sidebar` remembers two things (`sidebar.py:280-284`): where the view says the reader is
+  (`_thumb_page`, which outlives a rebuild of the rows) and which row of the rows that exist now
+  carries the mark (`_thumb_marked`, only ever read to clear the row a move left).
+  `_paint_thumb_mark` (`sidebar.py:785`) touches at most the two rows it could be moving between;
+  on a 540-page book re-setting every row would repaint the whole strip.
+* `set_current_page` still moves the current index — the keyboard and the scroll follow it — but
+  with `Current | NoUpdate` (`sidebar.py:782`, `sidebar.py:803-807`), so a row can be current
+  without becoming selected. A page with no row is remembered as nothing (`sidebar.py:782`), so a
+  strip rebuilt onto a longer book cannot mark a sheet the reader never landed on.
+* A STRUCTURE rebuild replaces the items and takes their data with them, which is the one moment
+  the mark has to be written again: `_remark_after_rebuild` (`sidebar.py:624`, `sidebar.py:809`)
+  paints it from the page the view last named. A remembered page the shorter book has no row for
+  marks nothing — a missing mark, not a wrong one, until the view says where it landed.
+* `selected_pages()` is the same code with a new guarantee: it answers `selectedItems()`, and
+  nothing but the reader (or the pick F10-4h carries across an edit) writes there any more.
+
+**Why item data and not a second selection.** `QItemSelectionModel` has the flags that let a
+marking not edit a pick — `Current | NoUpdate`, which F10-4h used to make a conditional fix — but
+the condition is the tell: it marks without selecting only *while a pick exists*, and with no pick
+the same call selects. A channel the mark cannot write through at all is stronger than one it is
+trusted not to write through, and it is the channel PdfCraft keeps as a separate field
+(`selected` beside `current` in `page_selection_ui.rs:61-70`) while collapsing the two only at
+dispatch (`commands.rs:210`).
+
+**The lie it ends.** `test_a_pick_whose_pages_all_went_is_not_carried_onto_their_neighbours`
+(`tests/test_reading_position.py:369`) can now assert both halves: `picked == ()` and
+`marked == (win.view.current_page,)`. And a right-click on blank space below the last thumbnail
+answers `()`, where the single channel answered with the page the view happened to be on and built
+a menu offering **Delete Page** for it. A request *on* a row with no pick still names that row —
+the one collapse that is honest, because the pointer said which row.
+
+**Tests**: 20 in `tests/test_strip_current_role.py`. The channel split: marking picks nothing,
+the mark lands on the named row, a marking leaves a gathered pick alone, only one row is ever
+marked, a mark and a pick may share a row, the current row still moves, an out-of-range page marks
+nothing and is not remembered, and marking the row that is already marked changes nothing. What a
+request answers: a row names itself, blank space names nothing, and a pick wins over the mark.
+Through an edit: a pick that lost every sheet is no pick while the reader is still marked, the
+mark survives a rebuild that moved no sheets, the mark is put back after a rebuild, and a rebuild
+to a shorter book leaves nothing marked rather than guessing. The paint is judged on a real
+`QImage`: the option is built the way the view builds one (PyQt6 does not expose `viewOptions()`),
+the frame is probed on the row's left edge at mid-height, where the thumbnail cannot reach, the
+fill just inside the row above the thumbnail, and `test_a_pick_and_a_mark_do_not_look_alike`
+compares the two whole images rather than restating the pixels.
+
+**Mutations**: 8 of the new guards, **all caught**. The first sweep reported one survivor — a
+patch that cleared even the row it was about to mark, which leaves the same end state as the
+guard; the real guard, `if False:` around the clear, is killed by
+`test_only_one_row_is_ever_here` (the row the mark left keeps it). `CURRENT_ROLE = UserRole + 0`
+collides the mark with the page number on every row and is killed by the first row test.
+Reverting to `setCurrentItem(item)` with default flags is killed by
+`test_marking_a_row_picks_nothing` — the whole point in one line.
+
+**Suite**: **1258 passed, three consecutive runs** (147.1 / 153.0 / 144.1 s). Ruff unchanged at
+the 7 pre-existing errors; mypy unchanged at **553 in 16 files**. One earlier attempt lost
+`tests/test_viewer.py::test_large_page_uses_tiles` to its 15-second wait ("no tile was ever
+rendered") in the first of its three runs; the test passes alone in 0.5 s, three times over, and
+the three runs above are consecutive and green.
+
+**Verified by eye**: `/tmp/f104k/visual.py` drives the real window over a ten-sheet book whose
+pages print their own names (`SHEET 1` … `SHEET 10`). The view is put on page 3 and sheets 6 and 7
+are gathered (`select_pages((5, 6))`): the strip draws `SHEET 3` as an outlined row and
+`SHEET 6`/`SHEET 7` as filled ones (`/tmp/f104k/strip-both.png`), with `selected_pages()` reading
+`(5, 6)` and exactly one row marked. Clearing the pick leaves only the outline
+(`/tmp/f104k/strip-here-only.png`). A request on blank space names the pick while there is one,
+names `()` when there is none — the old single channel answered `(2,)`, the page the view was on,
+and offered to delete it — and names row 7 when the request arrives on row 7.
+
+**Performance**: measured rather than asserted. On the 540-page book, walking one row and back,
+the strip shown: old path **1.82 ms** per call, new **1.80 ms** with no pick, old **1.85 ms**,
+new **1.98 ms** with two picks — the spread is the scrolling `setCurrentItem` does either way,
+which dominates. Hidden, so only the marking runs: **7.6–9.6 µs** per call before against
+**11.1–11.8 µs** after, the two `setData` calls a move writes (clear the row it left, mark the
+row it reached); at 11 µs it is 0.6% of the 1.8 ms the shown strip already spends per move. The
+old no-pick path emitted **one** selection change — the stray pick this step removes — and then
+touched no selection at all; the new path emits **none** in either state.
+
+**What is not here**: `viewState/<path>` is still written against a tree the file may never have
+(**F10-4l**); the next export still overwrites the sidecar that holds an older numbering
+(**F10-4m**); the search dock's hit pages are unmoved; and `MainWindow._delete_pages` still works
+its own copy of the page shift.
 
 ---
 

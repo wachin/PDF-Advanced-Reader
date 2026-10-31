@@ -41,6 +41,15 @@ TAB_ICONS = ("thumbnails.svg", "index.svg", "bookmarks.svg",
 (TAB_THUMBNAILS, TAB_INDEX, TAB_BOOKMARKS, TAB_ANNOTATIONS,
  TAB_ATTACHMENTS) = range(len(TAB_LABELS))
 
+#: The strip's "you are here" mark, held on the row rather than in the selection
+#: model.  ``setCurrentItem`` selects as it marks, so a mark that travels through
+#: the selection model edits the range the reader gathered; one that lives here can
+#: only ever be painted.
+CURRENT_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+
+#: How thick the "you are here" frame is, in pixels.
+CURRENT_FRAME = 2
+
 
 @dataclass
 class ThumbnailSettings:
@@ -91,8 +100,17 @@ class ThumbnailDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index) -> None:  # noqa: N802 (Qt naming)
         painter.save()
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        here = index.data(CURRENT_ROLE) is not None
         if selected:
             painter.fillRect(option.rect, option.palette.highlight())
+        if here:
+            # A frame rather than a fill, because a row can be both at once: the
+            # page the reader is on and one of the pages they gathered.  Drawn from
+            # the row, not the thumbnail, so it is there before the sheet renders.
+            painter.setPen(QPen(option.palette.highlight().color(),
+                                CURRENT_FRAME))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(option.rect.adjusted(1, 1, -1, -1))
 
         icon = index.data(Qt.ItemDataRole.DecorationRole)
         if isinstance(icon, QIcon):
@@ -258,6 +276,12 @@ class Sidebar(QWidget):
         #: Identity, not value: two steps can describe the same move, and both are
         #: meant to be spent.  See :meth:`_page_tree_move`.
         self._spent_renumbering: Optional[Renumbering] = None
+        #: Where the view says the reader is, which outlives a rebuild of the rows.
+        self._thumb_page: Optional[int] = None
+        #: Which row carries the mark right now, so a move can clear the one it left.
+        #: A rebuild destroys the items and with them the data; the painter writes it
+        #: back on the new rows, and this index is only ever used to clear a row.
+        self._thumb_marked: Optional[int] = None
 
         self.bookmark_manager = BookmarkManager(session)
 
@@ -597,6 +621,7 @@ class Sidebar(QWidget):
             self._renumber_bookmarks(move)
             if picked:
                 self.select_pages(picked)
+            self._remark_after_rebuild()
         else:
             for i in range(self.thumbs.count()):
                 item = self.thumbs.item(i)
@@ -745,24 +770,52 @@ class Sidebar(QWidget):
     def set_current_page(self, page: int) -> None:
         """Keep the thumbnail list roughly in sync with the view.
 
-        A marking is not a pick.  With nothing picked the row the view is on is the
-        only thing to show, so it is marked the way the delegate paints it — as a
-        selection.  While the reader *has* picked pages a plain ``setCurrentItem``
-        would edit that pick as it marks, leaving one gathered range for the sheet
-        the view happened to land on after a delete, so the current row is moved
-        with a flag that marks without touching the selection.
+        A marking is not a pick, and no longer travels through the selection model
+        to say so.  ``setCurrentItem(item)`` selects as it makes a row current, which
+        is how the strip's "where the reader is" used to edit the range they had
+        gathered -- and, with nothing gathered, used to make their own row look like a
+        pick, so a request that named no row at all answered with a page and offered
+        **Delete Page** for it.  The mark is item data the delegate paints; the
+        current index still moves, because the keyboard and the scroll follow it, but
+        with a flag that cannot touch a selection.
         """
-        if 0 <= page < self.thumbs.count():
-            item = self.thumbs.item(page)
-            if item is None or self.thumbs.currentItem() is item:
-                return
-            if self.thumbs.selectedItems():
-                self.thumbs.setCurrentItem(
-                    item,
-                    QItemSelectionModel.SelectionFlag.Current
-                    | QItemSelectionModel.SelectionFlag.NoUpdate)
-            else:
-                self.thumbs.setCurrentItem(item)
+        self._thumb_page = page if 0 <= page < self.thumbs.count() else None
+        self._paint_thumb_mark()
+
+    def _paint_thumb_mark(self) -> None:
+        """Put the frame on the remembered row, and take it off the one that had it.
+
+        Only the two rows it could be moving between are touched: on a 540-page book
+        a page change that re-set every row would repaint the whole strip.
+        """
+        marked = self._thumb_marked
+        if marked is not None and marked != self._thumb_page:
+            stale = self.thumbs.item(marked)
+            if stale is not None:
+                stale.setData(CURRENT_ROLE, None)
+        self._thumb_marked = self._thumb_page
+        if self._thumb_page is None:
+            return
+        item = self.thumbs.item(self._thumb_page)
+        if item is None:
+            return
+        item.setData(CURRENT_ROLE, self._thumb_page)
+        if self.thumbs.currentItem() is not item:
+            self.thumbs.setCurrentItem(
+                item,
+                QItemSelectionModel.SelectionFlag.Current
+                | QItemSelectionModel.SelectionFlag.NoUpdate)
+
+    def _remark_after_rebuild(self) -> None:
+        """Say where the view is again, on rows the rebuild has just replaced.
+
+        Called after a STRUCTURE rebuild, which is the moment ``thumbs.clear()`` took
+        the mark with it: the items are new ones and none of them carries the data.
+        A remembered page the shorter book has no row for marks nothing: the strip
+        does not know where the reader landed, the view does, and it says so a moment
+        later.
+        """
+        self._paint_thumb_mark()
 
     # ------------------------------------------------------------------ bookmarks
     def _build_bookmarks(self) -> None:
