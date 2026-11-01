@@ -5,15 +5,17 @@ every one here is an :class:`~pdfar.edits.Edit`: it says what the user asked for
 runs against a throwaway copy, and is adopted only when it returns without
 raising.  Nothing in this module touches the live document.
 
-Four items so far, in the order the roadmap needed them: turning a page, which is
+Five items so far, in the order the roadmap needed them: turning a page, which is
 where the page-tree machinery was proved; taking pages out, which is where it
 starts to matter that every number above the cut means something else afterwards;
 settling the tree, which is the one every reorder waits for — a page that does not
 say how big it is has to say so before anything decides which node it hangs from;
-and moving pages, which is that reorder, and the first edit whose *only* effect is
+moving pages, which is that reorder, and the first edit whose *only* effect is
 the numbering: nothing is added and nothing is taken away, so every page number
 held outside the document has to be re-aimed at once and a map that clamps — the
-delete's answer — would be a lie.
+delete's answer — would be a lie; and reversing a pick, which is the same walk run
+against a permutation of its own, and the first reorder that leaves the sheets it
+was not asked about wearing the numbers they had.
 """
 
 from __future__ import annotations
@@ -584,6 +586,67 @@ def _repair_plan(want: Sequence[int]) -> Tuple[Tuple[int, int], ...]:
     return back if len(back) < len(front) else front
 
 
+def _reorder(doc: fitz.Document, want: Sequence[int]) -> None:
+    """Settle, walk, and read the tree back — the part every in-place reorder needs.
+
+    ``want[i]`` is the sheet slot *i* should hold, counted in the book as it is now.
+    The order of the three steps is the whole content of this function:
+
+    * The xrefs are read **before** the settle.  Not because the settle re-orders
+      anything — it writes keys into the page dictionaries and moves no sheet, so
+      swapping the two lines is a change with no effect, and one of the mutations run
+      against this file proves it.  They are read first because they name the book the
+      plan was computed against, which is the book the caller is holding.
+    * The settle comes **before** the walk, because a move re-parents by ``/Parent``
+      and a page whose size hangs off an ancestor gets its geometry from wherever it
+      lands — measured on the nested book, where a bare ``move_page`` drew the
+      260×360 sheet at 400×300 with the node it arrived in.
+    * The read-back comes **after** the walk, and asks the tree what it holds by page
+      object rather than by number: a reorder that got the page count right and the
+      sheets wrong is the one failure a reader would notice as their document being
+      quietly shuffled, and nothing in MuPDF promises ``move_page`` keeps meaning
+      what it meant when this was written.
+    """
+    before = [doc.load_page(index).xref for index in range(doc.page_count)]
+    SettlePageTree().apply(doc)
+    for frm, to in _repair_plan(want):
+        doc.move_page(frm, to)
+    after = [doc.load_page(index).xref for index in range(doc.page_count)]
+    asked = [before[sheet] for sheet in want]
+    if after != asked:
+        raise EditError(
+            "The page tree does not read the order this reorder asked for; "
+            "nothing is moved")
+
+
+def _checked_pick(doc: fitz.Document, pages: Sequence[int], verb: str) -> int:
+    """The book's page count, after the whole pick has been asked of it.
+
+    Both halves are refused before a sheet moves, and both are easy to get wrong in a
+    way a reader would not see coming:
+
+    * An empty pick is nothing to do, and MuPDF would carry out a reorder of nothing
+      by settling the tree and writing keys.
+    * A page outside the book is not a page.  A negative index is refused here rather
+      than counted from the end, because Python reads ``-1`` as the last sheet and
+      ``move_page`` reads a negative *destination* as "after the last page", neither
+      of which is what a pick from the thumbnail strip means.
+
+    *verb* finishes the sentence "No page was chosen to …", which is the one thing
+    the message can say that is true of the edit the reader asked for.
+    """
+    if not pages:
+        raise EditError(f"No page was chosen to {verb}")
+    count: int = doc.page_count
+    word = "page" if count == 1 else "pages"
+    for index in pages:
+        if not 0 <= index < count:
+            raise EditError(
+                f"Page {index + 1} is not in this document, which has "
+                f"{count} {word}")
+    return count
+
+
 @dataclass(frozen=True)
 class MovePages(Edit):
     """Move the picked sheets so the block starts at gap *target*.
@@ -602,16 +665,12 @@ class MovePages(Edit):
       below, which on a book whose geometry lives on an ancestor would otherwise
       stamp a box onto every page to carry out a reorder that asks for none.
     * **The settle.**  ``SettlePageTree`` first, because a move is exactly the
-      reorder a page hanging its size off an ancestor cannot survive: measured on the
-      nested book, a bare ``move_page`` re-parented the 260×360 sheet into the node it
-      landed in and drew it 400×300 with that node's turn.  The refusal comes with it,
-      which is the point — a book whose ancestor holds a ``/Group`` is not moved,
-      rather than moved and flattened.
+      reorder a page hanging its size off an ancestor cannot survive.  The refusal
+      comes with it, which is the point — a book whose ancestor holds a ``/Group`` is
+      not moved, rather than moved and flattened.
 
-    Then the walk, and a read of what the tree says afterwards: the order is checked
-    against the plan by page object, since a reorder that got the page count right and
-    the sheets wrong is the one failure a reader would notice as their document being
-    quietly shuffled.
+    The walk and the read-back are :func:`_reorder`, shared with every reorder that
+    changes a book's order without changing its sheets.
 
     What travels with a sheet and what does not: MuPDF re-derives the outline rows and
     the link destinations from the page objects, so those follow the sheet they named,
@@ -664,18 +723,7 @@ class MovePages(Edit):
         return f"Move {moved} Pages"
 
     def apply(self, doc: fitz.Document) -> None:
-        if not self.pages:
-            raise EditError("No page was chosen to move")
-        count = doc.page_count
-        word = "page" if count == 1 else "pages"
-        # The whole pick is checked before a single sheet moves, and a negative
-        # index with it: MuPDF refuses a negative *source* and accepts a negative
-        # *target* as "the end", and neither is the rule this edit means.
-        for index in self.pages:
-            if not 0 <= index < count:
-                raise EditError(
-                    f"Page {index + 1} is not in this document, which has "
-                    f"{count} {word}")
+        count = _checked_pick(doc, self.pages, "move")
         if self.target < 0:
             raise EditError(
                 f"A move names the gap its block lands in, between 0 and "
@@ -683,13 +731,72 @@ class MovePages(Edit):
         want = self._intended(count)
         if want == list(range(count)):
             return
-        before = [doc.load_page(index).xref for index in range(count)]
-        SettlePageTree().apply(doc)
-        for frm, to in _repair_plan(want):
-            doc.move_page(frm, to)
-        after = [doc.load_page(index).xref for index in range(count)]
-        asked = [before[sheet] for sheet in want]
-        if after != asked:
-            raise EditError(
-                "The page tree does not read the order this move asked for; "
-                "nothing is moved")
+        _reorder(doc, want)
+
+
+@dataclass(frozen=True)
+class ReversePages(Edit):
+    """Reverse the picked sheets among the slots they already fill.
+
+    The reader's ask, again rather than the library's: the pick's sheets come out in
+    the opposite order **in the same slots**, and every sheet outside the pick stays
+    exactly where it was — which is what a batch scanned back to front needs, and is
+    PdfCraft's ``reverse_pages`` (``crates/organize/src/lib.rs:532``).  A pick does not
+    have to be contiguous, and the middle sheet of an odd pick does not move.
+
+    One place the two editors part company: fewer than two distinct slots.  PdfCraft
+    refuses it, because its ``rebuild`` would rewrite the tree to put the book back as
+    it found it.  Here it writes nothing, for the same reason a drop into the gap the
+    block already fills writes nothing — a strip can hand this edit a one-thumbnail
+    pick, and "nothing would change" is a worse answer than silence.  What silence
+    costs is why the case is tested on a book whose geometry lives on an ancestor: a
+    reverse that settled first would stamp a ``/MediaBox`` onto every page of it to
+    carry out a reorder that asks for none.
+
+    :meth:`changed` is the pick, where the move's is ``None``.  A move re-numbers
+    every sheet above the gap it fills, so no entry a per-page cache holds under a
+    page number survives it; a reverse leaves an unpicked sheet wearing the number it
+    had, so only the slots the pick named have to be looked at again.  The rest of the
+    carry is the move's, and shared with it: the settle first, ``_repair_plan``'s
+    shorter walk, and the read-back that refuses a tree which does not come out in the
+    order asked for.
+
+    What travels with a sheet travels with it here too — outline rows, link
+    destinations, annotations — and ``/PageLabels`` still numbers positions, which is
+    F10-4q and pinned by a test in ``tests/test_page_reverse.py`` rather than filled.
+    """
+
+    pages: Tuple[int, ...]
+
+    scope = Scope.STRUCTURE
+
+    def _intended(self, count: int) -> List[int]:
+        """The order the tree is asked to read: ``out[i]`` is the sheet slot *i* holds."""
+        slots = sorted(set(self.pages))
+        order = list(range(count))
+        for step, slot in enumerate(slots):
+            order[slot] = slots[-1 - step]
+        return order
+
+    def page_order(self, before_count: int) -> Tuple[int, ...]:
+        """The same permutation, published as the map a step carries.
+
+        Exact in both directions, and its own inverse: the walk is a swap of pairs, so
+        the map that runs the reader's page onto its new sheet is the one that runs it
+        home, and the unpicked sheets answer with the number they already had.
+        """
+        return tuple(self._intended(before_count))
+
+    @property
+    def label(self) -> str:
+        turned = len(set(self.pages))
+        if turned == 1:
+            return "Reverse Page"
+        return f"Reverse {turned} Pages"
+
+    def apply(self, doc: fitz.Document) -> None:
+        count = _checked_pick(doc, self.pages, "reverse")
+        want = self._intended(count)
+        if want == list(range(count)):
+            return
+        _reorder(doc, want)

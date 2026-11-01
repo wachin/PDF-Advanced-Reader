@@ -224,3 +224,30 @@ def test_a_note_costs_one_page_of_listening(manager, page_reads):
     manager.add_note(6, (30.0, 30.0), "two")
 
     assert set(reads_since(page_reads, mark)) == {6}
+
+
+# ------------------------------------------------------ a reorder that can say (F10-4r)
+def test_a_reorder_that_names_its_slots_rereads_only_those_slots(manager, page_reads):
+    """The first reorder whose cache answer is the pick rather than "everything".
+
+    A reverse moves no sheet outside its pick, and a mark belongs to its sheet, so the
+    slots it named are exactly the pages whose rows can have changed — which is a
+    *correctness* claim here, not a speed one: the list has to be right about the pages
+    it never looked at again, and about the ones it read in a different order.
+    """
+    from pdfar.pages import ReversePages
+
+    still = manager.add_note(2, (30.0, 30.0), "not in the pick")
+    manager.add_note(0, (30.0, 30.0), "was first")
+    manager.add_note(5, (30.0, 30.0), "was last")
+
+    manager.session.apply(ReversePages((0, 3, 5)))
+    mark = len(page_reads)
+    manager.reload_from_document()
+
+    assert set(reads_since(page_reads, mark)) == {0, 3, 5}, (
+        "a reorder that says which slots it filled still walked the book")
+    assert {note.page: note.content for note in manager.get_annotations()} == {
+        2: "not in the pick", 0: "was last", 5: "was first"}
+    assert manager.get_annotation(still.id) is still, (
+        "the sheet that did not move was rebuilt under its reader")

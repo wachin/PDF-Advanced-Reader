@@ -1585,8 +1585,40 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       first one produced), and whether a key is stated at all is asked of the whole tree
       rather than of the chains, because a node a page walks past today is one a move can
       put it under tomorrow.
-- [ ] Extract, duplicate, reverse — the other three runs against the same pick, each
-      settling the page tree the way F10-4p does
+- [x] **F10-4r** — *Reverse: the picked sheets come back out the other way, in the slots
+      they already fill.*  The second of the three reorders against the same pick, and the
+      one that added no new MuPDF surface: the rule is a permutation of the book the reader
+      is holding, so it runs F10-4p's settle, its repair walk and its read-back — which is
+      the first time that machinery was shared rather than written again, and why
+      `MovePages.apply` now hands the walk to `_reorder` and the pick to `_checked_pick`.
+      Two things are this edit's own.  **An unpicked sheet does not move**: a move
+      re-numbers every sheet above the gap it fills, so its `changed` has to say "I cannot
+      say", while a reverse leaves the rest of the book wearing the numbers it had, so its
+      `changed` is the pick and a cached thumbnail outside the pick survives the step.  And
+      **a pick of fewer than two distinct slots is nothing to do, not an error** — where
+      PdfCraft refuses it (`organize/src/lib.rs:538-540`) because its `rebuild` would
+      rewrite `/Kids` to put the book back exactly as it found it, and a strip that offers
+      *Reverse* on the one thumbnail under the cursor deserves silence over a dialog.
+      Measured while it was written, because the shared machinery makes it look like a rule:
+      for a reversal the two walks cost **the same** — every non-empty pick of a six-sheet
+      book, of a twelve-sheet one (4083) and 4000 random picks of books up to 300 sheets —
+      so the shorter-of-two choice buys this edit nothing and is there for the move.
+      **Landed**: `ReversePages(pages)` — slots sorted and deduped, swapped in pairs from
+      the outside in, everything else untouched; the pick checked whole before a sheet
+      moves; the identity written as nothing, settle included; the exact permutation
+      published as the map a step carries, and its own inverse.
+- [ ] Extract and duplicate — the other two runs against the same pick, each settling the
+      page tree the way F10-4p does.  Duplicate needs measuring before it is written:
+      whether `copy_page` gives a sheet its own object or files the *same* object in two
+      slots is what the settle's walk, the strip and a per-page cache all have to be told
+- [ ] **F10-4s** — *The strip's drop reaches the move.*  F10-4p built the rule a drop
+      between two rows means and nothing calls it: `ThumbnailList` is a `QListWidget` with
+      `ExtendedSelection` and a delegate of its own, so this is Qt's drag-and-drop —
+      `setDragEnabled`, `setAcceptDrops`, the drop indicator, and the gap a drop position
+      names — with the twist that Qt would move its *rows* and the edit has to be what
+      moves the pages.  Whoever wires it also decides whether a drop into the gap the pick
+      already fills belongs on the undo stack at all (the edit writes nothing, the session
+      records it, and one Ctrl+Z would appear to do nothing)
 - [ ] **F10-4q** — *`/PageLabels` numbers a position, so a reorder renumbers the sheets.*
       The catalog says "from index 0, count 101", not "from this sheet", so after a move the
       sheet that arrived at the front is printed 101 and the one that used to read 101 prints
@@ -1828,10 +1860,16 @@ rather than flattened into a change of appearance (F10-4o).
 Move landed first of those four (F10-4p), and it is the one that calls F10-4o's step:
 a move is the reorder that changes nothing but the numbering, so it settles the tree
 before it touches a page reference and publishes the exact permutation the reader's
-page, the strip's pick, the bookmarks and the search rows are re-aimed with.  Extract,
-duplicate and reverse run the same carry against the same pick and are next; a
-`/PageLabels` numbering is the one thing a move still leaves behind (F10-4q), because
-labels number positions and no sheet carries them.
+page, the strip's pick, the bookmarks and the search rows are re-aimed with.  Reverse
+landed second (F10-4r) and ran that same carry rather than writing a new one, which is
+also where the carry became shared code: a reverse moves no sheet outside its pick, so
+it is the first reorder whose cache answer is the pick instead of "I cannot say".
+Two of the four are still to come — duplicate, which has to be measured before it is
+written, and extract, which leaves the document altogether — and between them and the
+reader there is a surface neither of them has yet: the strip's drop, with which the
+move becomes something a reader can do rather than something the model can answer
+(F10-4s).  A `/PageLabels` numbering is still what a reorder leaves behind (F10-4q),
+because labels number positions and no sheet carries them.
 
 Goal:
 
@@ -6352,12 +6390,134 @@ the rule is the model's and the surface is the next item, and whoever wires it d
 whether a drop into the gap the pick already fills belongs on the undo stack at all (the
 edit writes nothing and the session still records it, so one Ctrl+Z would appear to do
 nothing); `/PageLabels` numbers positions and is left behind (F10-4q); the **assemble** permission is not consulted, so a document
-that forbids page assembly accepts a move like any other; extract, duplicate and reverse
-are still to come against the same pick; a move onto a book whose pages hang off a node the
+that forbids page assembly accepts a move like any other; extract and duplicate
+are still to come against the same pick, and reverse landed with the carry this edit
+built for them (F10-4r); a move onto a book whose pages hang off a node the
 settle refuses is refused whole, which is the right answer for the wrong reason if the
 reader only wanted the sheet next door; and the walk is O(slots x finds) in python — 269
 calls and 28 ms measured, and a plan that placed runs rather than sheets would cut it, for a
 cost the settle already dwarfs.
+
+---
+
+### F10-4r Reverse the picked sheets among the slots they fill — [x] Implemented
+
+**Task**: `ReversePages(pages)` — the sheets the reader picked come back out the other
+way, **in the slots they already filled**, every other sheet left exactly where it was.
+A batch scanned back to front is the ask, and it is the second of the four reorders over
+one pick.
+
+**Solution**: `src/pdfar/pages.py` — `ReversePages` (`:738`), and the part of `MovePages`
+this step came to share: `_reorder` (`:589`) for the settle, the walk and the read-back,
+`_checked_pick` (`:622`) for the pick.  No new MuPDF surface: the rule is a permutation,
+and F10-4p's `_repair_plan` already realises any permutation of the book it is given.
+
+**The rule, and where the two editors part.** PdfCraft's `reverse_pages`
+(`crates/organize/src/lib.rs:532-549`) sorts and dedups the pick and zips the slots
+against the pages reversed; PDFAR writes `sorted(set(self.pages))` and
+`order[slot] = slots[-1 - step]`, which is the same loop, and the same two readings a UI
+has to get right: the pick need not be contiguous, and the middle sheet of an odd pick
+does not move.  They disagree on **fewer than two distinct slots**: theirs answers
+`Invalid("reversing needs at least two pages")` (`:538-540`), and the refusal is not fuss
+— their `rebuild` would rewrite `/Kids` from a walk to put the book back exactly as it was
+found, so an error is what stands between a no-op and a tree surgery.  PDFAR has no
+rebuild to be fooled by, so the case is the identity short-circuit: the pick is read, the
+order it implies is computed, and if that order is the book nothing is written — **not the
+settle either**, which on the nested fixture is the difference between silence and a
+`/MediaBox` stamped on all three sheets.  A strip that offers *Reverse* on the one
+thumbnail under the cursor gets nothing rather than a dialog.
+
+**What is this edit's own: a reorder that can say which pages it wrote.** Every reorder
+so far answered `changed` with `None` — "I cannot say, re-read the book" — because a
+delete re-numbers everything above the cut and a move everything above the gap.  A reverse
+touches its own slots and nothing else, so its `changed` is the pick, and that is a
+correctness claim rather than a saving: the annotation list is keyed by page index, so
+after `ReversePages((0, 3, 5))` the rows under 1, 2 and 4 still describe the sheets they
+described and the rows under 0, 3 and 5 describe other sheets entirely.
+`test_a_reorder_that_names_its_slots_rereads_only_those_slots` counts the page reads
+around a reload — `{0, 3, 5}` of eight — and then asks the list what each page holds, so
+the narrow answer has to be right about the pages it never looked at again.
+
+**The involution, and the tie it exposes.** A reverse is its own way back, which is tested
+as a property of the rule (every pick of a six-sheet book) and as a property of MuPDF (the
+same pick run twice on one document).  It turned out to reach the machinery too: the plan
+is chosen as the shorter of the two walks, and for a reversal **the two walks always cost
+the same** — every non-empty pick of a six-sheet book (63), of a twelve-sheet one (4083),
+and 4000 random picks of books up to 300 sheets.  The direction rule is there for the move,
+and a reversal neither pays for it nor needs it.  That is also why the test that pins the
+choice is written on a book turned one step (`[1, 2, …, 0]` and its mirror), because no
+reversal pick can show the branch — and why "always walk from the back" survived the first
+mutation run until that test was written.
+
+**Order of operations**, all of it shared with the move now: the pick is checked whole
+before a sheet moves (empty refused, a page outside the book refused, a negative refused
+rather than counted from the end); the identity returns before the settle; the settle runs
+because a move re-parents and a page takes its geometry from wherever it lands; the walk
+runs; the tree is read back by page object and a book that does not come out in the asked
+order is refused.
+
+**Tests**: 293 in `tests/test_page_reverse.py` — the rule on every pick, the rule as its
+own inverse, an unpicked sheet not moving, the middle of an odd pick, the whole book end to
+end, a pick written backwards, a sheet named twice, a longer book, the one-sheet pick that
+writes nothing on a book that would have paid for it; the refusals; the page tree (the harm
+the settle stops, what the reversed sheets now state for themselves, a book reversed
+**twice**, the tree a reverse leaves behind read by a second settle, a reversed book saved
+and reopened); the numbers (the permutation, unpicked sheets mapping to themselves, both
+directions of the map, the label, the scope and the pick-shaped `changed`); what the
+document carries (outline rows, links, a page label that stays with its position) and the
+four licensed papers; and the session — undo, redo, a reverse followed by a delete, and a
+reverse followed by a delete followed by an undo.  One more in
+`tests/test_annotation_list_cache.py` for the cache.
+
+**Mutations**: 21 of the rules this step wrote or shares — **20 caught**.  The survivor is
+a provable no-op: reading the xrefs after the settle instead of before it, which cannot be
+observed because the settle writes keys into page dictionaries and moves no sheet (the
+`_reorder` docstring says so).  Caught: the swap run for one slot, for two slots, by the
+wrong index, and to the slot's own number; the pick not deduped; the pick read as a range
+to the end of the book; the identity short-circuit missing, and inverted; an empty pick
+accepted; the range check dropped; a negative counted from the end; the label counting
+names rather than sheets; `Scope.FULL`; the map withheld; the settle skipped; the read-back
+disabled; the read-back comparing positions instead of objects; and the walk always taken
+from one end.  Three of those took a second attempt, because the first anchors matched
+`RotatePages`, `DeletePages` and `MovePages` before they matched this class — which is what
+a shared shape costs, and why the anchors now name the class.
+
+**Suite**: **1746 passed, three consecutive runs** (163.31 / 158.72 / 158.32 s).  Ruff
+unchanged at the 7 pre-existing errors; mypy unchanged at **553 errors in 16 files** — the
+new `_checked_pick` came back one over at first, because it returns a count MuPDF types as
+`Any`, and is annotated rather than explained.
+
+**Verified by eye.** `/tmp/f104r/window2.py` drives the real window over a six-sheet book
+whose sheets each name themselves, in two cases, because the interesting thing about a
+reverse is which reader moves.  **A — the reader on an unpicked sheet**: page 2 of
+`ReversePages((0, 3, 5))` stays page 2, `spin=3`, still showing SHEET 2, while the strip's
+first row changes from SHEET 0 to SHEET 5 and its diff box is that one row
+(51x99 at (61, 19)); **undo is pixel-identical** on both the strip and the reader's widget
+(`None`).  **B — the reader on a picked sheet**: the same pick takes SHEET 0 to the last
+slot, and the reader follows it — page 0 becomes page 5, the spin box reads `6`, and the
+viewport still shows SHEET 0 (`(16, 0, 191, 667)`, the whole page, because the reader is at
+the other end of the book now); undo is again `None` on both widgets, and redo reproduces
+the post-reverse strip exactly (`strip undo/redo` diffs to the same box as
+`before/after`).
+
+**Performance**: on a fresh 540-sheet book a reverse costs **313-385 ms** end to end, of
+which the settle inside it is **292 ms** — two slots at 313, the first half of the book at
+337, every other sheet at 380, the whole book backwards at 385 (**539 calls**, 0.13 ms
+each).  On a book that has already settled, **118-186 ms**, and the simulation of both
+walks over 539 calls is 5.5 ms of it.  A six-sheet book: **1.4 ms**.  The floor is the
+two sweeps that read every page's object number for the read-back, which a move pays too
+and which is the honest cost of checking that the reader's document is the one they were
+promised.
+
+**What is not here**: still nothing calls either reorder — the strip's drop is F10-4s, and
+until it lands `MovePages` and `ReversePages` are things the model can answer rather than
+things a reader can do; `/PageLabels` numbers positions and a reverse leaves it behind
+(F10-4q, pinned by a test here as well as in the move); the **assemble** permission is not
+consulted; extract and duplicate are the two reorders still to come; a one-sheet pick
+writes nothing and the session still records an undo step for it, so Ctrl+Z appears to do
+nothing (F10-4s decides); and a reverse of a pick whose two outer slots hold the *same*
+page object — a book no producer writes and `copy_page` might — settles and walks to the
+order it already had, which is wasted work rather than wrong work.
 
 ---
 
