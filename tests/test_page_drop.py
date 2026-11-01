@@ -139,12 +139,17 @@ def test_a_drop_changes_nothing_only_when_the_line_is_one_the_block_is_already_o
     only picks that can answer with the book they started in are the ones already lying
     in those slots — which is why a scattered pick never gets a silent drop, however
     carefully it is let go.
+
+    The predicate the strip asks is checked against the order the edit writes, so the
+    widget that decides whether to act and the edit that would carry out the action
+    cannot disagree about what "nothing" means.
     """
     gap = gap_for_drop(4, pick, row, after)
     changed = MovePages(pick, gap)._intended(4) != list(range(4))
     occupies_its_own_slots = set(pick) == set(
         range(gap, gap + len(set(pick))))
     assert changed != occupies_its_own_slots
+    assert MovePages(pick, gap).changes_nothing(4) == (not changed)
 
 
 def test_a_drop_inside_a_contiguous_block_names_the_gap_it_already_fills():

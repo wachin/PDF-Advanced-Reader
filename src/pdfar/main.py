@@ -46,7 +46,7 @@ from .page_numbers import (
     EraseSettings, PageNumbersPanel, PageNumberSettings, erase_copy,
     erased_copy_path, numbered_copy_path, stamp_copy,
 )
-from .pages import DeletePages, RotatePages, contiguous_runs, shifted_index
+from .pages import DeletePages, MovePages, RotatePages, contiguous_runs, shifted_index
 from .save import ProtectionError, SaveError, SaveReport, save_document
 from .search import (
     SearchHit, SearchParams, SearchWorker, compile_regex, highlight_spans,
@@ -1373,6 +1373,20 @@ class MainWindow(QMainWindow):
                 shifted_index(page, pages, count)
                 for page in picked if page not in gone)
 
+    def _move_pages(self, pages: Tuple[int, ...], gap: int) -> None:
+        """Put the block the strip was holding into the gap its line named.
+
+        The one page command with nothing to ask and nothing to fix up afterwards: a
+        move takes no sheet away, so the reader's number, the pick and the search's
+        rows all keep pointing at their own sheet through the step's exact map, and
+        ``invalidate`` and the strip's rebuild spend it once each.  A drop whose line
+        runs through the block is never sent here at all — the strip answers it by
+        ignoring the gesture, because an edit that writes nothing still takes a place
+        on the undo stack.
+        """
+        if self.view:
+            self.view.apply_edit(MovePages(pages=tuple(pages), target=int(gap)))
+
     @staticmethod
     def _page_words(pages: Tuple[int, ...]) -> str:
         """The pages a reader picked, said the way a reader counts them: page 2–4, 7."""
@@ -2588,6 +2602,7 @@ class MainWindow(QMainWindow):
         # the handler answers for whichever document is on screen.
         tab.sidebar.page_rotation_requested.connect(self._rotate_pages)
         tab.sidebar.page_deletion_requested.connect(self._delete_pages)
+        tab.sidebar.page_move_requested.connect(self._move_pages)
         # Connect annotation manager to sidebar
         tab.sidebar.set_annotation_manager(tab.view.annotation_manager)
         self._connected_tab = tab
@@ -2614,6 +2629,7 @@ class MainWindow(QMainWindow):
             tab.sidebar.save_requested.disconnect(self._save_annotations)
             tab.sidebar.page_rotation_requested.disconnect(self._rotate_pages)
             tab.sidebar.page_deletion_requested.disconnect(self._delete_pages)
+            tab.sidebar.page_move_requested.disconnect(self._move_pages)
         except TypeError:
             pass
         tab.view.clear_numbering_preview()

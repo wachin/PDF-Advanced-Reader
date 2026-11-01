@@ -10,19 +10,20 @@ try:
 except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 from PyQt6.QtCore import (
-    QItemSelectionModel, QPoint, QRect, QSettings, QSize, Qt, pyqtSignal,
+    QItemSelectionModel, QMimeData, QPoint, QRect, QSettings, QSize, Qt, pyqtSignal,
 )
 from PyQt6.QtGui import (
     QColor, QIcon, QPen, QPixmap,
 )
 from PyQt6.QtWidgets import (
-    QListWidget, QListWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget, QMenu, QInputDialog, QMessageBox, QHBoxLayout,
-    QPushButton, QComboBox, QFileDialog, QProgressBar, QStyle,
+    QAbstractItemView, QListWidget, QListWidgetItem, QTabWidget, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget, QMenu, QInputDialog, QMessageBox,
+    QHBoxLayout, QPushButton, QComboBox, QFileDialog, QProgressBar, QStyle,
     QStyledItemDelegate, QLabel, QToolButton, QLayout, QLayoutItem,
 )
 from . import APP_NAME
 from .edits import Renumbering, Scope
+from .pages import MovePages, gap_for_drop
 from .icons import tinted_icon
 from .render import RenderPool, RenderResult
 from .session import DocumentSession
@@ -151,7 +152,19 @@ class ThumbnailList(QListWidget):
     The strip takes a *pick*, not only a jump: extended selection is what lets a
     reader gather the three sideways pages of a scan and turn them in one edit, and
     it costs nothing beside that — a plain click still selects one page.
+
+    The same pick is what a drag carries, and a drop on it is a reorder: the strip is
+    ``InternalMove`` so Qt draws the boundary line between the rows and starts the drag
+    from the selection, and :meth:`dropEvent` deliberately **does not** reach the base
+    class, because Qt moving its own rows would answer the reader's gesture twice — once
+    by rearranging widgets and once by the page tree, with only the second one knowing
+    what a sheet carries.  The rows are the document's; this widget asks and waits.
     """
+
+    #: The reader let go: the block they were holding and the gap its line names, in
+    #: ``MovePages``' own numbering.  One request per drop, and none at all for a drop
+    #: that would reorder nothing — see :meth:`dropEvent`.
+    page_drop_requested = pyqtSignal(object, object)
 
     def __init__(self, settings: ThumbnailSettings,
                  parent: Optional[QWidget] = None) -> None:
@@ -165,6 +178,80 @@ class ThumbnailList(QListWidget):
         self.setItemDelegate(self.delegate)
         self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDropIndicatorShown(True)
+
+    def picked_pages(self) -> Tuple[int, ...]:
+        """The pages gathered on the strip, in page order.
+
+        Rows are handed out in document order, so a row number and a page number are
+        the same thing until a page-tree edit rebuilds the strip — and that rebuild is
+        the only thing that may change this answer.
+        """
+        picked = [item.data(Qt.ItemDataRole.UserRole)
+                  for item in self.selectedItems()]
+        return tuple(sorted({index for index in picked if isinstance(index, int)}))
+
+    def drop_line(self, pos: QPoint) -> Tuple[Optional[int], bool]:
+        """The line the pointer is on: which row it touches, and whether its lower edge.
+
+        The upper half of a row is the line above it and the lower half the line below,
+        which is the reading the drop indicator draws — Qt marks the row the line runs
+        against, so aiming is the same act as seeing.  ``None`` for the row means blank
+        space, and the pointer's place relative to the first row says which end of the
+        book it is the end or the front of.
+        """
+        item = self.itemAt(pos)
+        if item is None:
+            first = self.item(0)
+            above = (first is not None
+                     and pos.y() < self.visualItemRect(first).top())
+            return None, not above
+        return self.row(item), pos.y() >= self.visualItemRect(item).center().y()
+
+    def _is_the_strips_own_drag(self, mime: QMimeData) -> bool:
+        """Whether this drop is the strip's own rows being moved, and not a file.
+
+        A drop reaches this widget from anywhere — a file hauled in from a file manager
+        lands on the thumbnail the reader was looking at.  What the list's own model
+        declares is the only thing this widget has a rule for, and the test is the
+        model's rather than a mime-type string copied out of Qt.
+        """
+        model = self.model()
+        if model is None:
+            # A `QListWidget` always has one; the signature says it may not.
+            return False
+        return bool(set(model.mimeTypes()) & set(mime.formats()))
+
+    def dropEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        """Ask for the move the line names — and leave the rows exactly where they are.
+
+        Two answers, neither of them passed to ``QListWidget.dropEvent``: a drop that is
+        not this widget's own drag is ignored outright, and a drop whose line runs through
+        the block it is dragging is the book the reader already has.  The second is not a
+        convenience: :meth:`~pdfar.session.DocumentSession.apply` records every edit it is
+        given, so a reorder that writes nothing still takes a place on the undo stack and
+        the reader's next Ctrl+Z appears to do nothing at all.  PdfCraft makes the same
+        call at the same point in the gesture
+        (``crates/ui-egui/src/panels.rs:1667-1670``).
+
+        Nothing picked is covered by the same guard rather than a check of its own: a block
+        of no sheets fills every gap, so a drop with nothing gathered is already "the order
+        the book is in".  Asking twice would only be a second place to be wrong.
+        """
+        if not self._is_the_strips_own_drag(event.mimeData()):
+            event.ignore()
+            return
+        pages = self.picked_pages()
+        row, after = self.drop_line(event.position().toPoint())
+        gap = gap_for_drop(self.count(), pages, row, after)
+        if MovePages(pages, gap).changes_nothing(self.count()):
+            event.ignore()
+            return
+        self.page_drop_requested.emit(pages, gap)
+        event.acceptProposedAction()
 
     def apply_settings(self, settings: ThumbnailSettings) -> None:
         self.delegate.settings = settings
@@ -262,6 +349,10 @@ class Sidebar(QWidget):
     # The sheets to take out of the file.  Asking whether the reader means it is the
     # window's job: a turn is undone by turning back, a delete only by knowing to look.
     page_deletion_requested = pyqtSignal(object)
+    # The block a drop was made of, and the gap its line names.  The strip measures the
+    # gesture; only the window can spend it, because a move is an edit and an edit is an
+    # undo step, a re-render and a carried pick — none of which a widget here can reach.
+    page_move_requested = pyqtSignal(object, object)
     # The window owns saving: it is the one place that can explain a refusal, and
     # a second opinion from here would only be able to say "failed".
     save_requested = pyqtSignal()
@@ -298,6 +389,7 @@ class Sidebar(QWidget):
         self.thumbs = ThumbnailList(self._thumb_settings)
         self.thumbs.itemDoubleClicked.connect(self._on_thumb)
         self.thumbs.customContextMenuRequested.connect(self._on_thumbs_context_menu)
+        self.thumbs.page_drop_requested.connect(self.page_move_requested.emit)
         self.thumbs_tab = QWidget()
         thumbs_layout = QVBoxLayout(self.thumbs_tab)
         thumbs_layout.setContentsMargins(0, 0, 0, 0)
@@ -691,10 +783,12 @@ class Sidebar(QWidget):
 
     # ------------------------------------------ page commands, from the strip
     def selected_pages(self) -> Tuple[int, ...]:
-        """The pages the reader has picked, in page order."""
-        picked = [item.data(Qt.ItemDataRole.UserRole)
-                  for item in self.thumbs.selectedItems()]
-        return tuple(sorted({index for index in picked if isinstance(index, int)}))
+        """The pages the reader has picked, in page order.
+
+        The strip's own answer: the same method a drop reads, so the pick a context-menu
+        command acts on and the pick a drag carries cannot be gathered differently.
+        """
+        return self.thumbs.picked_pages()
 
     def select_pages(self, pages: Iterable[int]) -> None:
         """Put the pick back on the sheets carrying these page numbers.

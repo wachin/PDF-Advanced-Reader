@@ -1611,7 +1611,7 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       page tree the way F10-4p does.  Duplicate needs measuring before it is written:
       whether `copy_page` gives a sheet its own object or files the *same* object in two
       slots is what the settle's walk, the strip and a per-page cache all have to be told
-- [~] **F10-4s** — *The strip's drop reaches the move.*  F10-4p built the rule a drop
+- [x] **F10-4s** — *The strip's drop reaches the move.*  F10-4p built the rule a drop
       between two rows means and nothing calls it: `ThumbnailList` is a `QListWidget` with
       `ExtendedSelection` and a delegate of its own, so this is Qt's drag-and-drop —
       `setDragEnabled`, `setAcceptDrops`, the drop indicator, and the gap a drop position
@@ -1630,8 +1630,13 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       on every non-empty pick of books of 1 to 6 and 8 sheets, and through MuPDF on the
       self-naming book and the four licensed papers.  The refusal is deliberately not here:
       an empty pick still names a line, and `MovePages` remains the one that says no page
-      was chosen.  **Still to do**: the drag itself — the strip asking for the move, and
-      the decision about a silent drop.
+      was chosen.  The strip then asks rather than rearranges
+      (`page_move_requested`, `MainWindow._move_pages`): `InternalMove` for the boundary
+      line and the drag-from-the-pick, `dropEvent` swallowed so Qt never moves its own rows,
+      a foreign drop refused on the mime types the list's own model declares, and the
+      silent drop refused before it is recorded — on `MovePages.changes_nothing`, the
+      edit's own predicate, so the widget that decides whether to act and the edit that
+      would carry the action out cannot disagree about what "nothing" means.
 - [ ] **F10-4q** — *`/PageLabels` numbers a position, so a reorder renumbers the sheets.*
       The catalog says "from index 0, count 101", not "from this sheet", so after a move the
       sheet that arrived at the front is printed 101 and the one that used to read 101 prints
@@ -1878,10 +1883,11 @@ landed second (F10-4r) and ran that same carry rather than writing a new one, wh
 also where the carry became shared code: a reverse moves no sheet outside its pick, so
 it is the first reorder whose cache answer is the pick instead of "I cannot say".
 Two of the four are still to come — duplicate, which has to be measured before it is
-written, and extract, which leaves the document altogether — and between them and the
-reader there is a surface neither of them has yet: the strip's drop, with which the
-move becomes something a reader can do rather than something the model can answer
-(F10-4s).  A `/PageLabels` numbering is still what a reorder leaves behind (F10-4q),
+written, and extract, which leaves the document altogether.  The surface the move and
+the reverse both needed arrived between them: the strip's drop now asks for `MovePages`,
+so a reorder is something a reader can do rather than something the model can answer
+(F10-4s), while reverse still waits for the menu command that reaches it.  A
+`/PageLabels` numbering is still what a reorder leaves behind (F10-4q),
 because labels number positions and no sheet carries them.
 
 Goal:
@@ -6398,11 +6404,11 @@ sheet of the book to the end **337 ms / 269 calls**, the worst plan measured.  A
 delete of one page at ~100 ms, a reorder is dominated by the settle it owes, and the
 shorter-of-two-walks rule is what keeps the *move* part from being the expensive half.
 
-**What is not here**: nothing calls this yet — the thumbnail strip has no drag-and-drop, so
-the rule is the model's and the surface is the next item, and whoever wires it decides
-whether a drop into the gap the pick already fills belongs on the undo stack at all (the
-edit writes nothing and the session still records it, so one Ctrl+Z would appear to do
-nothing); `/PageLabels` numbers positions and is left behind (F10-4q); the **assemble** permission is not consulted, so a document
+**What is not here**: nothing called this when it landed — the surface came later, and with it
+the decision this note left open: a drop into the gap the pick already fills is refused by the
+widget before an edit exists, so it never reaches the undo stack (F10-4s,
+`MovePages.changes_nothing`); `/PageLabels` numbers positions and is left behind (F10-4q); the
+**assemble** permission is not consulted, so a document
 that forbids page assembly accepts a move like any other; extract and duplicate
 are still to come against the same pick, and reverse landed with the carry this edit
 built for them (F10-4r); a move onto a book whose pages hang off a node the
@@ -6522,15 +6528,139 @@ two sweeps that read every page's object number for the read-back, which a move 
 and which is the honest cost of checking that the reader's document is the one they were
 promised.
 
-**What is not here**: still nothing calls either reorder — the strip's drop is F10-4s, and
-until it lands `MovePages` and `ReversePages` are things the model can answer rather than
-things a reader can do; `/PageLabels` numbers positions and a reverse leaves it behind
+**What is not here**: `MovePages` has its caller now — the strip's drop asks for it (F10-4s) —
+while `ReversePages` is still a thing the model can answer rather than a thing a reader can do,
+waiting for the context-menu command that will give it one;
+`/PageLabels` numbers positions and a reverse leaves it behind
 (F10-4q, pinned by a test here as well as in the move); the **assemble** permission is not
 consulted; extract and duplicate are the two reorders still to come; a one-sheet pick
-writes nothing and the session still records an undo step for it, so Ctrl+Z appears to do
+writes nothing and the widget that used to hand it over now refuses it before an edit exists,
+so it is no longer a Ctrl+Z that appears to do
 nothing (F10-4s decides); and a reverse of a pick whose two outer slots hold the *same*
 page object — a book no producer writes and `copy_page` might — settles and walks to the
 order it already had, which is wasted work rather than wrong work.
+
+---
+
+### F10-4s The strip's drop reaches the move — [x] Implemented
+
+**Task**: a reader drags the thumbnails they gathered, lets go on a line between two of
+them, and the document reorders.  F10-4p built the arithmetic and F10-4s's first half
+(`gap_for_drop`) isolated it; this is the surface that calls it, plus the decision the task
+left open — whether a drop into the gap the pick already fills belongs on the undo stack.
+It does not, and the strip now refuses that gesture instead of recording it.
+
+**Solution**: `src/pdfar/sidebar.py` — `ThumbnailList` gains `setDragEnabled`,
+`setAcceptDrops`, `DragDropMode.InternalMove` and `setDropIndicatorShown`, four methods
+(`picked_pages`, `drop_line`, `_is_the_strips_own_drag`, `dropEvent`) and
+`page_drop_requested`; `Sidebar` re-exports it as `page_move_requested` and
+`selected_pages()` now delegates to the strip's `picked_pages()`, so the pick a context-menu
+command acts on and the pick a drag carries are gathered by one function.
+`src/pdfar/main.py` — `MainWindow._move_pages(pages, gap)`, connected and disconnected
+beside the rotation and the delete.  `src/pdfar/pages.py` — `changes_nothing(count)` on
+`MovePages` and on `ReversePages`, which both `apply()` methods already used as their
+short-circuit and which the widget asks before it asks for anything.
+
+**Why the rows must not move.** `InternalMove` is exactly what a reader expects and exactly
+what must not happen: Qt would reorder its *rows*, and the rows are the document's.  A strip
+that answers the gesture itself does it twice — once by moving widgets and once by the page
+tree — and only the second knows what a sheet carries: its annotations, the outline row that
+names it, the reader's place in it, the search's hit.  So `dropEvent` never reaches
+`QListWidget.dropEvent`; the widget measures the gesture, emits one request, and waits for
+the rebuild that follows the edit to tell it what order its rows are in.  `Movement.Static`
+was already set, so no gesture has ever moved a thumbnail behind the document's back.
+
+**The silent drop, and whose predicate it is.** `DocumentSession.apply` records *every* edit
+it is handed, so a reorder that writes nothing still takes a slot on the undo stack and the
+reader's next Ctrl+Z appears to do nothing at all — they press it twice and only then move.
+The refusal is therefore asked before the edit is, and of the edit: `changes_nothing` is
+`MovePages`'s own `_intended(count) == list(range(count))`, so the widget that decides
+whether to act and the edit that would carry the action out cannot disagree about what
+"nothing" means.  PdfCraft makes the same call at the same point in the gesture, and states
+it as arithmetic on the pick (`crates/ui-egui/src/panels.rs:1667-1670`,
+`if contiguous && to == first { return }`); reading it off the order the move writes needs
+no such case split and is right for a scattered pick too.
+
+**An empty pick is the same guard, not a second one.** The first version checked
+`if not pages` before the predicate.  A mutant that deleted that check survived the whole
+suite, which is how the redundancy was found: a block of no sheets fills every gap, so
+`changes_nothing` is already True for it.  The branch is gone; the behaviour is unchanged and
+still tested (`test_a_drop_with_nothing_gathered_asks_for_nothing`), which is the point — the
+test asserts what the reader gets, not how many `if`s said it.
+
+**What PyQt6 would not do**, measured before any of it could be asserted:
+`QCoreApplication.sendEvent` delivers a synthetic `QDropEvent` to *nothing* — not a
+`QListWidget`, not its viewport, not a bare `QWidget` with `setAcceptDrops(True)` — while
+`QWidget.event` reaches a plain widget's `dropEvent` and not a scroll area's, so the harness
+calls `dropEvent` outright and the settings test is what proves Qt would ever reach it.
+`QAbstractItemView.dropIndicatorShown()` is protected and unwrapped; `showDropIndicator()` is
+the readable half, and it reads back what was set rather than being forced by the mode
+(InternalMove with the flag switched off answers False).  `QDropEvent.setSource` is not
+wrapped, so `event.source()` is always `None` in a test and the foreign-drag guard cannot be
+written on it; `QAbstractItemView.canDecode` is not wrapped either, so the guard asks the
+list's own model what it declares and intersects that with the drop's formats.  And
+`QListWidget.itemAt` answers with a row for any point in layout coordinates, however far
+outside the viewport — a scrolled strip has no blank space below its last row at all, and
+above its first row there is never blank space, so the two ends of the book are named by the
+margin under the last thumbnail and by a pointer that left the widget's frame.
+
+**Tests**: 41 cases in `tests/test_strip_drag_drop.py`, on the real widget with real
+geometry.  The three rules the strip owns — a line through the block is not an action; not
+every drop is the reader's drag; the payload never says which pages move — each get their
+own test, and the two halves of every one of the six rows are checked against
+`gap_for_drop` as a conditional (a line the block already sits on asks for nothing, any
+other line asks for *that* gap).  Four cases go through the real `MainWindow`: the book
+comes out `[2, 3, 0, 1, 4, 5]` with the undo stack one deeper and the pick carried from
+`(0, 1)` to `(2, 3)`; a silent drop leaves nothing to undo and does not dirty the document;
+a reader on page 0 whose own page was moved ends on page 2 still looking at SHEET 0; and
+undo puts the book back with the strip behind it.  `changes_nothing` is swept over every
+non-empty pick of books of 1 to 6 and 8 sheets against the order the edit writes — including
+`(2, 2)`, which no strip can send, because it is the only pick where "one sheet named" and
+"one name in the pick" come apart.  `tests/test_page_drop.py` now checks the predicate
+against the identity rule in the same sweep that checks the arithmetic, so the two halves of
+F10-4s cannot drift apart.
+
+**Mutations**: 14, of which 13 died — the base class called after the emit (8 tests), the
+silent-drop guard removed (9), the mime guard removed (1), the accept removed (8), the row
+halves swapped (11) and forced to one side (9), blank space read as row 0 (1) or as the front
+(1), the pointer's row used instead of the pick (12), the signal never connected (14),
+`MovePages.apply` writing even when it changes nothing (2), a one-thumbnail reverse decided
+by name-count (5), and the move's predicate replaced by a target test (79).  The fourteenth,
+deleting the empty-pick check, is the survivor that deleted itself.
+
+**Suite**: **2574 passed, three consecutive runs** (165.3 / 162.5 / 158.5 s).  Ruff
+unchanged at the 7
+pre-existing errors; mypy unchanged at **553 errors in 16 files** — the model's `None` check
+came back one over when it was removed, because the signature says a `QListWidget` may not
+have one, and stays as the type boundary rather than as a rule.
+
+**Verified by eye.** `/tmp/f104s2/` drives the real window over a six-sheet book and grabs
+the strip itself.  **Before**: rows 1-6 read Hello, Page 2, Page 3, Page 4, Page 5, Page 6.
+**After a drop of rows 1-2 onto the lower half of row 4**: the same six numbers 1-6 with
+**Page 3, Page 4, Hello, Page 2, Page 5, Page 6** under them — the sheets moved and the
+numbering did not, which is the whole claim of a reorder — and rows 3 and 4 are the selected
+ones, so the pick travelled with the block it moved.  The reader, who was on page 0, is on
+page 2 and the viewport still shows SHEET 0; the tab reads `• book.pdf`.  **After undo**:
+the six sheets back in their own order, the pick back on rows 1-2, the mark back on row 1,
+and the dirty bullet gone.  Redo puts the reorder back exactly as it was.  What a synthetic
+drop cannot show is the **indicator line itself**, which only exists during a drag Qt is
+holding: the settings are asserted (mode, `showDropIndicator`, the viewport's
+`acceptDrops`) and the line wants a human hand to see.
+
+**Performance**: the strip's whole decision is the arithmetic plus one permutation read —
+**61-77 µs** on a 540-sheet book, from a one-sheet pick to the worst measured 269-sheet one,
+about 20 µs of it the widget's own `itemAt`.  The move it asks for is the 313-385 ms F10-4r
+measured, so the gesture costs nothing that the edit does not already cost, and the guard
+that refuses a silent one is cheaper still than the reorder it prevents.
+
+**What is not here**: *Reverse* still has no caller — the context menu offers the turn and
+the delete, so `ReversePages.changes_nothing` is written and tested for the menu that will
+ask it; the drop indicator needs a real drag to see; a payload from another widget's list
+passes the mime test and is accepted, deliberately, because the block is this strip's pick
+and the gap is this pointer's line, which is what the test pins; extract and duplicate are
+the two reorders still to come; `/PageLabels` numbers positions and a move leaves it behind
+(F10-4q); and the **assemble** permission is not consulted, which is the same gap every
+page-tree edit has and is not this surface's to close.
 
 ---
 

@@ -750,6 +750,18 @@ class MovePages(Edit):
         """
         return tuple(self._intended(before_count))
 
+    def changes_nothing(self, count: int) -> bool:
+        """Whether this move writes the order the book is already in.
+
+        A reader who lets go inside the block they are dragging has asked for the book
+        they have.  ``apply`` already knows that — it returns before the settle — but
+        the strip needs to know it too, because an ``Edit`` that writes nothing still
+        takes a place on the undo stack, and a Ctrl+Z that appears to do nothing is a
+        worse answer than not recording the drop at all.  The question is the edit's
+        rather than the widget's so that the two of them cannot disagree.
+        """
+        return self._intended(count) == list(range(count))
+
     @property
     def label(self) -> str:
         moved = len(set(self.pages))
@@ -763,10 +775,9 @@ class MovePages(Edit):
             raise EditError(
                 f"A move names the gap its block lands in, between 0 and "
                 f"{count - len(set(self.pages))}, and {self.target} is not one")
-        want = self._intended(count)
-        if want == list(range(count)):
+        if self.changes_nothing(count):
             return
-        _reorder(doc, want)
+        _reorder(doc, self._intended(count))
 
 
 @dataclass(frozen=True)
@@ -822,6 +833,17 @@ class ReversePages(Edit):
         """
         return tuple(self._intended(before_count))
 
+    def changes_nothing(self, count: int) -> bool:
+        """Whether this reverse writes the order the book is already in.
+
+        True for a pick of one sheet — a strip can offer *Reverse* on the thumbnail under
+        the cursor — and for no other pick, since two slots holding different sheets
+        always change hands.  Asked by the surface before it records anything, for the
+        same reason ``apply`` returns early: a step that writes nothing still takes a
+        place on the undo stack.
+        """
+        return self._intended(count) == list(range(count))
+
     @property
     def label(self) -> str:
         turned = len(set(self.pages))
@@ -831,7 +853,6 @@ class ReversePages(Edit):
 
     def apply(self, doc: fitz.Document) -> None:
         count = _checked_pick(doc, self.pages, "reverse")
-        want = self._intended(count)
-        if want == list(range(count)):
+        if self.changes_nothing(count):
             return
-        _reorder(doc, want)
+        _reorder(doc, self._intended(count))
