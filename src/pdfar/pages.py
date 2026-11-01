@@ -5,12 +5,15 @@ every one here is an :class:`~pdfar.edits.Edit`: it says what the user asked for
 runs against a throwaway copy, and is adopted only when it returns without
 raising.  Nothing in this module touches the live document.
 
-Three items so far, in the order the roadmap needed them: turning a page, which is
+Four items so far, in the order the roadmap needed them: turning a page, which is
 where the page-tree machinery was proved; taking pages out, which is where it
 starts to matter that every number above the cut means something else afterwards;
-and settling the tree, which is the one every reorder waits for — a page that does
-not say how big it is has to say so before anything decides which node it hangs
-from.
+settling the tree, which is the one every reorder waits for — a page that does not
+say how big it is has to say so before anything decides which node it hangs from;
+and moving pages, which is that reorder, and the first edit whose *only* effect is
+the numbering: nothing is added and nothing is taken away, so every page number
+held outside the document has to be re-aimed at once and a map that clamps — the
+delete's answer — would be a lie.
 """
 
 from __future__ import annotations
@@ -250,14 +253,23 @@ def _stated(doc: fitz.Document, xref: int, key: str) -> Optional[str]:
 
 
 def _walk_tree(doc: fitz.Document, xref: int, path: "frozenset[int]",
-               sheets: List[int], branches: List[Tuple[int, Sequence[str]]],
-               depth: int = 0) -> None:
+               sheets: List[int], reached: List[int], depth: int = 0) -> None:
     """Collect every page the tree reaches, and every node above them.
 
     *sheets* keeps a page the tree lists twice, because ``page_count`` counts it
     twice and the two have to agree for anything to be settled.  *path* is the chain
     from the root to here — not every node already seen — so a sheet named twice is
-    a document and a node that names itself is a refusal.
+    a document and a node that names itself is a refusal.  *reached* is the nodes
+    themselves, which the settle uses to ask whether a key is stated anywhere at all:
+    a move re-parents by ``/Parent``, so a node the pages currently walk *past* is one
+    they can land under — see the ``live`` set in :meth:`SettlePageTree.apply`.
+
+    A ``/Pages`` node with an **empty** ``/Kids`` array contributes nothing and is
+    walked past: that is the shape ``move_page`` leaves behind, because a page that
+    moves is re-parented into the node it lands in and the node it came from keeps
+    its dictionary with no children.  Refusing it would refuse the document the
+    previous edit just made.  A node that states no ``/Kids`` at all is a different
+    thing — MuPDF counts it as a page — and is refused.
 
     This says what the *tree* reaches.  What a page inherits is a different walk,
     because the renderer asks the page's own ``/Parent`` links: see
@@ -285,15 +297,17 @@ def _walk_tree(doc: fitz.Document, xref: int, path: "frozenset[int]",
         sheets.append(xref)
         return
     if depth:
-        branches.append((xref, keys))
+        reached.append(xref)
     children = [int(found) for found in re.findall(r"(\d+)\s+0\s+R", kids)]
     if not children:
-        raise EditError(
-            f"Node {xref} of the page tree holds no children, so its pages "
-            f"cannot be named")
+        if kids == "null":
+            raise EditError(
+                f"Node {xref} of the page tree states no /Kids, so it has no "
+                f"children to name")
+        return
     below = path | {xref}
     for child in children:
-        _walk_tree(doc, child, below, sheets, branches, depth + 1)
+        _walk_tree(doc, child, below, sheets, reached, depth + 1)
 
 
 def _parent_chain(doc: fitz.Document, page: int, root: int) -> Tuple[int, ...]:
@@ -391,6 +405,10 @@ class SettlePageTree(Edit):
       is usually an object other pages share.  An *intermediate* node holding one is
       therefore refused by name; the root's is left alone, because every page in the
       document shares the root and no reorder inside one document can change that.
+    * **Refuse rather than drop.**  A tree whose pages cannot be counted, a ``/Kids``
+      entry that is not a page, a node that states no ``/Kids`` at all and a chain —
+      down through ``/Kids`` or up through ``/Parent`` — that comes back around are
+      all refused, because the document cannot be described, let alone settled.
     * **Rebuild the tree.**  Nothing here needs it: once a page states its own box
       and turn, the node it hangs from says nothing about how it draws.  And the
       library's way of flattening is the catalog damage above, while a hand-built one
@@ -423,8 +441,8 @@ class SettlePageTree(Edit):
             raise EditError("A document with no pages has no page tree to settle")
         root = _pages_root(doc)
         sheets: List[int] = []
-        branches: List[Tuple[int, Sequence[str]]] = []
-        _walk_tree(doc, root, frozenset(), sheets, branches)
+        reached: List[int] = []
+        _walk_tree(doc, root, frozenset(), sheets, reached)
         if len(sheets) != count:
             raise EditError(
                 f"The page tree holds {len(sheets)} pages but the document says "
@@ -434,8 +452,11 @@ class SettlePageTree(Edit):
         # reaches one way while /Parent reaches another is settled by /Parent.
         chains = [(page, _parent_chain(doc, page, root))
                   for page in dict.fromkeys(sheets)]
+        # Only the nodes a page actually asks through.  A node the tree still
+        # reaches — one a move just emptied, or one a producer left off every
+        # /Parent chain — states geometry that nothing resolves any more, and
+        # refusing it would refuse the document the previous edit made.
         nodes = {root}
-        nodes.update(xref for xref, _ in branches)
         for _, chain in chains:
             nodes.update(chain)
         # Every node a page asks through, whether or not the tree reaches it that
@@ -460,10 +481,16 @@ class SettlePageTree(Edit):
                     f"/Resources on the page tree at object {xref} is inherited "
                     f"dictionary by dictionary, which a page cannot be given a copy "
                     f"of; this document’s tree is left as it is")
+        # Whether a key is stated *anywhere* is asked of the whole tree, not of the
+        # chains: a move re-parents by /Parent, so a sheet that walks past a node
+        # today can be under it tomorrow — measured on a book whose /Kids and /Parent
+        # disagree, where the node every page bypasses states the turn that would
+        # otherwise be skipped here and adopted on the first reorder.
+        live = nodes | set(reached)
         # Each node is asked once per key rather than once per page: on a tree whose
         # nodes all leave a key alone the pages are never read at all, and that is
         # what a flat document does with /CropBox and /Rotate.
-        stated = {key: [value for value in (_stated(doc, node, key) for node in nodes)
+        stated = {key: [value for value in (_stated(doc, node, key) for node in live)
                         if value is not None] for key in PUSHABLE_KEYS}
         for page, ancestors in chains:
             for key in PUSHABLE_KEYS:
@@ -498,3 +525,171 @@ def _resolves_to(doc: fitz.Document, page: int, ancestors: Tuple[int, ...],
         return next((value for holder in (page,) + ancestors
                      if (value := _stated(doc, holder, "MediaBox")) is not None), None)
     return None
+
+
+def _walk_from_front(want: Sequence[int]) -> Tuple[Tuple[int, int], ...]:
+    """The calls that lay a book out slot by slot, from the first one.
+
+    Each call fills the slot the walk has reached, so everything below it is left
+    where it is and never has to be placed again: ``move_page(frm, index)`` takes
+    the sheet out of a slot above and puts it in front of the one at *index*, which
+    is exactly where the fill belongs — and *frm* > *index* is not an assumption but
+    a consequence, since the slots under *index* already hold the sheets they should.
+    """
+    calls: List[Tuple[int, int]] = []
+    at = list(range(len(want)))
+    for index in range(len(want)):
+        frm = at.index(want[index])
+        if frm == index:
+            continue
+        calls.append((frm, index))
+        at.insert(index, at.pop(frm))
+    return tuple(calls)
+
+
+def _walk_from_back(want: Sequence[int]) -> Tuple[Tuple[int, int], ...]:
+    """The same fill run the other way, for a book already right at the end.
+
+    Here the sheet being placed always comes from *below* the slot, because
+    everything above it has been fixed — and a sheet taken from below shifts the
+    slots under it up by one, so the number handed over is *index + 1* to land on
+    *index*, or ``-1`` for the last slot, which is how PyMuPDF spells "after the
+    last page" (``to == page_count`` is refused outright).
+    """
+    calls: List[Tuple[int, int]] = []
+    at = list(range(len(want)))
+    last = len(want) - 1
+    for index in range(last, -1, -1):
+        frm = at.index(want[index])
+        if frm == index:
+            continue
+        calls.append((frm, index + 1 if index < last else -1))
+        at.insert(index, at.pop(frm))
+    return tuple(calls)
+
+
+def _repair_plan(want: Sequence[int]) -> Tuple[Tuple[int, int], ...]:
+    """The fewer of the two walks.
+
+    A reorder is one call per sheet it has to place, and nothing in PyMuPDF does the
+    whole move at once: ``select`` builds a sub-PDF and strips the catalog, which is
+    why F10-4o refused it.  The calls are cheap — 0.3 ms each measured on a settled
+    540-sheet book, against the settle's own 291 — but *which* end the walk starts at
+    is not a rounding error: sending the first sheet of that book to the end is one
+    call from the back and 539 from the front, 0.3 ms against 61.4.  Both directions
+    are simulated, and the shorter plan is run.
+    """
+    front = _walk_from_front(want)
+    back = _walk_from_back(want)
+    return back if len(back) < len(front) else front
+
+
+@dataclass(frozen=True)
+class MovePages(Edit):
+    """Move the picked sheets so the block starts at gap *target*.
+
+    The rule is the reader's, not the library's: the block keeps its own order, the
+    rest keep theirs, and *target* counts the gaps of the book **without** the block
+    in it — which is what a drop between two rows of the thumbnail strip means, and
+    is what PdfCraft's ``move_pages`` implements (``to.min(rest.len())``, so a target
+    past the last gap is the end rather than an error).  A sheet named twice is one
+    sheet moved once.
+
+    Two things the edit does before anything moves:
+
+    * **Nothing, when the block is already there.**  A drop into the gap the pick
+      already fills writes no key and dirties no document — including the settle
+      below, which on a book whose geometry lives on an ancestor would otherwise
+      stamp a box onto every page to carry out a reorder that asks for none.
+    * **The settle.**  ``SettlePageTree`` first, because a move is exactly the
+      reorder a page hanging its size off an ancestor cannot survive: measured on the
+      nested book, a bare ``move_page`` re-parented the 260×360 sheet into the node it
+      landed in and drew it 400×300 with that node's turn.  The refusal comes with it,
+      which is the point — a book whose ancestor holds a ``/Group`` is not moved,
+      rather than moved and flattened.
+
+    Then the walk, and a read of what the tree says afterwards: the order is checked
+    against the plan by page object, since a reorder that got the page count right and
+    the sheets wrong is the one failure a reader would notice as their document being
+    quietly shuffled.
+
+    What travels with a sheet and what does not: MuPDF re-derives the outline rows and
+    the link destinations from the page objects, so those follow the sheet they named,
+    and the annotations are its own.  ``/PageLabels`` follows the *position* — the
+    catalog says "from index 0", not "from this sheet" — so a numbered book comes out
+    of a move with new numbers printed on old sheets.  Nothing here rewrites labels;
+    that gap is F10-4q, and one test in ``tests/test_page_move.py`` pins it.
+    """
+
+    pages: Tuple[int, ...]
+    target: int = 0
+
+    scope = Scope.STRUCTURE
+
+    @property
+    def changed(self) -> Optional[Tuple[int, ...]]:
+        """No page number survives the step, though no page content is touched.
+
+        The sheets keep their words — which is why :attr:`scope` stays
+        ``STRUCTURE`` and a render cache keeps its bitmap — but every one of them is
+        filed under a different number, so a per-page cache cannot keep a single
+        entry under the key it was written with.
+        """
+        return None
+
+    def _intended(self, count: int) -> List[int]:
+        """The order the tree is asked to read: ``out[i]`` is the sheet slot *i* holds."""
+        moved = set(self.pages)
+        block = sorted(moved)
+        rest = [index for index in range(count) if index not in moved]
+        at = min(max(self.target, 0), len(rest))
+        return rest[:at] + block + rest[at:]
+
+    def page_order(self, before_count: int) -> Tuple[int, ...]:
+        """The same permutation, published as the map a step carries.
+
+        Exact in both directions, because a move loses nothing: unlike the delete's
+        map this one never lands a held number on a neighbour, so the reader's place,
+        a bookmark, the strip's pick and the search's rows all keep pointing at their
+        own sheet — or stop pointing at it, in the case of a pick that names a sheet
+        the step did not move.
+        """
+        return tuple(self._intended(before_count))
+
+    @property
+    def label(self) -> str:
+        moved = len(set(self.pages))
+        if moved == 1:
+            return "Move Page"
+        return f"Move {moved} Pages"
+
+    def apply(self, doc: fitz.Document) -> None:
+        if not self.pages:
+            raise EditError("No page was chosen to move")
+        count = doc.page_count
+        word = "page" if count == 1 else "pages"
+        # The whole pick is checked before a single sheet moves, and a negative
+        # index with it: MuPDF refuses a negative *source* and accepts a negative
+        # *target* as "the end", and neither is the rule this edit means.
+        for index in self.pages:
+            if not 0 <= index < count:
+                raise EditError(
+                    f"Page {index + 1} is not in this document, which has "
+                    f"{count} {word}")
+        if self.target < 0:
+            raise EditError(
+                f"A move names the gap its block lands in, between 0 and "
+                f"{count - len(set(self.pages))}, and {self.target} is not one")
+        want = self._intended(count)
+        if want == list(range(count)):
+            return
+        before = [doc.load_page(index).xref for index in range(count)]
+        SettlePageTree().apply(doc)
+        for frm, to in _repair_plan(want):
+            doc.move_page(frm, to)
+        after = [doc.load_page(index).xref for index in range(count)]
+        asked = [before[sheet] for sheet in want]
+        if after != asked:
+            raise EditError(
+                "The page tree does not read the order this move asked for; "
+                "nothing is moved")

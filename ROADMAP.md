@@ -1560,8 +1560,40 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       they always did, one map is spent once by its identity, and when the cut takes the
       reader's current match the notice goes blank instead of counting matches the reader is
       not on.
-- [ ] Extract, duplicate, move, reverse — the same runs against the same pick, each
-      settling the page tree with F10-4o first
+- [x] **F10-4p** — *Move: the picked block lands in the gap it was dropped into.*
+      The reorder F10-4o exists for, and the first whose *only* effect is the numbering:
+      nothing is added and nothing is taken away, every sheet keeps its words, and the one
+      thing that changes is which sheet wears which number — so the reader's page, the
+      strip's pick, a bookmark and a search row all have to be re-aimed at once, and the
+      delete's map, which lands a gone sheet on the neighbour that took its number, would be
+      a lie here.  MuPDF's `move_page` also reshapes the sheet it moves: measured on the
+      nested fixture the 260×360 page came out 400×300 with the other ancestor's turn,
+      because a move re-parents by `/Parent` and a page's geometry is inherited from wherever
+      it hangs.
+      **Landed**: `MovePages(pages, target)` — the rule a reader's drop means (the block
+      keeps its order, the rest keep theirs, the gap is counted in the book *without* the
+      block in it, a target past the last gap is the end, a sheet named twice is one sheet
+      moved once), the pick and the gap checked whole before anything is written, **nothing**
+      written when the block already fills the gap it was dropped into, `SettlePageTree`
+      first so no sheet changes shape, and then a repair walk: PyMuPDF has no one-call
+      reorder, so the intended order is simulated from the front *and* from the back and the
+      shorter plan is run — one call where the front walk spends 539 on a 540-sheet book —
+      and the tree is read back against the plan before the step is adopted.  Every
+      non-empty pick at every gap of every book of three to six sheets lands where the rule
+      says: 846 of them.  Two settle rules moved with it: a node a move has *emptied* is
+      walked rather than refused (a session's second reorder used to fail on the tree its
+      first one produced), and whether a key is stated at all is asked of the whole tree
+      rather than of the chains, because a node a page walks past today is one a move can
+      put it under tomorrow.
+- [ ] Extract, duplicate, reverse — the other three runs against the same pick, each
+      settling the page tree the way F10-4p does
+- [ ] **F10-4q** — *`/PageLabels` numbers a position, so a reorder renumbers the sheets.*
+      The catalog says "from index 0, count 101", not "from this sheet", so after a move the
+      sheet that arrived at the front is printed 101 and the one that used to read 101 prints
+      103.  Measured, and pinned by a test in `tests/test_page_move.py` rather than filled:
+      nothing in PDFAR re-aims labels across a page-tree step, and PdfCraft — which has the
+      machinery, and spends it on its *delete* (`labels::drop_deleted_pages`) — does not
+      spend it on `move_pages` either.
 - [ ] The **assemble** permission asked before a page-tree edit, as PdfCraft gates
       `DeletePages` / `MovePages` / `RotatePages` on the document's `/P` flags: PDFAR keeps
       a file's permissions through a save and never consults them at edit time, so a
@@ -1597,8 +1629,8 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       page list that cannot be counted or a chain that loops — down through `/Kids`
       or up through `/Parent` — is refused whole.  It rewrites nothing when the
       document already states everything, which is the ordinary case.  Nothing
-      reorders pages yet, so this is the step that the extract/duplicate/move/reverse
-      item above has to call first; see `### F10-4o`.
+      reordered pages when it landed, so it was written first; every reorder calls it
+      now (F10-4p); see `### F10-4o`.
 - [ ] Cross-document copy that rewires parents, destinations and fields, and
       drops links whose target was not copied
 - [ ] Metadata and outline preserved; outline entries pointing at deleted pages
@@ -1793,9 +1825,13 @@ Once every page states its own geometry the node it hangs from stops mattering, 
 rebuild would be a cost with nothing to buy — and an ancestor holding a `/Group` or a
 `/Resources`, which a page cannot be handed a faithful copy of, is refused by name
 rather than flattened into a change of appearance (F10-4o).
-Next in order: extract, duplicate, move and reverse, which run the same carry
-against the same pick — and each of which settles the tree with F10-4o's step
-before it touches a page reference.
+Move landed first of those four (F10-4p), and it is the one that calls F10-4o's step:
+a move is the reorder that changes nothing but the numbering, so it settles the tree
+before it touches a page reference and publishes the exact permutation the reader's
+page, the strip's pick, the bookmarks and the search rows are re-aimed with.  Extract,
+duplicate and reverse run the same carry against the same pick and are next; a
+`/PageLabels` numbering is the one thing a move still leaves behind (F10-4q), because
+labels number positions and no sheet carries them.
 
 Goal:
 
@@ -6188,6 +6224,140 @@ reader sees; a `/Page` that is used as an ancestor, or a node that is a dictiona
 `/Type`, is walked as whatever the walk makes of it rather than diagnosed; and the same
 three keys stay inheritable in a document this step has settled — the *nodes* still hold
 them, and only the pages have grown their own copies.
+
+---
+
+### F10-4p Move the picked block into the gap it was dropped into — [x] Implemented
+
+**Task**: `MovePages(pages, target)` — the sheets the reader picked, lifted out in their
+own order and put back starting at the gap they dropped them into, with nothing added,
+nothing removed and nothing re-rendered.
+
+**Solution**: `src/pdfar/pages.py` — `MovePages` (`:588`), `_walk_from_front` (`:530`),
+`_walk_from_back` (`:550`), `_repair_plan` (`:571`); two rules of `SettlePageTree` moved
+with it (`_walk_tree` `:255`, the `live` set in `apply` `:355`).
+
+**The harm, measured first.** `move_page` is not a reorder that leaves the rest alone: on
+the three-sheet fixture with two ancestors, the sheet that reads 260x360 came out
+**400x300** with the turn of the node it landed under, because a move re-parents by
+`/Parent` and F10-4o's inheritance is where a page gets its geometry from.  MuPDF's own
+move also **empties the node the sheet leaves** — measured `Count 0 kids=[]` behind it,
+with every `/Parent` updated — which is a tree the settle shipped in F10-4o *refused*, so
+the second reorder of a session would have failed on the tree the first one produced.
+And there is no one-call reorder to want: PyMuPDF offers `move_page` and `select`, and
+`select` is the sub-PDF that strips the catalog (F10-4o).
+
+**The rule.** The reader drops a pick into a gap of the thumbnail strip, so the gap is
+counted in the book **without** the block in it: the block keeps its relative order, the
+rest keep theirs, `at = min(target, len(rest))` so a target past the last gap is the end,
+and a sheet named twice is one sheet moved once.  That is PdfCraft's `move_pages`
+(`crates/organize/src/lib.rs:517-527`) written independently of it — `sorted` + `dedup`,
+the same `to.min(rest.len())`, the same splice — and the agreement is what makes the rule
+the roadmap's rather than one implementation's guess.
+
+**The walk.** `move_page(frm, to)` means "put this sheet in front of the sheet currently
+numbered `to`", so the slot it fills is `to` when the sheet came from below and `to - 1`
+when it came from above, and `to` is never the slot being filled.  The intended order is
+therefore computed first and then realised by a repair walk simulated twice, from the
+front and from the back, and the **shorter** plan is run: from the front each call fills
+the slot the walk has reached (`frm > index`, so `to = index`), from the back each call
+takes its sheet from below (`frm < index`, so `to = index + 1`, or `-1` for the last slot
+— `to == page_count` is refused outright).  Choosing the end is not a rounding error:
+sending the first sheet of a 540-sheet book to the end is **1 call from the back and 539
+from the front**.  Brute force, not faith: every non-empty pick at every gap of every book
+of three to six sheets — **846** of them — came out of MuPDF in the order the rule asks
+for, and the plan is always the shorter of the two walks over 2000 random permutations up
+to forty sheets.
+
+**Order of operations**, each of which is a test: the pick is checked whole before a
+single sheet moves (a list naming a page the book does not have takes nothing out on the
+way out); a negative page is refused rather than counted from the end, and a negative gap
+rather than handed to MuPDF, which reads it as "the end"; the identity case returns
+**before the settle**, so a sheet dropped into the gap it already fills dirties nothing —
+on a settled book that is invisible, and `test_a_drop_into_its_own_gap_leaves_an_unsettled_book_alone`
+uses the nested fixture to make it cost something; the tree is then read back by page
+object against the plan, and a book that does not come out in the asked order is refused
+(`test_a_book_that_does_not_come_out_in_the_order_asked_for_is_refused` feeds it a broken
+plan to prove the guard is attached).
+
+**What the step says about the numbers.** `page_order` publishes the permutation, exact in
+both directions — `sorted(order) == range(count)`, so no held number lands on a neighbour
+the way a delete's does, and `where` and `followed` agree for every page.  `Scope.STRUCTURE`
+with `changed is None`: no page's content is touched, and no page number survives.  The
+document carries its own sheets — MuPDF re-derives the outline rows and the link
+destinations from the page objects, and the annotations are a page's own — so a test pins
+that an outline row travels with the sheet it named.  `/PageLabels` does not: it numbers
+positions, which is F10-4q, and one test pins the gap rather than pretending it is filled.
+
+**The two settle rules that had to move.** A node the tree still reaches but no page asks
+through — one a move just emptied, or one a producer left off every `/Parent` chain — is
+now **walked rather than refused** for the purposes of *validation*: refusing it would
+refuse the document the previous edit made.  The **"is this key stated anywhere"** gate
+went the other way and is now asked of the whole tree rather than of the chains, because a
+move re-parents: on the adrift fixture, whose `/Kids` and `/Parent` disagree, every page
+walks past a node that states `/Rotate 90`, draws upright today — and would have taken that
+quarter turn on the first reorder, from a step that had just claimed to have frozen
+geometry.  Validation narrow, gate wide: what nothing resolves any more cannot stop an
+edit, and what a page could land under must be pinned.
+
+**Tests**: 78 in `tests/test_page_move.py` — the rule on every pick and every gap, the gap
+counted without the block, the clamped target, the identity that writes nothing, a sheet
+named twice, the block's own order; the refusals; the page tree (the harm the settle stops,
+what the moved sheet now states for itself, a book moved **twice**, a moved book saved and
+reopened); the numbers (the permutation, both directions of the map, the label, the
+scope); what the document carries (outline rows, links, a page label that stays with its
+position) and the four licensed papers; and the session, undoing a move and redoing it, and
+a move followed by a delete numbering the book once.  Three more in
+`tests/test_page_settle.py` for the tree a move leaves behind.
+
+**Mutations**: 11 of the new rules — **9 caught**, and the two survivors are not bugs:
+clamping the target to `count` instead of `len(rest)` is *unobservable*, because
+`rest[:at] + block + rest[at:]` reads the same for any `at` past the last gap, and the
+read-back guard cannot be tripped by any correct plan (it is proved attached by feeding it
+a wrong one).  Caught: the gap counted in the whole book, both walks handing over the slot
+they fill instead of the sheet in front of which they land, the move forgetting to settle,
+no identity short-circuit, a sheet named twice moving twice, a negative gap reaching MuPDF,
+the gate narrowed back to the chains, a node a move emptied refused again, and the read-back
+comparing the wrong thing (57 tests).
+
+**Suite**: **1452 passed, three consecutive runs** (163.67 / 164.37 / 162.82 s).  Ruff
+unchanged at the 7 pre-existing errors; mypy unchanged at **553 errors in 16 files**.
+
+**Verified by eye.** `/tmp/f104p/window.py` drives the real window over a six-sheet book
+whose sheets each name themselves, with the reader on SHEET 2 (page box `3 / 6`, the strip
+marking row 3) and applies `MovePages((0,), 4)`.  The book reads `SHEET 1 2 3 4 0 5`; the
+strip's rows are `SHEET 1 / SHEET 2 / SHEET 3` with the *current* frame now on row 2 — the
+reader's own sheet, not the number it used to wear (`1-strip-before.png`,
+`4-strip-after-move.png`, whole-column difference box 229x594 at (1, 19)); the page box
+reads `2 / 6` and the reader's viewport still shows SHEET 2 (`5-view-after-move.png`,
+191x667 at (16, 0) — the same sheet, re-aimed to its top rather than held at the mid-page
+scroll offset it had).  **Undo is pixel-identical**: the strip and the reader's own widget
+both diff to `None` against the state before the move (`7-strip-after-undo.png`,
+`8-view-after-undo.png`), the page box is back to `3`, and redo puts the reordered book
+back with a strip identical to the one after the move (`9-strip-after-redo.png`).
+Over the whole window the difference is the reorder plus the tab's unsaved-changes marker
+(637x735 at (3, 33)).
+
+**Performance**: on a settled 540-sheet book the move costs **312-337 ms**, of which the
+settle inside it is **290 ms** — the walk itself is 0.3 ms per call.  One sheet to the
+front or to the end: **313 ms / 1 call** (the front walk would spend 539 calls and 61.4 ms
+on the same trip); a 100-page block to the front **325 ms / 100 calls**; 40 scattered
+sheets to the middle **319 ms / 120 calls** where the front walk needs 271; every other
+sheet of the book to the end **337 ms / 269 calls**, the worst plan measured.  Against a
+delete of one page at ~100 ms, a reorder is dominated by the settle it owes, and the
+shorter-of-two-walks rule is what keeps the *move* part from being the expensive half.
+
+**What is not here**: nothing calls this yet — the thumbnail strip has no drag-and-drop, so
+the rule is the model's and the surface is the next item, and whoever wires it decides
+whether a drop into the gap the pick already fills belongs on the undo stack at all (the
+edit writes nothing and the session still records it, so one Ctrl+Z would appear to do
+nothing); `/PageLabels` numbers positions and is left behind (F10-4q); the **assemble** permission is not consulted, so a document
+that forbids page assembly accepts a move like any other; extract, duplicate and reverse
+are still to come against the same pick; a move onto a book whose pages hang off a node the
+settle refuses is refused whole, which is the right answer for the wrong reason if the
+reader only wanted the sheet next door; and the walk is O(slots x finds) in python — 269
+calls and 28 ms measured, and a plan that placed runs rather than sheets would cut it, for a
+cost the settle already dwarfs.
 
 ---
 

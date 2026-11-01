@@ -995,3 +995,69 @@ def test_a_real_paper_renders_the_same_after_the_settle(tmp_path, path):
         assert kids_of(doc, pages_root(doc)) == under_root
     finally:
         doc.close()
+
+
+# ------------------------------------------------------- the tree a move leaves behind
+def emptied_nodes(doc):
+    """Every ``/Pages`` node under the root with no children of its own."""
+    return [kid for kid in kids_of(doc, pages_root(doc))
+            if doc.xref_get_key(kid, "Type")[1] == "/Pages" and not kids_of(doc, kid)]
+
+
+def test_a_node_a_move_emptied_is_walked_rather_than_refused(nested):
+    """MuPDF's own ``move_page`` produces this shape, so the settle must read it.
+
+    A page that moves is re-parented into the node it lands in, and the node it
+    leaves keeps its dictionary with ``/Count 0`` and ``/Kids []``.  Refusing that
+    is refusing the document the previous edit just made, which is what the first
+    version of this step did until the move step ran a book through twice.
+    """
+    doc = fitz.open(nested)
+    doc.move_page(2, 0)
+    assert emptied_nodes(doc), "MuPDF left no emptied node, so this is the wrong shape"
+    SettlePageTree().apply(doc)
+    assert doc.page_count == 3
+    for index in range(doc.page_count):
+        assert doc.xref_get_key(doc.load_page(index).xref, "MediaBox")[1] != "null"
+    doc.close()
+
+
+def test_a_group_no_page_reaches_through_any_more_does_not_stop_the_settle(tmp_path):
+    """The checks belong to the chains the pages resolve, not to the whole tree.
+
+    Two bare moves take every sheet out from under the ancestor that carries the
+    transparency ``/Group``, and that node still states it — to nobody.  The step
+    refuses a ``/Group`` a page *inherits*, because moving that page changes how it
+    looks; a node no page's ``/Parent`` chain reaches changes nothing, and refusing
+    it would mean a book that had been reordered once could never be settled.
+    """
+    path = grouped_pdf(nested_pdf(tmp_path / "grouped.pdf"))
+    doc = fitz.open(path)
+    doc.move_page(0, 2)
+    doc.move_page(0, 2)
+    holders = [node for node in ([kid for kid in kids_of(doc, pages_root(doc))])
+               if doc.xref_get_key(node, "Group")[1] != "null"]
+    assert holders and all(not kids_of(doc, node) for node in holders), \
+        "the /Group node still governs pages, so this proves nothing"
+    SettlePageTree().apply(doc)
+    assert doc.page_count == 3
+    doc.close()
+
+
+def test_a_pages_node_that_names_no_children_at_all_is_refused(nested):
+    """Absent ``/Kids`` is not the same document as an empty one.
+
+    MuPDF counts a ``/Pages`` node with no ``/Kids`` key as a page of its own, so a
+    book like this does not even agree with itself; the refusal is the sentence the
+    reader needs, not a walk that quietly drops a sheet.
+    """
+    doc = fitz.open(nested)
+    root = pages_root(doc)
+    broken = doc.get_new_xref()
+    doc.update_object(broken, f"<< /Type /Pages /Parent {root} 0 R /Count 1 >>")
+    kids = kids_of(doc, root)
+    doc.xref_set_key(root, "Kids",
+                     f"[{' '.join(f'{kid} 0 R' for kid in kids + [broken])}]")
+    with pytest.raises(EditError, match="no children"):
+        SettlePageTree().apply(doc)
+    doc.close()
