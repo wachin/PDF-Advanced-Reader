@@ -1611,14 +1611,27 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       page tree the way F10-4p does.  Duplicate needs measuring before it is written:
       whether `copy_page` gives a sheet its own object or files the *same* object in two
       slots is what the settle's walk, the strip and a per-page cache all have to be told
-- [ ] **F10-4s** — *The strip's drop reaches the move.*  F10-4p built the rule a drop
+- [~] **F10-4s** — *The strip's drop reaches the move.*  F10-4p built the rule a drop
       between two rows means and nothing calls it: `ThumbnailList` is a `QListWidget` with
       `ExtendedSelection` and a delegate of its own, so this is Qt's drag-and-drop —
       `setDragEnabled`, `setAcceptDrops`, the drop indicator, and the gap a drop position
       names — with the twist that Qt would move its *rows* and the edit has to be what
       moves the pages.  Whoever wires it also decides whether a drop into the gap the pick
       already fills belongs on the undo stack at all (the edit writes nothing, the session
-      records it, and one Ctrl+Z would appear to do nothing)
+      records it, and one Ctrl+Z would appear to do nothing).
+      **Landed**: `gap_for_drop(count, pages, row, after)` (`src/pdfar/pages.py`) — the
+      line the reader lets go on, read in the numbering `MovePages` counts its gaps in.
+      The two numberings differ by the picked rows the line has already passed, which is
+      the whole of the off-by-one, and it is now one tested function instead of arithmetic
+      inside a `dropEvent`: the two halves of a row are the two lines it touches, blank
+      space above and below the strip are the front and the end, and a line drawn *through*
+      the block names the gap the block already fills — so letting go in the middle of a
+      contiguous pick is the order it had.  Checked pick by pick, row by row, half by half,
+      on every non-empty pick of books of 1 to 6 and 8 sheets, and through MuPDF on the
+      self-naming book and the four licensed papers.  The refusal is deliberately not here:
+      an empty pick still names a line, and `MovePages` remains the one that says no page
+      was chosen.  **Still to do**: the drag itself — the strip asking for the move, and
+      the decision about a silent drop.
 - [ ] **F10-4q** — *`/PageLabels` numbers a position, so a reorder renumbers the sheets.*
       The catalog says "from index 0, count 101", not "from this sheet", so after a move the
       sheet that arrived at the front is printed 101 and the one that used to read 101 prints

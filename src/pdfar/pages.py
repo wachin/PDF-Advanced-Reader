@@ -647,6 +647,41 @@ def _checked_pick(doc: fitz.Document, pages: Sequence[int], verb: str) -> int:
     return count
 
 
+def gap_for_drop(count: int, pages: Sequence[int], row: Optional[int],
+                 after: bool) -> int:
+    """The gap a thumbnail strip's drop names, in the numbering :class:`MovePages` reads.
+
+    A reader drags a pick and lets go **between two rows**, and the rows are numbered in
+    the book as shown — with the block still lying in among them.  ``MovePages`` takes a
+    gap counted in the book *without* the block (``_intended`` splices it into ``rest``),
+    and the two numberings differ by however many picked rows the line has already
+    passed.  Everything about a drop that a reader would notice as their block landing a
+    page short of where they let go lives in this one function.
+
+    *row* is the row the pointer is over and *after* which half of it it is on: the upper
+    half means the line above that row, the lower half the line below it.  ``None`` is
+    blank space — below the book when *after*, above it when not — and a line drawn at
+    either end names the end gap and the front gap, which is what a reader dropping onto
+    the margin means.
+
+    The answer is always a legal gap, ``0 <= gap <= count - len(set(pages))``, so the
+    clamp in ``MovePages._intended`` is not reached from here.  What it is not is a
+    refusal: an empty pick still names a line, and the edit that receives it is the one
+    that says no page was chosen.  Nothing checks the pick twice.
+
+    A line inside the block the reader is dragging names the gap the block already
+    fills, so letting go in the middle of a contiguous pick is the order it had — and
+    therefore writes nothing, settle included, which is ``MovePages``'s own
+    short-circuit rather than a rule of this function.
+    """
+    moved = set(pages)
+    if row is None:
+        boundary = count if after else 0
+    else:
+        boundary = row + 1 if after else row
+    return len([index for index in range(boundary) if index not in moved])
+
+
 @dataclass(frozen=True)
 class MovePages(Edit):
     """Move the picked sheets so the block starts at gap *target*.
