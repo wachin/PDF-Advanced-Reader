@@ -822,15 +822,20 @@ def test_the_menu_acts_on_the_pick_and_on_the_page_under_the_cursor(strip):
 
 
 def test_the_menu_names_every_page_it_is_about_to_turn(strip):
-    """The label counts the pages: a turn written into the file is not free."""
-    assert _labels(strip._page_rotation_menu((1,))) == [
-        "Rotate Page Left", "Rotate Page Right",
-        "Rotate All Pages Left", "Rotate All Pages Right"]
-    assert _labels(strip._page_rotation_menu((0, 2))) == [
-        "Rotate 2 Pages Left", "Rotate 2 Pages Right",
-        "Rotate All Pages Left", "Rotate All Pages Right"]
-    assert [a.isSeparator() for a in strip._page_rotation_menu((0,)).actions()] == [
-        False, False, True, False, False]
+    """The label counts the pages: a turn written into the file is not free.
+
+    The reverse F10-4t added sits under each turn of the same pages, so the pairing is
+    what is pinned here as much as the counting — ``tests/test_page_reverse_menu.py`` owns
+    the reverses themselves.
+    """
+    assert _labels(strip._page_commands_menu((1,))) == [
+        "Rotate Page Left", "Rotate Page Right", "Reverse Page",
+        "Rotate All Pages Left", "Rotate All Pages Right", "Reverse All Pages"]
+    assert _labels(strip._page_commands_menu((0, 2))) == [
+        "Rotate 2 Pages Left", "Rotate 2 Pages Right", "Reverse 2 Pages",
+        "Rotate All Pages Left", "Rotate All Pages Right", "Reverse All Pages"]
+    assert [a.isSeparator() for a in strip._page_commands_menu((0,)).actions()] == [
+        False, False, False, True, False, False, False]
 
 
 def test_the_menu_asks_and_leaves_the_turn_to_the_window(strip):
@@ -844,7 +849,7 @@ def test_the_menu_asks_and_leaves_the_turn_to_the_window(strip):
     strip.page_rotation_requested.connect(
         lambda pages, delta: seen.append((tuple(pages), delta)))
 
-    menu = strip._page_rotation_menu((0, 2))
+    menu = strip._page_commands_menu((0, 2))
     _act(menu, "Rotate 2 Pages Left").trigger()
     _act(menu, "Rotate All Pages Right").trigger()
     assert seen == [((0, 2), -90), ((0, 1, 2), 90)]

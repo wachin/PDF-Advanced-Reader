@@ -1637,6 +1637,23 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       silent drop refused before it is recorded — on `MovePages.changes_nothing`, the
       edit's own predicate, so the widget that decides whether to act and the edit that
       would carry the action out cannot disagree about what "nothing" means.
+- [x] **F10-4t** — *The menu gives the reverse its caller.*  F10-4r shipped `ReversePages`
+      with nothing that asked for it, and the strip's context menu is the one place that
+      already knows which sheets the reader gathered.  The step adds no MuPDF surface and no
+      arithmetic, so the whole of it is the question the menu has to answer: whether to offer
+      the command at all.
+      **Landed**: `_page_commands_menu` — `_page_rotation_menu` renamed for what it now holds
+      — gains **Reverse Page / Reverse N Pages** under the pick's turns and **Reverse All
+      Pages** under the book's, each gated by `ReversePages.changes_nothing(count)` and
+      greyed with the reason in its tooltip when the order it names is the order the book is
+      in; `Sidebar.page_reverse_requested` → `MainWindow._reverse_pages`, connected and
+      disconnected beside the turn, the delete and the drop.  PdfCraft answers the same ask
+      three different ways in its three surfaces — the engine refuses a pick under two, the
+      command palette falls back to the whole document, the automation tool errors — and the
+      fallback is only affordable where the label carries no count.  Here the two asks are
+      two items, and **both** are gated: a one-sheet *book* has a *Reverse All Pages* that
+      writes nothing too, and a menu that greyed only the pick's item would record that one
+      as a step.
 - [ ] **F10-4q** — *`/PageLabels` numbers a position, so a reorder renumbers the sheets.*
       The catalog says "from index 0, count 101", not "from this sheet", so after a move the
       sheet that arrived at the front is printed 101 and the one that used to read 101 prints
@@ -1884,9 +1901,11 @@ also where the carry became shared code: a reverse moves no sheet outside its pi
 it is the first reorder whose cache answer is the pick instead of "I cannot say".
 Two of the four are still to come — duplicate, which has to be measured before it is
 written, and extract, which leaves the document altogether.  The surface the move and
-the reverse both needed arrived between them: the strip's drop now asks for `MovePages`,
-so a reorder is something a reader can do rather than something the model can answer
-(F10-4s), while reverse still waits for the menu command that reaches it.  A
+the reverse both needed arrived between them: the strip's drop now asks for `MovePages`
+(F10-4s) and its context menu now asks for `ReversePages` (F10-4t), so a reorder is
+something a reader can do rather than something the model can answer — and because the
+menu names the sheets in the label, the reverse arrives as two items rather than one
+command that quietly changes what it means.  A
 `/PageLabels` numbering is still what a reorder leaves behind (F10-4q),
 because labels number positions and no sheet carries them.
 
@@ -6528,9 +6547,9 @@ two sweeps that read every page's object number for the read-back, which a move 
 and which is the honest cost of checking that the reader's document is the one they were
 promised.
 
-**What is not here**: `MovePages` has its caller now — the strip's drop asks for it (F10-4s) —
-while `ReversePages` is still a thing the model can answer rather than a thing a reader can do,
-waiting for the context-menu command that will give it one;
+**What is not here**: both reorders have callers now — the strip's drop asks for
+`MovePages` and the context menu for `ReversePages` (F10-4s, F10-4t), which is what this
+note had been waiting on;
 `/PageLabels` numbers positions and a reverse leaves it behind
 (F10-4q, pinned by a test here as well as in the move); the **assemble** permission is not
 consulted; extract and duplicate are the two reorders still to come; a one-sheet pick
@@ -6624,9 +6643,16 @@ F10-4s cannot drift apart.
 silent-drop guard removed (9), the mime guard removed (1), the accept removed (8), the row
 halves swapped (11) and forced to one side (9), blank space read as row 0 (1) or as the front
 (1), the pointer's row used instead of the pick (12), the signal never connected (14),
-`MovePages.apply` writing even when it changes nothing (2), a one-thumbnail reverse decided
-by name-count (5), and the move's predicate replaced by a target test (79).  The fourteenth,
-deleting the empty-pick check, is the survivor that deleted itself.
+`MovePages.apply` writing even when it changes nothing (2), `ReversePages.changes_nothing`
+replaced by `len(self.pages) == 1` (5), and the move's predicate replaced by a target test
+(79).  The fourteenth, deleting the empty-pick check, is the survivor that deleted itself.
+That tenth entry is worth restating, because F10-4t later wrote the neighbouring mutant
+`len(pages) < 2` and it **survived**, and the two results look like a contradiction.  They
+are not: `== 1` differs from the true rule on an empty pick and on a pick that names a sheet
+twice, both of which reach `changes_nothing` through an edit built directly in a test, while
+`< 2` differs from it only on a pick with a repeated page — and the strip hands the menu a
+list that `picked_pages` has already sorted and deduplicated, so from the widget the two
+formulations cannot be told apart at all.
 
 **Suite**: **2574 passed, three consecutive runs** (165.3 / 162.5 / 158.5 s).  Ruff
 unchanged at the 7
@@ -6653,14 +6679,155 @@ about 20 µs of it the widget's own `itemAt`.  The move it asks for is the 313-3
 measured, so the gesture costs nothing that the edit does not already cost, and the guard
 that refuses a silent one is cheaper still than the reorder it prevents.
 
-**What is not here**: *Reverse* still has no caller — the context menu offers the turn and
-the delete, so `ReversePages.changes_nothing` is written and tested for the menu that will
-ask it; the drop indicator needs a real drag to see; a payload from another widget's list
+**What is not here**: *Reverse* had no caller when this landed and has one now (F10-4t), which
+is the other half of what the drop could not do: a reader who wants the whole book turned
+around gathers it with a rubber band or asks the menu, and does not drag it;
+the drop indicator needs a real drag to see; a payload from another widget's list
 passes the mime test and is accepted, deliberately, because the block is this strip's pick
 and the gap is this pointer's line, which is what the test pins; extract and duplicate are
 the two reorders still to come; `/PageLabels` numbers positions and a move leaves it behind
 (F10-4q); and the **assemble** permission is not consulted, which is the same gap every
 page-tree edit has and is not this surface's to close.
+
+---
+
+### F10-4t The menu gives the reverse its caller — [x] Implemented
+
+**Task**: `ReversePages` has been something the model can answer since F10-4r and nothing a
+reader can click.  The strip's context menu is the one place in PDFAR that already knows
+which sheets the reader gathered, so the ask is small — and the whole of the design is in
+the one question it has to answer: **whether to offer the command at all**.
+
+**Solution**: `src/pdfar/sidebar.py` — `_page_commands_menu` (`:828`), which is
+`_page_rotation_menu` renamed for what it now holds, and `_add_reverse_action` (`:846`);
+`Sidebar.page_reverse_requested` (`:359`), reaching `MainWindow._reverse_pages`
+(`src/pdfar/main.py:1393`), connected and disconnected (`:2622`, `:2650`) beside the turn,
+the delete and the drop.  Nothing else: no new MuPDF surface, no new arithmetic, and the
+settle, the repair walk and the read-back are the ones F10-4p built and F10-4r shares.
+
+**The menu's shape is the rotation's.** The pick's commands first and the book's after a
+separator, so a reader looking for the one has learned where the other lives:
+*Rotate N Pages Left/Right*, **Reverse N Pages**, a line, *Rotate All Pages Left/Right*,
+**Reverse All Pages**, a line, *Delete N Pages*.  The reverse of each sits under the turn of
+the same pages, and the destructive one stays last — the only command of the three a reader
+cannot answer by asking for the opposite.
+
+**Greyed, not refused, and not silently broadened.** A pick of one sheet is nothing to
+reverse, and there are three answers to that in PdfCraft alone: the engine refuses
+(`crates/organize/src/lib.rs:538-540`), the command palette *falls back* — a pick smaller
+than two reverses the whole document (`crates/ui-egui/src/commands.rs:655-658`) — and the
+automation surface errors with "one page has nothing to reverse"
+(`crates/automation/tests/it/automation.rs:2562-2563`).  The fallback is what a palette can
+afford, because its label carries no count: *Reverse pages* that turns over five hundred
+sheets is telling the reader nothing they did not already mean.  A menu item reading
+**Reverse Page** cannot make that switch, and PDFAR's reader is not left hunting either:
+the whole-book ask is its own item, which is why the one-sheet pick gets a greyed command
+and a tooltip rather than a surprise or a dialog.
+
+**The gate is the edit's predicate, and it goes on both items.**
+`_add_reverse_action` asks `ReversePages(pages).changes_nothing(count)` — the same question
+`apply()` asks itself before the settle, for the same reason F10-4s gave: the widget that
+decides whether to act and the step that would carry it out must not be able to disagree
+about what "nothing" means.  It is worth saying plainly what that is *not* buying.  The
+first draft of this step claimed a count of names — `len(pages) < 2` — would get the
+whole-book item wrong, and a mutant written to match the claim survived the suite, which is
+the finding: over the picks this strip can send, sorted and deduplicated by `picked_pages`,
+a reverse writes nothing exactly when it names fewer than two sheets, so the predicate and
+the count are the same function and nothing reachable can tell them apart.  Asking the edit
+is still the right call, because it is the same *rule* rather than two rules that happen to
+agree today.  What the shape of a reverse does not force, and what the case is really for, is
+putting the gate on the book's item as well as the pick's: a **one-sheet document** has a
+*Reverse All Pages* that writes nothing too, the session would record it, and the reader's
+Ctrl+Z would undo a step that changed no page.  That is why the second mutation pass wrote
+this half twice — once gating only the pick's item, once gating only the book's — and each
+died in three tests, so the two call sites are proved gated separately rather than by the
+same assertion twice.
+
+**What the pick looks like afterwards is the property this step is really testing.** A
+reverse puts the picked sheets back into the slots they already filled, so the strip's
+selection comes out of the rebuild on **the same rows** — the reader looks at three
+highlighted thumbnails, now holding the three sheets in the other order.  A move carries the
+pick somewhere else, because its block leaves its slots; a delete has to be re-aimed by hand
+because sheets are gone.  This is `ReversePages.changed` being the pick, read back from the
+widget rather than from the map, and it is asserted through the real window.
+
+**Tests**: 13 cases in `tests/test_page_reverse_menu.py` — the menu's shape and separators
+through a real right click; the naming of one page against *N*; the greyed item with its
+reason; a one-sheet book with both items dead; the enable swept over every non-empty pick of
+books of 1 to 4 sheets against `changes_nothing` for both items; a greyed item that asks for
+nothing when it is triggered anyway; the strip asking and not editing; and six through the
+real `MainWindow` — the scattered pick coming out `[0, 4, 2, 3, 1, 5]` with one undo step and
+the strip's rows re-named to the pages now sitting in them, the pick surviving on its own
+rows, the reader staying with their own sheet, *Reverse All Pages* end to end with the
+printed labels still reading 1-6, a reverse asked twice being two steps rather than one that
+cancels, and the one-sheet book whose two greyed items record nothing and dirty nothing.
+`tests/test_page_rotate.py`'s two menu tests follow the rename and
+now pin the pairing of turn and reverse in each block.
+
+**Mutations**: **16 mutants, 14 caught**.  Both survivors are named rather than smoothed
+over.  *The gate counts names instead of asking the edit* (`len(pages) < 2`) is **provably
+equivalent code**: over the picks `picked_pages` can hand this menu — sorted and deduplicated
+— a reverse writes nothing exactly when it names fewer than two sheets, so nothing reachable
+can show a difference and the test that would kill it does not exist.  (Its neighbour in
+F10-4s's pass, `len(pages) == 1`, *did* die — that one is wrong on an empty pick as well as
+on a repeated one, and an edit built in a test can hand `changes_nothing` both.)  *The tab is left
+connected* (deleting the `page_reverse_requested.disconnect`) survives because no test
+switches or closes a tab after a reverse; the drop wiring of F10-4s has the same gap, and
+closing it is a tab-lifecycle surface, not this one.  One first-pass mutant was **mis-stated
+and is not counted as evidence**: it was called "the gate is only put on the pick's item" but
+written as replacing the whole-book `_add_reverse_action` call with `pass`, which is the same
+edit as another mutant and says nothing about gating.  The second pass wrote both halves for
+real and each died in three tests, from different directions — gating only the pick's item
+fails the one-sheet book (`test_a_one_sheet_book_offers_no_reverse_at_all`, the
+`changes_nothing` sweep, and the window's `test_a_one_sheet_book_gives_the_reader_no_reorder_to_undo`),
+while gating only the book's item fails the one-sheet **pick** (the greyed *Reverse Page* and
+its reason, the same sweep, and the triggered-anyway case).  The sweep is the only test that
+kills both, which is what a per-pick property buys.
+
+**Suite**: **2587 passed, three consecutive runs** (185.09 / 172.51 / 186.13 s).  Ruff
+unchanged at the 7 pre-existing errors; mypy unchanged at **553 errors in 16 files** —
+`QMenu.addAction` is typed to hand back `QAction | None`, which the two pre-existing
+`addAction` sites already ignore, and the new one keeps the count level with a boundary
+check rather than a `# type: ignore`.  The wall clock reads higher than F10-4s's
+158.5-165.3 s and this step does not own the difference: the whole new file costs **2.61 s**
+(its slowest case is 0.32 s of fixture setup), and the suite with that file *removed* —
+2574 passed — still took **175.39 s**, inside the band the three runs above sit in.
+
+**Verified by eye.** `/tmp/f104t/visual2.py` drives the real window over a six-sheet book,
+and it hashes every row's thumbnail because the strip grab alone cannot carry the argument.
+`0-menu-one-page.png` is the menu a reader sees when they have one thumbnail gathered:
+*Rotate Page Left*, *Rotate Page Right*, **Reverse Page** in grey, a line, the two all-page
+turns, **Reverse All Pages** live, a line, *Delete Page* — and the line the script prints
+beside it marks exactly one item as `('Reverse Page', enabled=False, tooltip_is_not_the_label=True)`,
+which is the tooltip claim made where a reader can see it.  Rows 2, 4 and 5 gathered, then
+the ask: the row digests go `… 91b3c96823ef, 7b014fb26880, 7b4e415459d7, 827f2d5a90dd …`
+before and `… 827f2d5a90dd, 7b014fb26880, 7b4e415459d7, 91b3c96823ef …` after — the two outer
+thumbnails **exchange pictures** and the middle one keeps its own, which is the rule rather
+than the labels saying so.  Undo returns the first list byte for byte, and *Reverse All
+Pages* returns its mirror.  **The strip grab of the same pair differs by 48 pixels**, and
+that number is the reason the digests were added: the fixture's sheets differ only in the
+digit each one prints, so a reorder of rows 1 and 4 moves one glyph in two rows, and the
+selection is already on those rows — a pixel count over this book measures almost nothing,
+which is not a defect in the reorder.  Undo against before *is* pixel-identical (**0**
+differing pixels), and over the whole window the difference before and after the reverse is
+1494 pixels — the strip and nothing else, because the reader's own sheet was not in the pick.
+
+**Performance**: the gate is 21 µs for a pick of two, 54 µs for a scattered half of a
+540-sheet book and 90 µs for the whole of it; building the entire menu costs **0.39-0.49 ms**
+on that book, so the two predicate calls are a fifth of what Qt spends on the actions
+themselves.  The reverse it decides is the 313-385 ms F10-4r measured on a fresh book
+(80-146 ms on one that has already settled), which is 1,600-4,000 times the gate.  A right
+click is not where a reorder costs anything.
+
+**What is not here**: no *Move* in the menu — a move is a gesture and its gap comes from a
+line, so the drop owns it (F10-4s) and an item that had to ask "where to?" would be a worse
+answer than the drag; no keyboard shortcut and no Tools-menu route for the reverse, which is
+what the turn and the delete have; the **assemble** permission is still not consulted, and
+PdfCraft gates every one of these commands on it (`crates/engine/src/commands.rs:381-387`,
+`Assembly` on rotate, delete, duplicate, reverse, extract and crop alike); extract and
+duplicate are the two reorders still to come; and `/PageLabels` numbers positions, so a
+reverse from the menu leaves a labelled book's numbering exactly as wrong as a drop does
+(F10-4q).
 
 ---
 

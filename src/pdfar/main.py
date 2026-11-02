@@ -46,7 +46,10 @@ from .page_numbers import (
     EraseSettings, PageNumbersPanel, PageNumberSettings, erase_copy,
     erased_copy_path, numbered_copy_path, stamp_copy,
 )
-from .pages import DeletePages, MovePages, RotatePages, contiguous_runs, shifted_index
+from .pages import (
+    DeletePages, MovePages, ReversePages, RotatePages, contiguous_runs,
+    shifted_index,
+)
 from .save import ProtectionError, SaveError, SaveReport, save_document
 from .search import (
     SearchHit, SearchParams, SearchWorker, compile_regex, highlight_spans,
@@ -1387,6 +1390,19 @@ class MainWindow(QMainWindow):
         if self.view:
             self.view.apply_edit(MovePages(pages=tuple(pages), target=int(gap)))
 
+    def _reverse_pages(self, pages: Tuple[int, ...]) -> None:
+        """Turn the picked sheets end to end, in the slots they already fill.
+
+        The same carry the move rides, and nothing else to arrange: the step takes no
+        sheet away and puts every one back in a slot the pick already named, so the
+        reader's number follows their own sheet and the pick comes out of the rebuild
+        holding the same thumbnails in the same rows — the only reorder whose *changed*
+        answer is the pick.  The ask that could not change anything is greyed out in the
+        menu, so a step that writes nothing never reaches the session.
+        """
+        if self.view:
+            self.view.apply_edit(ReversePages(pages=tuple(pages)))
+
     @staticmethod
     def _page_words(pages: Tuple[int, ...]) -> str:
         """The pages a reader picked, said the way a reader counts them: page 2–4, 7."""
@@ -2603,6 +2619,7 @@ class MainWindow(QMainWindow):
         tab.sidebar.page_rotation_requested.connect(self._rotate_pages)
         tab.sidebar.page_deletion_requested.connect(self._delete_pages)
         tab.sidebar.page_move_requested.connect(self._move_pages)
+        tab.sidebar.page_reverse_requested.connect(self._reverse_pages)
         # Connect annotation manager to sidebar
         tab.sidebar.set_annotation_manager(tab.view.annotation_manager)
         self._connected_tab = tab
@@ -2630,6 +2647,7 @@ class MainWindow(QMainWindow):
             tab.sidebar.page_rotation_requested.disconnect(self._rotate_pages)
             tab.sidebar.page_deletion_requested.disconnect(self._delete_pages)
             tab.sidebar.page_move_requested.disconnect(self._move_pages)
+            tab.sidebar.page_reverse_requested.disconnect(self._reverse_pages)
         except TypeError:
             pass
         tab.view.clear_numbering_preview()

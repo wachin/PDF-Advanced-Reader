@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
 )
 from . import APP_NAME
 from .edits import Renumbering, Scope
-from .pages import MovePages, gap_for_drop
+from .pages import MovePages, ReversePages, gap_for_drop
 from .icons import tinted_icon
 from .render import RenderPool, RenderResult
 from .session import DocumentSession
@@ -353,6 +353,10 @@ class Sidebar(QWidget):
     # gesture; only the window can spend it, because a move is an edit and an edit is an
     # undo step, a re-render and a carried pick — none of which a widget here can reach.
     page_move_requested = pyqtSignal(object, object)
+    # The sheets to come back out the other way, in the slots they already fill.  A move
+    # is measured by the strip and asked for by a gesture; this is the same ask from the
+    # menu, where the reader names the pages instead of dragging them.
+    page_reverse_requested = pyqtSignal(object)
     # The window owns saving: it is the one place that can explain a refusal, and
     # a second opinion from here would only be able to say "failed".
     save_requested = pyqtSignal()
@@ -821,17 +825,59 @@ class Sidebar(QWidget):
         index = item.data(Qt.ItemDataRole.UserRole)
         return (index,) if isinstance(index, int) else ()
 
-    def _page_rotation_menu(self, pages: Tuple[int, ...]) -> QMenu:
-        """Offer the turn that goes into the file, named with the pages it moves."""
+    def _page_commands_menu(self, pages: Tuple[int, ...]) -> QMenu:
+        """Offer the page commands that go into the file, named with the pages they move."""
         menu = QMenu(self)
-        name = "Rotate Page" if len(pages) == 1 else f"Rotate {len(pages)} Pages"
-        self._add_rotation_actions(menu, pages, name)
+        single = len(pages) == 1
+        self._add_rotation_actions(menu, pages,
+                                   "Rotate Page" if single
+                                   else f"Rotate {len(pages)} Pages")
+        self._add_reverse_action(menu, pages,
+                                 "Reverse Page" if single
+                                 else f"Reverse {len(pages)} Pages")
         menu.addSeparator()
         # The scanned book that arrived sideways end to end: asking a reader to
         # click five hundred thumbnails is work the menu is standing there to do.
-        self._add_rotation_actions(menu, tuple(range(self.doc.page_count)),
-                                   "Rotate All Pages")
+        whole = tuple(range(self.doc.page_count))
+        self._add_rotation_actions(menu, whole, "Rotate All Pages")
+        self._add_reverse_action(menu, whole, "Reverse All Pages")
         return menu
+
+    def _add_reverse_action(self, menu: QMenu, pages: Tuple[int, ...],
+                            name: str) -> None:
+        """Add one *Reverse*, greyed out when the order it names is the order it has.
+
+        Whether there is anything to do is the edit's own answer — ``changes_nothing`` is
+        the question ``ReversePages.apply`` asks itself before the settle — so the item the
+        reader clicks and the step it would record cannot disagree about what "nothing"
+        means.  Over the picks this strip can send the two formulations of that answer, the
+        predicate and "fewer than two sheets", are the same function; asking the edit is
+        what keeps them the same *rule* if the rule ever moves.  What the shape of a reverse
+        does not force is gating **both** items, and this is called twice for that reason:
+        a one-sheet book has a *Reverse All Pages* that writes nothing too; the session
+        would record it, and the reader's Ctrl+Z would undo a step that changed no page.
+
+        PdfCraft gives the one-sheet pick a different answer
+        (``crates/ui-egui/src/commands.rs:655-658``): a pick smaller than two reverses the
+        document instead.  A command palette with no page count in its label can afford
+        that switch; an item reading *Reverse Page* cannot turn over five hundred sheets.
+        So the reader gets both asks as two items here, and the one they cannot use says
+        why in its tooltip — which has to be set, because ``QAction.toolTip`` echoes the
+        label when it is not.
+        """
+        writes_nothing = ReversePages(pages=pages).changes_nothing(
+            self.doc.page_count)
+        action = menu.addAction(name)
+        if action is None:
+            # A `QMenu` always hands the item back; the signature says it may not.
+            return
+        if writes_nothing:
+            action.setEnabled(False)
+            action.setToolTip("Nothing to reverse: a reverse needs two sheets to swap.")
+            return
+        action.triggered.connect(
+            lambda _checked=False, pages=pages:
+            self.page_reverse_requested.emit(pages))
 
     def _add_rotation_actions(self, menu: QMenu, pages: Tuple[int, ...],
                               name: str) -> None:
@@ -845,8 +891,8 @@ class Sidebar(QWidget):
         pages = self._picked_pages(pos)
         if not pages:
             return
-        menu = self._page_rotation_menu(pages)
-        # Last, behind a separator of its own: the destructive one of the two, and
+        menu = self._page_commands_menu(pages)
+        # Last, behind a separator of its own: the destructive one of the three, and
         # the only one a reader cannot undo by asking for the opposite.
         menu.addSeparator()
         name = "Delete Page" if len(pages) == 1 else f"Delete {len(pages)} Pages"
