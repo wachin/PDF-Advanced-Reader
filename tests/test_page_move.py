@@ -33,11 +33,13 @@ Five measured facts carry the design.
   delete's 44 ms page-tree rebuild: a hundred-page block costs 9 ms and the worst
   plan measured — every other sheet to the end, 269 calls — costs 28 ms, all of it
   inside a settle that costs 291 ms on its own.
-* **The document follows its own sheets; the numbering does not.**  MuPDF
+* **The document follows its own sheets; the numbering does not, on purpose.**  MuPDF
   re-derives the outline rows and the link destinations from the page objects, so
   an entry travels with the sheet it named.  ``/PageLabels`` does not: it numbers
-  positions, so a sheet that moves changes the number printed on it.  That gap is
-  pinned by a test here rather than filled (F10-4q).
+  positions, so a sheet that moves changes the number printed on it.  That is the
+  reading PDFAR takes — a numbering that followed the sheets would un-do the reverse
+  a batch scanned back to front is reversed for — and it is pinned with its
+  measurement in ``tests/test_page_labels.py``.
 """
 
 from __future__ import annotations
@@ -422,13 +424,14 @@ def test_the_outline_rows_and_the_links_follow_their_own_sheets(nested):
 
 
 def test_a_page_label_stays_with_the_position_it_was_written_for(tmp_path):
-    """The gap this step pins rather than fills (F10-4q).
+    """The numbering stays with the slot it was written for, which is the decision.
 
     ``/PageLabels`` numbers positions, not sheets: the catalog says "from index 0,
     count 101", so after a move the sheet that arrived at the front is called 101
-    and the one that used to be 101 reads 103.  Nothing here writes labels, which
-    is honest about what a reorder does to a numbered book — and wrong about what
-    the reader sees.
+    and the one that used to be 101 reads 103.  Nothing here writes labels, and a
+    reader who numbers by slot — which is what a producer's numbering is — asked for
+    exactly that.  The argument and the measurement of the alternative are in
+    ``tests/test_page_labels.py``; this is the same invariant on the nested book.
     """
     path = catalogued_pdf(nested_pdf(str(tmp_path / "cat.pdf")))
     doc = fitz.open(path)
@@ -437,7 +440,8 @@ def test_a_page_label_stays_with_the_position_it_was_written_for(tmp_path):
     assert numbers(doc) == [1, 2, 0]
     after = [doc.load_page(index).get_label() for index in range(doc.page_count)]
     assert after == before, (
-        "the labels moved with their sheets, so F10-4q needs writing up as done")
+        "the labels followed their sheets: that is the other reading, and it renumbers "
+        "a book the reader only moved a sheet in")
     doc.close()
 
 

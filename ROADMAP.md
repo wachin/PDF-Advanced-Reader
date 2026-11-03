@@ -1610,7 +1610,12 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
 - [ ] Extract and duplicate — the other two runs against the same pick, each settling the
       page tree the way F10-4p does.  Duplicate needs measuring before it is written:
       whether `copy_page` gives a sheet its own object or files the *same* object in two
-      slots is what the settle's walk, the strip and a per-page cache all have to be told
+      slots is what the settle's walk, the strip and a per-page cache all have to be told.
+      Extract carries the catalog loss F10-4q leaves open: `Document.select` was measured
+      **dropping catalog keys** — `/PageLabels` among them, which is already why F10-4o
+      rejected it for a reorder — so an extract built that way has to say what numbering
+      the reader is left with, the way `tests/test_page_settle.py` says what form and
+      outline it is left with
 - [x] **F10-4s** — *The strip's drop reaches the move.*  F10-4p built the rule a drop
       between two rows means and nothing calls it: `ThumbnailList` is a `QListWidget` with
       `ExtendedSelection` and a delegate of its own, so this is Qt's drag-and-drop —
@@ -1654,13 +1659,54 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       two items, and **both** are gated: a one-sheet *book* has a *Reverse All Pages* that
       writes nothing too, and a menu that greyed only the pick's item would record that one
       as a step.
-- [ ] **F10-4q** — *`/PageLabels` numbers a position, so a reorder renumbers the sheets.*
-      The catalog says "from index 0, count 101", not "from this sheet", so after a move the
-      sheet that arrived at the front is printed 101 and the one that used to read 101 prints
-      103.  Measured, and pinned by a test in `tests/test_page_move.py` rather than filled:
-      nothing in PDFAR re-aims labels across a page-tree step, and PdfCraft — which has the
-      machinery, and spends it on its *delete* (`labels::drop_deleted_pages`) — does not
-      spend it on `move_pages` either.
+- [x] **F10-4q** — *What a page-tree step does to a book that numbers its pages: decided,
+      and pinned where it can be broken.*  `/PageLabels` numbers a **position**, so a
+      reorder renumbers the sheets: the catalog says "from index 0, count 101", not "from
+      this sheet", so after a move the sheet that arrived at the front is called 101 and
+      the one that used to read 101 prints 103.  PDFAR **leaves it so**, and that is now a
+      decision with a measurement behind it rather than an absence: carrying each sheet's
+      number with it turns one `1..N` range into one range per slot — measured at **540
+      entries and 9,483 bytes** on a 540-sheet book whose catalog said the same thing in
+      **1** entry — and it un-does the one reorder the numbering exists for, because a
+      batch scanned end to front is reversed precisely so that the numbers, which stay
+      with the slots, come out `1 2 3 4 5 6` over the turned sheets instead of following
+      the paper back down to `6 5 4 3 2 1`.  `tests/test_page_labels.py` pins the reading
+      on a two-range book, where a wrongly rewritten catalog shows up as a range starting
+      at the wrong sheet, and covers the delete — where **MuPDF re-aims the ranges below
+      the hole itself**, so the body still starts at 1 — through undo, Save As and a
+      bookmark that travels with its sheet while the number does not.  The re-aim is
+      where this step found a real defect instead of a design question: it does not
+      merge the collision left by deleting the only sheet a range covered, which is
+      **F10-4u** and pinned here as the before picture it has to change.  What this step
+      also does not close, because it is not this step's ask: labels are catalog keys, and
+      `Document.select` — rejected for that very loss in F10-4o — drops them where a
+      reorder leaves them alone, so the ask belongs to extract, where that call would
+      actually be made.
+- [ ] **F10-4u** — *A delete that empties a label range leaves the numbering illegal.*
+      MuPDF re-aims the ranges under a hole by itself and PDFAR inherits that maintenance
+      (F10-4q), but it never merges the collision: deleting the one sheet a one-sheet
+      range covered writes `/Nums [0 << /S /r /St 1 >> 0 << /S /D /St 5 >>]` — two
+      entries naming the same slot, which is not a legal numbering — and every surviving
+      sheet then reads off the stale first range, so the `5 6 7 8 9` the producer wrote
+      vanishes from the view **and from the saved file**.  PdfCraft's delete merges
+      (`crates/organize/src/labels.rs:404-422`, "continues the numbering over the gap as
+      in Acrobat"), which is the answer the standard's unique-keys rule forces.  The
+      before picture is
+      `tests/test_page_labels.py::test_a_delete_that_empties_a_range_leaves_two_ranges_on_the_same_slot`.
+- [ ] **F10-4v** — *The reader is shown a position where the file gives that slot a
+      label.*  `/PageLabels` is never read anywhere in `src/pdfar/` — no `get_label()`
+      call exists — and the toolbar's `page_label` widget prints a positional `/ N`, so a
+      book whose own catalog calls its third sheet 103, or `A-5`, or `ii`, is shown as
+      page 3.  Okular treats it as a first-class part of the reading position: the
+      location bar substitutes the label when it differs from the position
+      (`part/minibar.cpp:90-106`), the completion map resolves a typed label back to a
+      page (`:333-339`), and the annotations model prints
+      *"Page %1 (%2)"* with the label and the number together
+      (`part/annotationmodel.cpp:321-322`).  F10-4q settled what a reorder does to the
+      numbering; this is the other half of the same fact — the numbering is real and
+      PDFAR does not display it — and it is a display ask with its own jump-to-label,
+      status-bar and print-range questions to answer, so it is not folded into a
+      page-tree step.
 - [ ] The **assemble** permission asked before a page-tree edit, as PdfCraft gates
       `DeletePages` / `MovePages` / `RotatePages` on the document's `/P` flags: PDFAR keeps
       a file's permissions through a save and never consults them at edit time, so a
@@ -1905,9 +1951,12 @@ the reverse both needed arrived between them: the strip's drop now asks for `Mov
 (F10-4s) and its context menu now asks for `ReversePages` (F10-4t), so a reorder is
 something a reader can do rather than something the model can answer — and because the
 menu names the sheets in the label, the reverse arrives as two items rather than one
-command that quietly changes what it means.  A
-`/PageLabels` numbering is still what a reorder leaves behind (F10-4q),
-because labels number positions and no sheet carries them.
+command that quietly changes what it means.  What a reorder does to a `/PageLabels`
+numbering stopped being an open question (F10-4q): labels number positions and no sheet
+carries them, and that is what the reverse exists for — a batch scanned end to front
+comes out of it reading `1 2 3 4 5 6` down the new order, which a numbering that
+followed its sheet would undo.  The half still open is extract's, because
+`Document.select` drops the numbering outright rather than leaving it on its slots.
 
 Goal:
 
@@ -6363,7 +6412,8 @@ with `changed is None`: no page's content is touched, and no page number survive
 document carries its own sheets — MuPDF re-derives the outline rows and the link
 destinations from the page objects, and the annotations are a page's own — so a test pins
 that an outline row travels with the sheet it named.  `/PageLabels` does not: it numbers
-positions, which is F10-4q, and one test pins the gap rather than pretending it is filled.
+positions, which is F10-4q — the reading PDFAR keeps on purpose, with the case that
+decides it (a book scanned end to front) pinned in `tests/test_page_labels.py`.
 
 **The two settle rules that had to move.** A node the tree still reaches but no page asks
 through — one a move just emptied, or one a producer left off every `/Parent` chain — is
@@ -6426,7 +6476,8 @@ shorter-of-two-walks rule is what keeps the *move* part from being the expensive
 **What is not here**: nothing called this when it landed — the surface came later, and with it
 the decision this note left open: a drop into the gap the pick already fills is refused by the
 widget before an edit exists, so it never reaches the undo stack (F10-4s,
-`MovePages.changes_nothing`); `/PageLabels` numbers positions and is left behind (F10-4q); the
+`MovePages.changes_nothing`); `/PageLabels` numbers positions and a move leaves the
+numbering on those slots, which F10-4q settled as the reading rather than a gap; the
 **assemble** permission is not consulted, so a document
 that forbids page assembly accepts a move like any other; extract and duplicate
 are still to come against the same pick, and reverse landed with the carry this edit
@@ -6550,8 +6601,9 @@ promised.
 **What is not here**: both reorders have callers now — the strip's drop asks for
 `MovePages` and the context menu for `ReversePages` (F10-4s, F10-4t), which is what this
 note had been waiting on;
-`/PageLabels` numbers positions and a reverse leaves it behind
-(F10-4q, pinned by a test here as well as in the move); the **assemble** permission is not
+`/PageLabels` numbers positions and a reverse leaves the numbering on those slots
+(F10-4q — which is what makes a back-to-front batch read ascending after the turn, and
+is pinned here, in the move, and in `tests/test_page_labels.py`); the **assemble** permission is not
 consulted; extract and duplicate are the two reorders still to come; a one-sheet pick
 writes nothing and the widget that used to hand it over now refuses it before an edit exists,
 so it is no longer a Ctrl+Z that appears to do
@@ -6685,8 +6737,9 @@ around gathers it with a rubber band or asks the menu, and does not drag it;
 the drop indicator needs a real drag to see; a payload from another widget's list
 passes the mime test and is accepted, deliberately, because the block is this strip's pick
 and the gap is this pointer's line, which is what the test pins; extract and duplicate are
-the two reorders still to come; `/PageLabels` numbers positions and a move leaves it behind
-(F10-4q); and the **assemble** permission is not consulted, which is the same gap every
+the two reorders still to come; `/PageLabels` numbers positions and a move leaves the
+numbering on those slots, which F10-4q settled as the reading (`tests/test_page_labels.py`);
+and the **assemble** permission is not consulted, which is the same gap every
 page-tree edit has and is not this surface's to close.
 
 ---
@@ -6826,8 +6879,117 @@ what the turn and the delete have; the **assemble** permission is still not cons
 PdfCraft gates every one of these commands on it (`crates/engine/src/commands.rs:381-387`,
 `Assembly` on rotate, delete, duplicate, reverse, extract and crop alike); extract and
 duplicate are the two reorders still to come; and `/PageLabels` numbers positions, so a
-reverse from the menu leaves a labelled book's numbering exactly as wrong as a drop does
-(F10-4q).
+reverse from the menu leaves a numbered book counting down its new order exactly as a
+drop does — which is the reading F10-4q settled on, and no difference between the two
+surfaces.
+
+---
+
+### F10-4q A numbered book keeps its numbering where the reader left it — [x] Implemented
+
+**Task**: the checklist line was written as a bug report — `/PageLabels` numbers a
+position, so a reorder renumbers the sheets.  Holding it against the library turned the
+report inside out.  The question was not how to carry the numbers across a move but
+whether they should be carried at all, and there is one shape of book — the one the
+reverse exists for — where carrying them is the wrong answer.  So this step wrote no
+feature and no fix to `src/pdfar/`: it measured five things, took a reading, pinned it
+where it can actually be broken, and came out with a defect nobody had asked about.
+
+**What was measured, on the live catalog**:
+
+1. **A range names a slot, never a sheet** — `{startpage, style, firstpagenum}`.  A
+   range written with a prefix and no `/S` prints the prefix alone, and
+   `get_page_labels()` leaves `style` out of the entry rather than inventing a default
+   for it; `firstpagenum` defaults to 1 when the producer did not write one.
+2. **A move and a reverse leave `/PageLabels` byte-identical.**  The page tree changes;
+   the catalog is not touched by MuPDF or by us.
+3. **A delete does not, and it is MuPDF's own work.**  Each range's `startpage` moves up
+   by the number of deleted sheets strictly above it: measured `2 → 1` on a
+   roman-then-arabic book, and `4 → 3` when a sheet above the range went along with the
+   range's own first sheet.  Nothing in `src/pdfar/` asks for
+   that, and it is why the body still starts at 1 instead of 2.
+4. **`set_page_labels([])` invents the key.**  On a catalog that had no `/PageLabels` it
+   *creates* one, so a well-meant "normalise the numbering" pass would hand every plain
+   book a numbering it never had.  The guard is that no page-tree step reaches for the
+   setter at all, and a test pins that across all three edits.
+5. **`Document.select` drops the numbering outright** — measured: the catalog key goes,
+   `get_page_labels()` returns `[]`, and every surviving sheet reports the empty string.
+   That is the loss F10-4o already rejected the call for, and it is why extract, not
+   reorder, owns it.
+
+**The reading, and the case that decides it.**  Slots keep their numbers; sheets come to
+them.  The alternative — each sheet carrying its number wherever it lands — was measured
+rather than dismissed: on a 540-sheet book whose catalog said `1..540` in **one** entry,
+rewriting the labels to follow the sheets produces **540 entries** and **9,483 bytes** on
+a 279,040-byte file, and the catalog has to be rewritten by an edit that otherwise
+touches no catalog key at all.  The cost is not what settles it.  A batch scanned end to
+front has its sheets lying `6 5 4 3 2 1` on the glass under a numbering that reads
+`1 2 3 4 5 6` down the slots, and the reader reverses them so the two agree: with the
+numbering on the slots the paper and the numbers both come out `1 2 3 4 5 6`, and with
+the numbering on the sheets the sheets turn and the numbers follow them back down to
+`6 5 4 3 2 1` — the reverse un-done in exactly the place the reader was looking.  That
+case is a test, not a paragraph, because it is the whole argument.
+
+**What the step found on the way (F10-4u)**: MuPDF's re-aim does not merge the collision
+a delete creates when the sheet that went was the only one its range covered.  Measured
+on `i | 5 6 7 8 9` with `i` deleted, the catalog comes back
+`/Nums [0 << /S /r /St 1 >> 0 << /S /D /St 5 >>]` — two entries on one slot, which the
+spec's unique-key rule does not allow — every surviving sheet reads off the stale roman
+run, and the file that leaves the application says the same.  PdfCraft merges
+(`crates/organize/src/labels.rs:404-422`).  It is written up as its own step and pinned
+here as the before picture, because fixing it means PDFAR's first label-writing code and
+this step is a decision, not a feature.
+
+**Tests**: 10 cases in `tests/test_page_labels.py` — the move on a two-range book (both
+the labels and the ranges, so a catalog rewritten to the same strings by different ranges
+does not pass); the reverse under a numbering that stays; the scanned-end-to-front book
+asked of the paper and the number together; the delete's re-aim; the collision above; a
+plain book that no step may give a numbering, run against all three edits; a prefix-only
+range whose raw bytes must not move; undo carrying the delete's re-aim; Save As read back
+out of bytes; and a bookmark that travels with its sheet while the number stays with the
+slot.  The two cases this step inherited — in `tests/test_page_move.py` and
+`tests/test_page_reverse.py` — keep their assertions and lose their apologetics: they now
+say which reading PDFAR takes, and their failure messages name the other one.
+
+**Mutations**: there is no label code of ours to mutate, which is exactly the risk here —
+a suite that only describes an absence passes under any reading.  So every mutant
+*writes* labels, and the question is whether the suite notices.  Two of them implement
+the other reading, one on the move and one on the reverse; three write the numbering
+wrong in a plausible way — re-stamping a numbering a step had no reason to rewrite,
+dropping it with the sheets that moved, un-doing MuPDF's own re-aim on a delete.  **Five
+mutants, five killed**, over the five page-tree files (469 cases): a move that carries
+each sheet's number (**8 failed, 461 passed**), a move that re-stamps the numbering it
+has no reason to touch (**5 / 464**), a move that drops it with the sheets that moved
+(**10 / 459**), a delete that leaves the ranges where the hole made them wrong
+(**5 / 464**), and a reverse that renumbers the book it turned (**6 / 463**).  Worth
+saying what the pass does *not* show: a reverse-only mutant is not caught by the move,
+delete, save or bookmark cases, which is right — each pins its own edit — so those four
+were also run alone against the reverse mutant, and the scanned case kills it on its own
+in 0.31 s.  `src/pdfar/pages.py` was restored after every pass and verified byte-identical
+to the copy taken before the first one.
+
+**Suite**: 2597 passed, three consecutive runs on the final tree (170.94 / 162.02 /
+163.25 s; an earlier batch of three on the tree before the last docstring touches came
+out 186.45 / 186.06 / 186.59 s).  Ruff unchanged at 7, mypy unchanged at 553 errors in
+16 files — no new site, since no production line changed.
+
+**Performance**: nothing is written to the catalog, so the reorders are F10-4p's and
+F10-4r's to the microsecond and no timing in this roadmap moves.  What the refused
+reading would have cost is stated above — 15.7 ms of label rewriting bolted onto a
+152.8 ms reorder of 540 sheets, a tenth again, on top of the file growth.  The new test
+file runs its 10 cases in **0.52 s**.
+
+**Verified by eye**: nothing here has a surface.  PDFAR never reads `/PageLabels` — no
+call to `get_label()` exists in `src/pdfar/`, and the toolbar's `page_label` widget shows
+a positional `/ N` — so the decision governs the file the reader hands on, not the number
+the reader is shown.  The reader-visible half of that is its own ask — **F10-4v**, in the
+checklist above.  Every case in the file asserts the string `get_label()` returns, which is
+what any other viewer will show, so the assertion is the observation.
+
+**What is not here**: the collision F10-4u; extract's `Document.select`, which drops the
+numbering rather than leaving it on its slots; and the reader's own view — a book whose
+file calls its third sheet 103 is shown `/ 3`, because PDFAR displays a position and not
+a label, and no part of this step changes that.
 
 ---
 

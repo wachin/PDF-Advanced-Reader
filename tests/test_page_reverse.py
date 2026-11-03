@@ -487,11 +487,13 @@ def test_the_outline_rows_and_the_links_follow_their_own_sheets(nested):
 
 
 def test_a_page_label_stays_with_the_position_it_was_written_for(tmp_path):
-    """F10-4q again, from the other end: labels number positions, not sheets.
+    """The reading, from this end: labels number positions, not sheets.
 
     A reverse is the reorder a reader picks when the numbering *is* the content — a
-    batch scanned back to front — so the gap is worth showing up in the edit that
-    would be used to fix it: the sheets trade places and the printed numbers do not.
+    batch scanned back to front — and numbering the positions is what makes the turned
+    book read ascending rather than backwards again.  ``tests/test_page_labels.py``
+    holds the argument and the measurement; this is the same invariant on the nested,
+    catalogued book these cases are built on.
     """
     path = catalogued_pdf(nested_pdf(str(tmp_path / "cat.pdf")))
     doc = fitz.open(path)
@@ -500,7 +502,8 @@ def test_a_page_label_stays_with_the_position_it_was_written_for(tmp_path):
     assert numbers(doc) == [2, 1, 0]
     after = [doc.load_page(index).get_label() for index in range(doc.page_count)]
     assert after == before, (
-        "the labels moved with their sheets, so F10-4q needs writing up as done")
+        "the labels followed their sheets: that is the other reading, and it un-does "
+        "the reverse a back-to-front scan is reversed for")
     doc.close()
 
 

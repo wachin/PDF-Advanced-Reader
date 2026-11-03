@@ -711,8 +711,10 @@ class MovePages(Edit):
     the link destinations from the page objects, so those follow the sheet they named,
     and the annotations are its own.  ``/PageLabels`` follows the *position* — the
     catalog says "from index 0", not "from this sheet" — so a numbered book comes out
-    of a move with new numbers printed on old sheets.  Nothing here rewrites labels;
-    that gap is F10-4q, and one test in ``tests/test_page_move.py`` pins it.
+    of a move with new numbers printed on old sheets.  That is the reading PDFAR
+    deliberately takes, and ``tests/test_page_labels.py`` holds why: a book scanned end
+    to front is reversed precisely so that the numbering, which stays with the slot,
+    comes out ascending over the turned sheets.
     """
 
     pages: Tuple[int, ...]
@@ -809,7 +811,8 @@ class ReversePages(Edit):
 
     What travels with a sheet travels with it here too — outline rows, link
     destinations, annotations — and ``/PageLabels`` still numbers positions, which is
-    F10-4q and pinned by a test in ``tests/test_page_reverse.py`` rather than filled.
+    the reading ``tests/test_page_labels.py`` pins: this is the edit a back-to-front
+    scan exists for, and a numbering that followed the sheets would undo it.
     """
 
     pages: Tuple[int, ...]
