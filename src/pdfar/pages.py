@@ -185,11 +185,69 @@ class DeletePages(Edit):
             raise EditError(
                 f"This document is {count} {word} and all of it is being deleted; "
                 f"a page is needed to save it")
+        # Sorted first: the library's own re-aim assumes ``/Nums`` ascends.
+        self._repair_label_ranges(doc)
         # Highest run first: a delete shifts the numbers above it, so working up
         # from the front would spend the list on the wrong pages.
         for start, end in sorted(contiguous_runs(named), reverse=True):
             doc.delete_pages(start, end)
+        # And merged after: the re-aim leaves a range that ran out of sheets on a slot.
+        self._repair_label_ranges(doc)
         self._drop_dead_outline_entries(doc)
+
+    @staticmethod
+    def _repair_label_ranges(doc: fitz.Document) -> None:
+        """Make the numbering one a delete can maintain and a viewer can read.
+
+        Called twice: once before the sheets go, once after.  MuPDF re-aims the ranges
+        under a hole by itself and PDFAR lets it (F10-4q), but it does not notice a range
+        that has run out of sheets.  Deleting the only sheet a range covered leaves **two
+        entries naming one slot** — ``/Nums`` asks for unique keys — and which of the two a
+        reader is then shown is not the producer's intent but the tie-break of a sort over
+        the serialized dictionary text: measured on ``i | 5 6 7 8 9`` with ``i`` deleted,
+        the survivors read ``i ii iii iv v`` and save that way, whichever order the file
+        lists the two entries in.  A range whose start is left past the last sheet of a
+        shortened book covers nothing either — inert for the slots below it, and for a
+        numbering that starts past the front of the book not inert but fatal, since
+        PyMuPDF's ``get_label()`` raises for a slot below every range.
+
+        The first run answers a defect the delete would otherwise inherit.  The re-aim
+        leaves the **first entry it reads** where it is and shifts every later one up by
+        the deletions below it — harmless in order, because a legal numbering's first
+        entry sits at slot 0 and has nowhere to go, and wrong out of order: measured on
+        ``4 << /S /D /St 40 >> 0 << /S /r /St 1 >>``, a bare ``delete_page(0)`` writes
+        ``-1 << /S /r /St 1 >>`` — a range naming a sheet before the first — and the book
+        reads ``ii iii iv v 40``.  Sorting first makes the exempt entry the harmless one,
+        and costs a catalog write only on a file that was already illegal.
+
+        One walk answers all three shapes: sort, keep the *later* of any two entries
+        naming a slot — which is the numbering that resumes over the gap — and drop what
+        covers no sheet.  The catalog is written only when the walk changed something,
+        because ``set_page_labels`` re-creates every range object — the same rule the
+        outline prune below runs by, and the reason it also drops a redundant ``/St 1`` on
+        its way out — and a book with no numbering is left with none: F10-4q's guard is
+        that nothing here reaches for the setter unasked.  A numbering this cannot read is
+        therefore a numbering this does not touch, which is also how a ``/PageLabels``
+        written as a number *tree* is treated — though MuPDF flattens that into ``/Nums``
+        while re-aiming it, before the second run ever sees it.
+        """
+        ranges = doc.get_page_labels()
+        if not ranges:
+            return
+        count = doc.page_count
+        # The file's order is not a sorted one, and a merge that trusts it would fold two
+        # ranges that do not touch into one; Python's sort is stable, so the entry listed
+        # last still wins a slot.
+        kept: List[dict] = []
+        for entry in sorted(ranges, key=lambda label: label["startpage"]):
+            if entry["startpage"] >= count:
+                continue
+            if kept and entry["startpage"] == kept[-1]["startpage"]:
+                kept[-1] = entry
+            else:
+                kept.append(entry)
+        if kept != ranges:
+            doc.set_page_labels(kept)
 
     @staticmethod
     def _drop_dead_outline_entries(doc: fitz.Document) -> None:

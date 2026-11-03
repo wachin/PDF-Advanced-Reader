@@ -1677,22 +1677,53 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       bookmark that travels with its sheet while the number does not.  The re-aim is
       where this step found a real defect instead of a design question: it does not
       merge the collision left by deleting the only sheet a range covered, which is
-      **F10-4u** and pinned here as the before picture it has to change.  What this step
+      **F10-4u** — found here, repaired there, so the case that used to pin the before
+      picture now pins the repair.  What this step
       also does not close, because it is not this step's ask: labels are catalog keys, and
       `Document.select` — rejected for that very loss in F10-4o — drops them where a
       reorder leaves them alone, so the ask belongs to extract, where that call would
       actually be made.
-- [ ] **F10-4u** — *A delete that empties a label range leaves the numbering illegal.*
-      MuPDF re-aims the ranges under a hole by itself and PDFAR inherits that maintenance
-      (F10-4q), but it never merges the collision: deleting the one sheet a one-sheet
-      range covered writes `/Nums [0 << /S /r /St 1 >> 0 << /S /D /St 5 >>]` — two
-      entries naming the same slot, which is not a legal numbering — and every surviving
-      sheet then reads off the stale first range, so the `5 6 7 8 9` the producer wrote
-      vanishes from the view **and from the saved file**.  PdfCraft's delete merges
+- [x] **F10-4u** — *A delete that empties a label range leaves the numbering illegal,
+      and `DeletePages` now repairs it.*  MuPDF re-aims the ranges under a hole by itself
+      and PDFAR inherits that maintenance (F10-4q), but it never merges: deleting the one
+      sheet a one-sheet range covered writes `/Nums [0 << /S /r /St 1 >> 0 << /S /D /St 5
+      >>]` — two entries naming the same slot, which is not a legal numbering — and the
+      survivors read off the dead range, so the `5 6 7 8 9` the producer wrote vanishes
+      from the view **and from the saved file**.  Which half of a collision a viewer shows
+      turns out not to be the producer's intent at all: PyMuPDF resolves it by a sort over
+      the serialized dictionary text, so roman beats `5` whichever order the file lists
+      them in while a prefix-only range loses to the same `5`.  The other shape the re-aim
+      leaves is a range whose start now sits past the last sheet: inert for the slots
+      below it, and when the numbering starts past the front of the book it is worse than
+      inert, because `Page.get_label()` raises `IndexError` there rather than answering.
+      The walk therefore runs **twice**, before and after the delete, because the re-aim
+      exempts the *first entry it reads*: a numbering the producer listed out of order
+      would otherwise be shifted from the wrong anchor, and `delete_page(0)` on
+      `4 << /S /D /St 40 >> 0 << /S /r /St 1 >>` was measured writing
+      `-1 << /S /r /St 1 >>` — a range naming a sheet before the first — and the book
+      reading `ii iii iv v 40`.
+      One walk of `get_page_labels()` answers both — keep the later of any two ranges on a
+      slot, which is the numbering that resumes over the gap, as PdfCraft does
       (`crates/organize/src/labels.rs:404-422`, "continues the numbering over the gap as
-      in Acrobat"), which is the answer the standard's unique-keys rule forces.  The
-      before picture is
-      `tests/test_page_labels.py::test_a_delete_that_empties_a_range_leaves_two_ranges_on_the_same_slot`.
+      in Acrobat"), and drop what covers no sheet — and the catalog is written only when
+      the walk changed something, the rule the outline prune already runs by, so a
+      numbering the pick did not break keeps the producer's bytes and a plain book is
+      never given a `/PageLabels`.
+- [ ] **F10-4w** — *A numbering that starts past the front of the book is left there.*
+      MuPDF's re-aim shifts every range **after the first entry it reads** and leaves that
+      first entry where it is — harmless on a legal numbering, whose first entry sits at
+      slot 0 and has nowhere to go, and wrong on one that does not: measured on
+      `1 << /S /r /St 1 >> 4 << /S /D /St 40 >>` (roman over sheets 1-3, arabic over 4-5,
+      sheet 0 left out), a `delete_page(0)` writes `[(1, "r", 1), (3, "D", 40)]` and the
+      book reads `nothing | i ii 40 41` — the front sheet has no range to read, where
+      `Page.get_label()` raises, and the numbering is a sheet short at the bottom.  Sorting
+      is not the answer, because that array is already in order, and clamping slot 0 would
+      invent a numbering for a sheet the producer deliberately left out, so **F10-4u**
+      repairs nothing here and the shape is pinned as a before picture by
+      `test_a_numbering_that_starts_past_the_front_is_left_there_by_the_delete`.
+      PdfCraft answers an uncovered slot with its **position**
+      (`crates/organize/src/labels.rs:263-272`), which is a reading decision with the
+      reader-visible half of F10-4v attached, so it is not folded into a page-tree step.
 - [ ] **F10-4v** — *The reader is shown a position where the file gives that slot a
       label.*  `/PageLabels` is never read anywhere in `src/pdfar/` — no `get_label()`
       call exists — and the toolbar's `page_label` widget prints a positional `/ N`, so a
@@ -6936,20 +6967,22 @@ on `i | 5 6 7 8 9` with `i` deleted, the catalog comes back
 `/Nums [0 << /S /r /St 1 >> 0 << /S /D /St 5 >>]` — two entries on one slot, which the
 spec's unique-key rule does not allow — every surviving sheet reads off the stale roman
 run, and the file that leaves the application says the same.  PdfCraft merges
-(`crates/organize/src/labels.rs:404-422`).  It is written up as its own step and pinned
-here as the before picture, because fixing it means PDFAR's first label-writing code and
-this step is a decision, not a feature.
+(`crates/organize/src/labels.rs:404-422`).  It is written up as its own step — **F10-4u**,
+below, where PDFAR's first label-writing code now lives — because fixing it means reaching
+for `set_page_labels` and this step is a decision, not a feature.
 
-**Tests**: 10 cases in `tests/test_page_labels.py` — the move on a two-range book (both
-the labels and the ranges, so a catalog rewritten to the same strings by different ranges
-does not pass); the reverse under a numbering that stays; the scanned-end-to-front book
-asked of the paper and the number together; the delete's re-aim; the collision above; a
-plain book that no step may give a numbering, run against all three edits; a prefix-only
-range whose raw bytes must not move; undo carrying the delete's re-aim; Save As read back
-out of bytes; and a bookmark that travels with its sheet while the number stays with the
-slot.  The two cases this step inherited — in `tests/test_page_move.py` and
-`tests/test_page_reverse.py` — keep their assertions and lose their apologetics: they now
-say which reading PDFAR takes, and their failure messages name the other one.
+**Tests**: 10 cases in `tests/test_page_labels.py` as this step shipped, 21 now — F10-4u
+turned the collision case into the repair and added 11 of its own.  What was pinned: the move
+on a two-range book (both the labels and the ranges, so a catalog rewritten to the same
+strings by different ranges does not pass); the reverse under a numbering that stays; the
+scanned-end-to-front book asked of the paper and the number together; the delete's re-aim;
+the collision above, since turned into the repair it pins; a plain book that no step may
+give a numbering, run against all three edits; a prefix-only range whose raw bytes must not
+move; undo carrying the delete's re-aim; Save As read back out of bytes; and a bookmark
+that travels with its sheet while the number stays with the slot.  The two cases this step
+inherited — in `tests/test_page_move.py` and `tests/test_page_reverse.py` — keep their
+assertions and lose their apologetics: they now say which reading PDFAR takes, and their
+failure messages name the other one.
 
 **Mutations**: there is no label code of ours to mutate, which is exactly the risk here —
 a suite that only describes an absence passes under any reading.  So every mutant
@@ -6973,11 +7006,13 @@ to the copy taken before the first one.
 out 186.45 / 186.06 / 186.59 s).  Ruff unchanged at 7, mypy unchanged at 553 errors in
 16 files — no new site, since no production line changed.
 
-**Performance**: nothing is written to the catalog, so the reorders are F10-4p's and
-F10-4r's to the microsecond and no timing in this roadmap moves.  What the refused
-reading would have cost is stated above — 15.7 ms of label rewriting bolted onto a
-152.8 ms reorder of 540 sheets, a tenth again, on top of the file growth.  The new test
-file runs its 10 cases in **0.52 s**.
+**Performance**: nothing was written to the catalog on this step's tree, so the reorders
+are F10-4p's and F10-4r's to the microsecond and no timing in this roadmap moved — the one
+catalog write a page-tree step now makes belongs to **F10-4u** and is timed in its section
+below.  What the refused reading would have cost is stated above — 15.7 ms of label
+rewriting bolted onto a 152.8 ms reorder of 540 sheets, a tenth again, on top of the file
+growth.  The new test file runs its 10 cases in **0.52 s**, and its 21 in **0.82 s** once
+F10-4u's are in it.
 
 **Verified by eye**: nothing here has a surface.  PDFAR never reads `/PageLabels` — no
 call to `get_label()` exists in `src/pdfar/`, and the toolbar's `page_label` widget shows
@@ -6986,10 +7021,164 @@ the reader is shown.  The reader-visible half of that is its own ask — **F10-4
 checklist above.  Every case in the file asserts the string `get_label()` returns, which is
 what any other viewer will show, so the assertion is the observation.
 
-**What is not here**: the collision F10-4u; extract's `Document.select`, which drops the
-numbering rather than leaving it on its slots; and the reader's own view — a book whose
-file calls its third sheet 103 is shown `/ 3`, because PDFAR displays a position and not
-a label, and no part of this step changes that.
+**What is not here**: extract's `Document.select`, which drops the numbering rather than
+leaving it on its slots; and the reader's own view — a book whose file calls its third
+sheet 103 is shown `/ 3`, because PDFAR displays a position and not a label, and no part of
+this step changes that.  The collision this step found is not here either: it is repaired
+one section below, in **F10-4u**.
+
+---
+
+### F10-4u A delete that empties a label range has its numbering repaired — [x] Implemented
+
+**Task**: F10-4q left the numbering to MuPDF, which re-aims the ranges under a hole and
+stops there.  Three shapes come out of that — two left behind when the sheets go, one that
+the delete would inherit if the sheets went first — and `DeletePages` now answers all three,
+on both sides of the delete.  This is PDFAR's first code that writes `/PageLabels`.
+
+**What the library does, measured with no PDFAR code in the picture** — a stamped catalog
+and plain `delete_pages` calls, the ranges read back as the file has them:
+
+- **the collision.** `0 r 1 | 1 D 5` with sheet 0 deleted comes back
+  `<</Nums[0<</S/r/St 1>>0<</S/D/St 5>>]>>`: two entries naming slot 0, which `/Nums` does
+  not allow, and the survivors read `i ii iii iv v` where the producer wrote
+  `5 6 7 8 9`.  In the middle of a four-range book the same defect swallows what it buried:
+  deleting the one sheet the third range covered leaves `…2<</S/a/St 1>>2<</S/D/St 3>>]>>`
+  and the book reads `i 5 a b c` where it read `i 5 3 4 5`.
+- **which half of a collision wins is nobody's decision.** PyMuPDF's table is the pairs
+  `(startpage, serialized dictionary text)`, sorted, and a slot is answered by the last
+  entry at or below it.  So `<</S/r/St 1>>` beats `<</S/D/St 5>>` because `r` sorts after
+  `D` — in **both** array orders, measured `0 r / 0 D` and `0 D / 0 r` both printing `i` —
+  while a prefix-only entry, `<</P(A-)>>`, sorts below the same `D 5` and loses it.  The
+  producer's order decides nothing; the byte order of a dictionary does.
+- **the range naming a sheet that is gone.** Number the last two sheets of a six-sheet book
+  and delete them: the tail range keeps its `startpage`, because the re-aim counts only the
+  deletions *above* a range, so the catalog names slot 4 of a four-slot book.  The slots
+  below it still read `1 2 3 4` — inert, and still not a numbering of this book.
+- **the shape that is not inert.** `3 << /S /D /St 9 >>` on six sheets is a numbering that
+  starts past the front, and `delete_pages(3, 5)` leaves it naming slot 3 of a three-slot
+  book.  Every survivor then *raises*: `Page.get_label()` returns `''` only when the whole
+  table is empty, and hands a non-empty one to `utils.get_label_pno`, whose
+  `[x for x in labels if x[0] <= pgNo][-1]` has no answer for a slot below every range —
+  `IndexError`, though that function's docstring and `Page.get_label`'s both promise an
+  empty string.  A book whose labels cannot be read is the worst file a reader can be
+  handed.
+- **the exemption that costs the most.** The re-aim leaves the **first entry it reads**
+  where it is and shifts every entry after it.  Harmless in order, since a legal
+  numbering's first entry sits at slot 0 and has nowhere to go; wrong out of it — measured
+  on `4 << /S /D /St 40 >> 0 << /S /r /St 1 >>`, a bare `delete_page(0)` writes
+  `-1 << /S /r /St 1 >>`, a range naming a sheet *before the first*, and the book reads
+  `ii iii iv v 40`.
+- **what MuPDF reshapes on its own.** A `/PageLabels` written as a number *tree* is
+  flattened into `/Nums` while it is re-aimed: the `/Kids` form comes back
+  `<</Nums[0<</S/r/St 1>>2<</S/D/St 5>>]>>` from a bare `delete_page`, and a `move_page`
+  leaves the tree alone.  The repair never meets a tree, and the tree case in the file is
+  as much a pin on that flattening as on the merge.
+
+**The repair**: `DeletePages._repair_label_ranges`, called once before the runs of sheets
+go and once after.  One walk: sort, keep the *later* of any two entries naming a slot, drop
+what covers no sheet, and write the catalog only when the walk changed something.  Keeping
+the later is PdfCraft's rule and they state the reason on the line that does it
+(`crates/organize/src/labels.rs:404-422` — "The later range is the one on the first page
+left"), with the reading in the doc comment above ("continues the numbering over the gap as
+in Acrobat"); their *reader* applies the same rule before any command sees the ranges
+(`:219-235`: "A start page given twice keeps its later range, as readers that overwrite do
+(the sort is stable, so the later one is last among equals)").  So a collision is undefined
+in the file and decided twice over in their app; PDFAR decides it in the file, which is the
+only place a viewer that is not PDFAR will look.  The stable sort is what makes "later"
+mean *listed last* rather than *read first*, and their read-time walk is the same three
+lines as ours — `sort_by_key` on the start, then replace-or-push against `unique.last_mut()`
+(`:227-235`).
+
+Writing only when the walk changed something is the rule `_drop_dead_outline_entries`
+already runs by — both setters re-create every object — and it is PdfCraft's rule at the
+same point in the same function: `drop_deleted_pages` returns before its own write on
+`if ranges == old` (`:417-420`).  Here it earns its place twice over, because
+`set_page_labels` is not an identity: round-tripping an untouched two-range
+catalog through it writes `<</Nums[0<</S/r>>2<</S/D/St 5>>]>>`, dropping the redundant
+`/St 1` and normalising the spacing, so a step that reached for it unasked would rewrite a
+producer's numbering it had no reason to touch.  One case compares the raw `/Nums` bytes
+for exactly that reason.  The pre-delete call is what the `-1` above is for: it costs a
+catalog write only on a file that was already illegal, and nothing on a book in order or a
+book with no numbering at all.
+
+**Two decisions inside it.** When every range covered deleted sheets the book has no
+numbering, and PDFAR writes `set_page_labels([])` — the `/Nums[]` form, which reads back as
+`''` for every slot.  PdfCraft removes the catalog key instead (`:352-357`); that answer is
+not on offer here, because measured, `xref_set_key(catalog, "PageLabels", "null")` leaves
+the key *present* as `null` after a save, which is a worse file than an empty array.  And a
+numbering that starts past the front of the book is **not** clamped to slot 0: clamping
+would give sheets the producer left unnumbered a number, which is F10-4q's refusal in a new
+costume.  What it does instead is leave the shape for **F10-4w**, pinned as its before
+picture.  Both of their answers to these two shapes are on the *read* side, which is why
+neither is available to a write: `check_spans` waves a range past the last page through
+because "a range past the last page is never shown" (`:291-312`), and `PageLabels::label`
+substitutes the slot's **position** when no range covers it (`:263-272`).  PDFAR has no
+label reader to substitute into — `Page.get_label()` raises, and F10-4v is the step that
+would put a reader where the raise is — so the only place its answer can go is the file.
+
+**Tests**: 11 new cases in `tests/test_page_labels.py` plus a rewrite of the one F10-4q
+shipped as the collision's before picture — 21 in the file, and one more in
+`tests/test_page_delete.py`.  What they pin: the one-wide range emptied at the front; the
+same in the middle of four ranges where the neighbours keep their own numbers; one pick
+emptying two ranges; the tail range past the shortened book; the last numbering going, which
+is also the case that found the `IndexError`; the untouched numbering compared at byte level;
+a producer whose file arrived with the collision already in it; the merged numbering through
+undo and out of the saved bytes; a prefix-only range carried through the rewrite without
+being flattened into a style; the number-tree book; the out-of-order array; and the numbering
+that starts past the front, which is the new case **F10-4w** is written against.
+`RecordingDoc` in `tests/test_page_delete.py` now models `get_page_labels` and
+`set_page_labels`, so "a plain book is not handed a numbering" is an assertion about the
+calls rather than the `AttributeError` the first version of the repair drew there, and one
+case makes it.
+
+**Mutations**: **11 mutants, 11 killed** over the seven page-tree, session and save files
+(530 cases): no repair at all (**10 failed**), the pre-delete pass dropped (**1**), the
+post-delete pass dropped (**8**), the merge trusting the file's order (**1**), the earlier
+range winning a slot (**7**), both halves of a collision dropped (**7**), collisions
+appended as MuPDF leaves them (**7**), a range naming no sheet kept (**2**), the same rule
+off by one so only a range *strictly* past the last slot is dropped (**2**), the catalog
+written whether it changed or not (**1**), and a plain book given an empty numbering
+(**3**).  Two of them die to a single case, which is the point of writing those cases: the
+pre-delete pass belongs to the out-of-order one and to nothing else, and so does the sort
+inside the walk.  `src/pdfar/pages.py` was restored after every pass and verified
+byte-identical to the copy taken before the first one.
+
+**Suite**: 2609 passed, three consecutive runs on the final tree (177.01 / 172.47 /
+166.69 s).  Ruff unchanged at 7 and mypy unchanged at 553 errors in 16 files — the one new
+production site is the walk itself, and it is typed.
+
+**Performance**: the walk is a read of the label table, and that read is the cost.  On a
+540-sheet book, `DeletePages.apply` against the same delete with the repair taken out, from
+one run of the harness on an idle machine: **3.30 ms vs 3.09 ms** for a plain book,
+**3.52 vs 3.18** for a two-range numbering nothing touched, **3.45 vs 3.16** when one is
+emptied and the catalog is written, **3.48 vs 3.12** for the out-of-order array.  One pass
+over a one- or two-range table is **0.04–0.09 ms**; a deliberately pathological
+**100-range** catalog costs **2.0–2.2 ms** to read and is paid twice, so its delete goes
+**3.3 → 7.4–7.8 ms** — real, stated, and against a numbering no book of ours carries.  A
+repaired file is *smaller* than the unrepaired one, because a range object fewer:
+**280,058 B against 280,568 B** on the 100-range case and **279,034 B against 279,048 B** on
+the two-range one.  A plain book's save is byte-identical either way (**278,998 B**), which
+is the write-only-when-changed rule showing up in the file rather than in the timer.  The
+move and the reverse do not reach for the setter, so F10-4p's and F10-4r's timings do
+not move.
+
+**Verified by eye**: still no surface — PDFAR does not read `/PageLabels` (that is
+**F10-4v**), so nothing on screen changes and the observation is the file.  Every case
+asserts the string `get_label()` returns for each slot, which is what another viewer will
+show, and two assert the raw `/Nums` bytes; the undo and Save-As cases read the numbering
+back out of written bytes.
+
+**What is not here**: the numbering that starts past the front, which **F10-4w** takes; a
+`/PageLabels` that MuPDF cannot read at all, which the walk leaves untouched because the
+read comes back empty; and a range whose start the producer wrote *negative*, which is left
+as it is — measured on `-1 << /S /D /St 1 >> 2 << /S /r /St 1 >>`, the six sheets read
+`2 3 i ii iii iv` (the `/St` counts from the negative start, so the run simply begins
+mid-book) and `set_page_labels` writes the `-1` straight back, so it is a producer's
+sloppiness rather than a shape a viewer can be shown wrongly.  The re-aim itself stays the
+library's job on every array that is in order; extract's `Document.select` still drops the
+numbering outright; and the **assemble** permission is still not asked of any page-tree
+edit.
 
 ---
 

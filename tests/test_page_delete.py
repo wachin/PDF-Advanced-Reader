@@ -124,6 +124,18 @@ class RecordingDoc:
     def get_toc(self, simple: bool = True) -> list:
         return [entry[:3] for entry in self.toc]
 
+    def get_page_labels(self) -> list:
+        """A plain book, which is what this double models: no range to repair.
+
+        Mirrored rather than stubbed out because the delete reads the numbering on
+        every path; what the numbering *does* when a book has one is tested on real
+        documents in ``tests/test_page_labels.py``.
+        """
+        return []
+
+    def set_page_labels(self, labels: list) -> None:
+        self.calls.append(("labels", len(labels)))
+
     def set_toc(self, toc: list) -> None:
         self.calls.append(("toc", len(toc)))
         self.toc = list(toc)
@@ -330,6 +342,18 @@ def test_an_outline_that_lost_nothing_is_left_alone():
     doc = RecordingDoc(page_count=10, toc=[[1, "one", 5]])
     DeletePages(pages=(0,)).apply(doc)
     assert [call for call in doc.calls if call[0] == "toc"] == []
+
+
+def test_a_book_with_no_numbering_is_not_handed_one():
+    """The label repair reads the catalog on every delete and writes it on none of them.
+
+    ``set_page_labels`` re-creates every range object even to say the list is empty, so
+    a plain book's delete must not reach for it at all — watched here on the calls,
+    where ``tests/test_page_labels.py`` watches the bytes of a real catalog.
+    """
+    doc = RecordingDoc(page_count=10)
+    DeletePages(pages=(0,)).apply(doc)
+    assert [call for call in doc.calls if call[0] == "labels"] == []
 
 
 def test_the_children_of_a_deleted_row_are_promoted_not_dropped(book):
