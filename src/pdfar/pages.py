@@ -1023,3 +1023,121 @@ class InsertBlankPage(Edit):
         for key in _BLANK_GEOMETRY:
             doc.xref_set_key(page.xref, key,
                              doc.xref_get_key(src_xref, key)[1])
+
+
+@dataclass(frozen=True)
+class DuplicatePages(Edit):
+    """Copy the picked sheets into the gap below the last one of them.
+
+    The first edit whose map is not a permutation: a number the reader picked comes
+    back **twice**, once for the sheet that was there and once for the sheet made of
+    it.  Three decisions, each measured against MuPDF first:
+
+    * **``fullcopy_page``, not ``copy_page``.**  The obvious call documents itself as
+      creating "another reference of the same page object", and that is what it does:
+      the xrefs after ``copy_page(1, to=3)`` of a four-sheet book read
+      ``[4, 10, 14, 10, 18]``.  One object in two slots shares its annotations — a
+      note written on the copy is on the original — and it breaks the invariant every
+      reorder in this file leans on, that a page object hangs off one ``/Kids``: on the
+      nested fixture the shared object ended up in two nodes at once while stating a
+      single ``/Parent``, so which copy the reader saw depended on which chain MuPDF
+      resolved.  PdfCraft refuses the same shape in a test
+      (``duplicate_pages_become_independent_copies``, "a page object may appear only
+      once in the tree").  ``fullcopy_page`` gives a new object with its own
+      ``/Contents`` and its ``/Annots`` deep-copied, and **shares ``/Resources``** —
+      the same dictionary, so a duplicate costs no second copy of the fonts and
+      pictures, which is precisely the promise PdfCraft makes for the feature.
+    * **The block goes below the pick, in pick order** — ``at = last + 1``, PdfCraft's
+      ``duplicate_pages`` default and the same gap the insert above takes.  Each copy
+      immediately after its own source is what a reverse-sorted walk gives, and it was
+      not taken: it re-numbers the sheets *between* the picked ones twice over, so a
+      reader who picks pages 2 and 4 of six has moved page 5 to ask for two new sheets.
+    * **The settle comes first**, because the landing slot is what decides the copy's
+      ancestors: ``fullcopy_page`` files the object in the node that owns the slot and
+      copies only what the source *states*.  Measured on the nested book, an unsettled
+      ``fullcopy_page(0, to=-1)`` lands in the cropped node and arrives 260×360 and
+      upright, while its source is 400×300 turned 90°.  After the push-down every sheet
+      states its own box, crop and turn, so the copy carries them to wherever it lands.
+
+    ``to`` counts "insert before this slot" and MuPDF refuses ``to == page_count``, so
+    a pick that reaches the last sheet appends with ``-1``; the sources are never
+    disturbed either way, because every insertion happens at or above the gap, which is
+    above every sheet picked.
+
+    The catalog needs no repair and one thing is deliberately not repaired: outline
+    destinations are page objects, so rows walk with their sheets (measured — two rows
+    stayed on 2 and 4 while ``back`` went to 8 for a copy made of neither), and
+    ``/PageLabels`` counts *positions*, which is the reading every reorder here pins:
+    the copies wear the labels of the numbers they arrived at, not of the sheets they
+    were made from.  Undo is the interesting half of the map: forward, ``where`` answers
+    the first slot and so keeps a mark on the sheet it was made on; backward, the same
+    tuple sends a mark made on a copy home to the original that survives the undo.
+    """
+
+    pages: Tuple[int, ...]
+
+    scope = Scope.STRUCTURE
+    requires_assembly = True
+
+    @property
+    def changed(self) -> Optional[Tuple[int, ...]]:
+        """Every number from the gap upwards, plus the copies, which have no cache yet.
+
+        The originals keep their words — nothing was written on them — but each sheet
+        from the gap up now wears the number of the one above it, and the new sheets
+        need rendering from the start.  ``page_order`` is the honest answer and it
+        cannot be narrowed.
+        """
+        return None
+
+    def _block(self) -> Tuple[int, ...]:
+        """The sheets to copy, once each, in the order the copies will be placed."""
+        return tuple(sorted(set(self.pages)))
+
+    def page_order(self, before_count: int) -> Tuple[int, ...]:
+        """The book with the block spliced into the gap below the pick.
+
+        A copied sheet is named twice, which is what makes :attr:`changed` unable to
+        point at a set of pages: the two slots holding it are different sheets, and the
+        marks on them have different answers — one stays, one goes home on undo.  An
+        empty pick answers with the identity rather than IndexError: the refusal is
+        ``apply``'s to make, and the session asks for the map before it asks for the
+        edit.
+        """
+        block = self._block()
+        if not block:
+            return tuple(range(before_count))
+        gap = block[-1] + 1
+        return (tuple(range(gap)) + block + tuple(range(gap, before_count)))
+
+    @property
+    def label(self) -> str:
+        copied = len(self._block())
+        if copied == 1:
+            return "Duplicate Page"
+        return f"Duplicate {copied} Pages"
+
+    def apply(self, doc: fitz.Document) -> None:
+        count = _checked_pick(doc, self.pages, "duplicate")
+        block = self._block()
+        gap = block[-1] + 1
+        # Read before the settle for the reason ``_reorder`` gives: these xrefs name the
+        # book the plan was computed against, and the read-back has to be compared with
+        # the sheet the reader was holding, not with whatever the push-down left behind.
+        before = [doc.load_page(index).xref for index in range(count)]
+        SettlePageTree().apply(doc)
+        for step, sheet in enumerate(block):
+            to = gap + step
+            # ``to == page_count`` is the one MuPDF refuses, and it is reached exactly
+            # when the pick holds the last sheet — in which case "append" is the answer
+            # the reader meant anyway.  A ``Page`` object would not survive this call
+            # either: the copy rebuilds the page tree, so every slot is read afresh.
+            doc.fullcopy_page(sheet, to=to if to < doc.page_count else -1)
+        after = [doc.load_page(index).xref for index in range(doc.page_count)]
+        if (len(after) != count + len(block)
+                or after[:gap] != before[:gap]
+                or after[gap + len(block):] != before[gap:]
+                or len(set(after)) != len(after)):
+            raise EditError(
+                "The page tree does not read the copies this edit asked for; "
+                "nothing is duplicated")

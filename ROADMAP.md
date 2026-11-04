@@ -1607,10 +1607,30 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       the outside in, everything else untouched; the pick checked whole before a sheet
       moves; the identity written as nothing, settle included; the exact permutation
       published as the map a step carries, and its own inverse.
-- [ ] Extract and duplicate — the other two runs against the same pick, each settling the
-      page tree the way F10-4p does.  Duplicate needs measuring before it is written:
-      whether `copy_page` gives a sheet its own object or files the *same* object in two
-      slots is what the settle's walk, the strip and a per-page cache all have to be told.
+- [x] **F10-4bb** *Duplicate pages* — the run that makes one sheet number name two places.
+      Measured before it was written, because that one answer decides three things at once:
+      `copy_page` files the **same** object in two slots (xrefs `[4, 10, 14, 10, 18]` off a
+      four-sheet book), so a note written on the copy is a note on the original and the
+      `/Kids`-against-`/Parent` invariant every reorder above leans on stops holding;
+      `fullcopy_page` gives a distinct object with `/Annots` deep-copied and `/Resources`
+      **shared** — the promise PdfCraft makes its readers (`organize/src/lib.rs:551`,
+      "sharing fonts and images with the originals") and the shape it forbids in a test
+      (`organize/src/tests.rs:1405`, "a page object may appear only once in the tree").  The
+      copies go into the gap below the last sheet of the pick, which is
+      `duplicate_pages(doc, indices, at=None)`'s own default (`organize/src/lib.rs:553`) and
+      the rule F10-4ba shipped: one sorted block, not each copy behind its own source,
+      because the back-to-front walk that gives the second re-numbers a sheet below the pick
+      twice.  The settle runs **first**, since the new object is filed in the node owning the
+      landing slot and inherits from it — an unsettled copy of a turned nested sheet arrives
+      upright in its neighbour's box.
+      **Landed**: `DuplicatePages(pages)` — the first `page_order` here that names a sheet
+      twice, `changed` nothing for the same reason, the tree read back by page object
+      afterwards and a disagreement refused whole, and two routes: Tools copies the sheet
+      under the eyes and leaves the strip's gather alone, the strip's item beside *Insert
+      Blank Page* moves the pick down onto the copies it just made.
+- [ ] Extract — the other run against the same pick, settling the page tree the way F10-4p
+      does and writing the answer to a file of its own, which is a new-document surface this
+      application does not have yet.
       Extract carries the catalog loss F10-4q leaves open: `Document.select` was measured
       **dropping catalog keys** — `/PageLabels` among them, which is already why F10-4o
       rejected it for a reorder — so an extract built that way has to say what numbering
@@ -1825,8 +1845,8 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       buffered decrypted book reports "not encrypted" and every right — and the lift
       F10-4aa types gets its own line while the file's answers stay as the producer wrote
       them.
-- [ ] Carry `requires_assembly` onto extract, duplicate, split and merge when those edits
-      exist — the flag has nothing to sit on for them yet.
+- [ ] Carry `requires_assembly` onto extract, split and merge when those edits exist — the
+      flag has nothing to sit on for them yet.
 - [x] **F10-4ba** — *Insert blank page: the first page-tree ask that invents a sheet,
       spliced by MuPDF into the node that owns the gap and wearing the geometry the sheet
       below it states.*  Rotate, delete, move and reverse rearrange sheets that exist; this
@@ -7908,6 +7928,158 @@ than five; the new page is not added to the strip's pick, and nothing scrolls to
 is not marked as such anywhere in the file (there is no such thing); PdfCraft's flatten on
 insert is deliberately not copied, and a book that arrives with a deep tree keeps it; and the
 insert is not offered by the command palette, because PDFAR has no palette.
+
+### F10-4bb Duplicate pages — the first map that names a sheet twice — [x] Implemented
+
+**Task**: the fifth page-tree ask, and the one that leaves the book holding the same words in
+two places.  Rotate, delete, move, reverse and insert all describe a tree in which every sheet
+is unique; a duplicate makes `Renumbering` stop being a permutation for the first time, and it
+is the ask where "the same page twice" has exactly one honest meaning — either two objects, or a
+reader's note on one of them is a note on both.  PdfCraft runs it from its palette on the
+current selection (`crates/ui-egui/src/commands.rs:651`, `DuplicatePages { pages, at: None }`)
+and gates it on `assemble()` (`crates/engine/src/edit.rs:885`), so the permission half was
+already shipped by F10-4x and F10-4z.
+
+**One object, one slot — measured before it was chosen.**  `copy_page` documents itself as
+creating "another reference of the same page object", and that is what it files: the xrefs after
+`copy_page(1, to=3)` of a four-sheet book read `[4, 10, 14, 10, 18]`.  Three things go wrong from
+that.  Annotations are one object, so a note written on the copy is on the original — measured,
+three annots on both after writing one.  The invariant every reorder above leans on breaks: on
+the `nested_pdf` fixture the shared object ends up in two nodes' `/Kids` while stating a single
+`/Parent`, so which sheet a slot shows depends on which chain the library resolves.  And
+PdfCraft forbids the same shape in a test (`crates/organize/src/tests.rs:1405`, "a page object
+may appear only once in the tree").  `fullcopy_page` is the call that survives: a distinct
+object, its own `/Contents` (a source stating an array of two streams comes back as one merged
+stream, printing the same words), `/Annots` deep-copied, and `/Resources` **shared** as the same
+dictionary object — which is exactly the promise PdfCraft's doc comment makes
+(`crates/organize/src/lib.rs:551`, "sharing fonts and images with the originals") and costs the
+file no second font.
+
+**The block goes below the pick.**  `duplicate_pages(doc, indices, at)` sorts and dedupes
+`indices` and imports them as a block at `at`, defaulting to `last + 1`
+(`crates/organize/src/lib.rs:553`); PDFAR takes that default, because it is the same rule the
+insert above shipped with in F10-4ba and the only gap a pick that was never dragged names.  The
+alternative — every copy immediately after its own source — is what a reverse-sorted walk gives,
+and was measured and not taken: for a pick of pages 2 and 4 of six it re-numbers page 5 *twice*
+to ask for two new sheets, so a bookmark on it moves two steps for an edit that touched nothing
+above it.  PdfCraft's canvas can place the block at a gap the reader points at
+(`crates/ui-egui/src/canvas.rs:5882`, `at: Some(gap)`); PDFAR has one drop target and it means a
+move, so here the gap is derived.
+
+**The settle is load-bearing, and a test says what happens without it.**  `fullcopy_page` files
+the new object in the node that owns the **landing** slot and copies only what the source
+*states*, so on the nested book an unsettled `fullcopy_page(0, to=-1)` arrives 260×360 and
+upright while its source is 400×300 turned 90° — the F10-4o problem wearing a new hat.
+`SettlePageTree` therefore runs first, and after it every sheet states its own `/MediaBox`,
+`/CropBox` and `/Rotate`, so the copy carries them wherever it lands (measured on the nested
+fixture: source and duplicate both `[0 0 300 400]`, `Rotate 90`, crop `[20 20 280 380]`).  The
+walk is ascending with `to = gap + step`, and because MuPDF refuses `to == page_count` —
+measured, `ValueError: bad page number(s)` — a pick holding the last sheet appends with `-1`.
+Sources are never disturbed, since every insertion happens at or above the gap, which is above
+every sheet picked.  The tree is read back by page object afterwards — the count, the sheets
+below the gap, the sheets above it, and that no xref appears twice — and a disagreement is
+refused, which is the guard `_reorder` already runs and is tested here by handing the edit a
+MuPDF that files nothing and one that files the same object twice.
+
+**The map stops being a permutation, and both directions still answer.**  The published order
+for a pick of (1, 3) of six is `(0, 1, 2, 3, 1, 3, 4, 5)` — a copied number appears twice, which
+is what makes `changed` unable to name a set of pages: the two slots holding it are different
+sheets whose marks have different fates.  `where` and `followed` answer `order.index(page)`, the
+**first** slot, so a mark made on page 4 stays on the sheet the reader pointed at and the copy
+arrives unmarked — the only answer that does not move someone's bookmark onto a page that did not
+exist.  Undo reads the same tuple backwards with `order[page]`, which sends a mark made *on a
+copy* home to the original that survives the undo.  MuPDF re-aims the outline by itself
+(destinations are page objects: on the labelled book `front` and `middle` stayed on 2 and 4 while
+`back` walked to 8) and leaves `/PageLabels` counting positions, so the copies wear the labels of
+the numbers they arrived at — the reading `tests/test_page_labels.py` pins for every reorder
+here, pinned again so that a library which starts following sheets cannot pass silently.
+
+**Two routes, and one of them moves the pick.**  Tools ▸ Duplicate Page copies the sheet under
+the eyes and leaves the strip's gather exactly where the reader left it — a command reached for
+in a menu has no claim on a selection it never went through.  The strip's item sits beside
+*Insert Blank Page* on the same gap rule, and after the step the pick moves down onto the block
+the copies made, because a reader who duplicated two pages means to do something with them next;
+that is PdfCraft's choreography too (`crates/ui-egui/src/editing.rs:146-151`,
+`select_pages(at..at + n)`).  The item joins the grey group of five, so a sealed book pales it
+with its siblings and says `ASSEMBLY_NOTE` before anyone clicks.
+
+**Tests**: 31 cases in the new `tests/test_page_duplicate.py`: the copy is a sheet of its own and
+no page object is filed twice; a note on the copy is not a note on the source, and the copy
+arrives carrying one; the copy shares its source's `/Resources`; the block lands below the last
+sheet picked, a sheet named twice is copied once, the end of the book appends in pick order and a
+whole-book pick stays a whole book; an empty pick refused with its own sentence and four out of
+range refused whole with no renumbering published; a copy of a turned, cropped nested sheet
+wearing its own geometry, and the same pick without the push-down wearing the node it landed in;
+a library that files nothing refused and one that files the same object twice refused; the
+published order for three picks; a mark staying on the sheet it was made on; undo taking the
+copies back out and sending a copy's mark home; `/PageLabels` live, on disk and after a reopen,
+and the outline's rows following their sheets; the sealed refusal and the lifted session that
+then allows it; the Tools route copying the page under the eyes without moving the reader; the
+command leaving a pick it never went through; the item greying with its four siblings and coming
+back with its own sentence for a plain book; the strip's item naming the count and moving the pick
+onto the copies; and *Duplicate* beside *Insert Blank Page* above the separator.  Six existing
+suites were widened rather than worked around: `the_page_tree_edits()` gained the duplicate so
+F10-4x's gate sweep covers six edits, and `PICK_ITEMS`/`PAGE_ACTIONS`, the menu's separator
+shape, the Tools-menu placement, the rotate suite's two label lists and the unlock suite's
+`PAGE_ACTIONS` all now name the fifth item.
+
+**Suite**: 2717 passed, three consecutive runs on the final tree (229.68 / 245.08 / 217.50 s)
+against F10-4ba's 219.55 / 220.89 / 204.95 s — the thirty-one over its 2686 are exactly this
+step's cases.  Ruff unchanged at 7, all seven in files this step did not touch; the new test file
+briefly carried an eighth (an unused `Renumbering` import) and lost it.  mypy 566 errors in 16
+files against the same tree's HEAD at 564, measured by archiving HEAD and checking it out aside:
+the two added lines are one more occurrence each of the two families these widgets have always
+raised — `QMenu | Any | None` from `addMenu` (64 → 65) and `QAction | None` from `addAction`
+(24 → 25) — and no new kind.
+
+**Mutations**: **twenty-three mutants, twenty-three killed** against
+`tests/test_page_duplicate.py` (~4 s each; the wiring mutants also against the seven menu and
+permission suites): the assembly bit no longer asked, the scope claiming more than it touched,
+`changed` claiming to know which sheets changed, the gap opening above the *first* sheet picked,
+a sheet named twice copied twice, the block coming out back to front, the push-down skipped,
+`copy_page` filing the same object twice, the end of the book handed to MuPDF, every copy landing
+in the same gap, the tree never read back, the one-object-two-slots shape accepted, an empty pick
+reaching the block, one sheet labelled as a crowd, the refusal naming the wrong ask, the pick
+re-aimed one row off, the Tools route copying the sheet above, the strip's ask reaching nobody,
+the item not greyed with its group, the item losing the sentence it was built with, the strip
+sending the ask for a blank, the item stopping counting the sheets, and the item going below the
+separator.  No survivors, and the three sources came back byte-identical.
+
+**Performance**: one duplicate of two sheets is **1.81 ms** measured as open + copy + close on a
+4-page book.  Inside a live 540-page tree the marginal cost is **68.8 ms** per single-sheet
+duplicate over twenty of them, and the honest reading of that is that the duplicate belongs to
+the *reorder* family, not the insert family: the settle it runs first is **41.3 ms** of those
+68.8 (and **48.9 ms** when the tree is built from a fresh open), the two slot read-backs are
+**9.4 ms** each — 17.1 µs per xref read — while the copies themselves cost **318 µs** apiece.
+One edit of a twenty-sheet block is **76.0 ms**, i.e. the settle plus the read-backs once instead
+of twenty times, which is why the block is one edit.  Through the session, duplicating two sheets
+of the real 25 MB, 540-page GS262 book costs **217.0 ms** against the insert's **122.9 ms** in
+F10-4ba: the same working-copy snapshot underneath, plus the ~60 ms the settle and the read-backs
+add here, and undoing it costs **6.6 ms**.
+
+**Verified by eye**: the real window offscreen — `1-the-pick-before.png` (rows 2 and 4 of
+six picked, the gather the menu is about to be asked with), `2-strip-menu-plain.png` (the
+item directly under *Insert Blank Page*, above the separator, the book's commands below it),
+`6-strip-menu-sealed.png` (the same menu with all five page commands pale and *Duplicate 2
+Pages* quoting `ASSEMBLY_NOTE`), `3-window-after-duplicate.png` (the counter reading
+*Page 2 / 8* with the reader still on page 2, and the strip showing the copies as rows 5 and
+6, picked), `4-strip-with-the-copies.png` and `4b-strip-tail.png` (all eight rows at once:
+row 5 a second *Page 2 content* and row 6 a second *Page 4 content*, each carrying its own
+note icon, rows 5 and 6 highlighted and row 7 still *Page 5 content*), and
+`5-a-copy-under-the-eyes.png` (the copy of page 4 sitting between the copy of page 2 and
+page 5, so the block reads in pick order).  The render pool is waited for before each grab,
+which is what the first pass of these shots missed: taken too early they showed the viewer's
+*Page 1 rendering…* placeholder.  All seven under `/tmp/f104bb/shots/`.
+
+**What is not here**: no count is asked — one ask copies once, and a reader who wants three
+copies asks three times, each of which is undoable on its own; the copy is not marked as a copy
+anywhere in the file, because PDF has no such thing and `/Dup`-style private keys would be a
+lie to other readers; the copies are not offered a gap of their own, so the drop target stays a
+move and PdfCraft's `at: Some(gap)` is not copied; extract — the other half of this roadmap item —
+is not here either, because writing the answer to a file of its own needs a new-document surface
+this application does not have yet, and it carries the catalog loss F10-4q leaves open; a book
+whose pages differ in size duplicates faithfully rather than flattening, so a copy keeps its own
+box and the tree keeps its depth; and the command is not in a palette, because PDFAR has none.
 
 ---
 

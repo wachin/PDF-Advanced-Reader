@@ -845,9 +845,11 @@ def test_the_tools_command_sits_beside_the_page_turn(window):
     tools = menus["&Tools"].actions()
     order = [action for action in tools
              if action in (window.act_page_rotl, window.act_page_rotr,
-                           window.act_page_insert, window.act_page_delete)]
+                           window.act_page_insert, window.act_page_duplicate,
+                           window.act_page_delete)]
     assert order == [window.act_page_rotl, window.act_page_rotr,
-                     window.act_page_insert, window.act_page_delete], \
+                     window.act_page_insert, window.act_page_duplicate,
+                     window.act_page_delete], \
         "an action that is in no menu is a command nobody can reach"
     assert window.act_page_delete.shortcut().toString() == "Ctrl+Shift+Backspace"
 

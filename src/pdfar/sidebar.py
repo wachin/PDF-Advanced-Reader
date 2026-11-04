@@ -361,6 +361,10 @@ class Sidebar(QWidget):
     # of the pick, which is the only position a selection that was never dragged can
     # name.  An insert invents a sheet rather than rearranging the ones there are.
     page_insert_requested = pyqtSignal(object)
+    # The sheets to be made again below the last of them.  The same pick the insert reads
+    # as a gap, only this time it also says what goes in it, so the copies arrive as a
+    # block rather than scattered one after each source.
+    page_duplication_requested = pyqtSignal(object)
     # The window owns saving: it is the one place that can explain a refusal, and
     # a second opinion from here would only be able to say "failed".
     save_requested = pyqtSignal()
@@ -845,6 +849,13 @@ class Sidebar(QWidget):
         blank.triggered.connect(
             lambda _checked=False, pages=pages:
             self.page_insert_requested.emit(pages))
+        # Beside the blank, on the same rule: the gap below the last sheet of the pick is
+        # where the copies go, so the two asks cannot scatter the book differently.
+        copied = menu.addAction("Duplicate Page" if single
+                                else f"Duplicate {len(pages)} Pages")
+        copied.triggered.connect(
+            lambda _checked=False, pages=pages:
+            self.page_duplication_requested.emit(pages))
         menu.addSeparator()
         # The scanned book that arrived sideways end to end: asking a reader to
         # click five hundred thumbnails is work the menu is standing there to do.

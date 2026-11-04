@@ -197,20 +197,21 @@ def test_the_menu_offers_the_pick_and_the_book_in_that_order(strip, menus, qapp)
     The pick's commands first and the book's after a separator, which is the shape the
     rotation menu already had; the reverse of each sits under the turn of the same pages,
     because a reader looking for the one has learned where the other lives.  The blank F10-4ba
-    added goes with the pick, whose last sheet is the gap it opens.  Delete stays last,
-    behind a separator of its own — the destructive one of the group.
+    added goes with the pick, whose last sheet is the gap it opens, and F10-4bb's copies went
+    in beside it on the same rule — the gap is the one thing a pick that was never dragged can
+    name.  Delete stays last, behind a separator of its own — the destructive one of the group.
     """
     _pick(strip.thumbs, 0, 2)
     _ask_for_menu(strip, _centre(strip.thumbs, 2), qapp)
     assert menus, "the right click opened no menu"
     assert labels(menus[-1]) == [
         "Rotate 2 Pages Left", "Rotate 2 Pages Right", PICK.format(2),
-        "Insert Blank Page",
+        "Insert Blank Page", "Duplicate 2 Pages",
         "Rotate All Pages Left", "Rotate All Pages Right", ALL,
         "Delete 2 Pages",
     ]
     assert [action.isSeparator() for action in menus[-1].actions()] == [
-        False, False, False, False, True, False, False, False, True, False]
+        False, False, False, False, False, True, False, False, False, True, False]
 
 
 def test_the_reverse_is_named_with_the_pages_it_moves(strip):
@@ -221,6 +222,7 @@ def test_the_reverse_is_named_with_the_pages_it_moves(strip):
     """
     assert labels(strip._page_commands_menu((1,))) == [
         "Rotate Page Left", "Rotate Page Right", "Reverse Page", "Insert Blank Page",
+        "Duplicate Page",
         "Rotate All Pages Left", "Rotate All Pages Right", ALL]
     assert labels(strip._page_commands_menu((0, 2, 4)))[2] == PICK.format(3)
 

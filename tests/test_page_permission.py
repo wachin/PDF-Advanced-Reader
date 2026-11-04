@@ -45,8 +45,8 @@ import pytest
 from conftest import build_sample_pdf, make_session
 from pdfar.edits import EditError, SetMetadata
 from pdfar.main import MainWindow
-from pdfar.pages import (DeletePages, InsertBlankPage, MovePages, ReversePages,
-                         RotatePages, SettlePageTree)
+from pdfar.pages import (DeletePages, DuplicatePages, InsertBlankPage, MovePages,
+                         ReversePages, RotatePages, SettlePageTree)
 from pdfar.save import Encryption
 
 PAGES = 6
@@ -83,7 +83,7 @@ def the_page_tree_edits():
     """One of each thing a reader can ask the page tree to do."""
     return (DeletePages(pages=(1,)), MovePages(pages=(0,), target=3),
             ReversePages(pages=(2, 4)), RotatePages(pages=(0,), delta=90),
-            InsertBlankPage(at=1))
+            InsertBlankPage(at=1), DuplicatePages(pages=(1,)))
 
 
 def a_title_change():
