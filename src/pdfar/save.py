@@ -73,6 +73,15 @@ def _new_owner_password() -> str:
     return secrets.token_urlsafe(24)
 
 
+#: The rights that cover moving pages about: Table 22's assembly flag (bit 11) and
+#: the older modification flag (bit 4), which stands in for it in a file written
+#: before bit 11 existed.  Kept as two bits because that is how the spec says to
+#: read them, and PdfCraft reads them the same way
+#: (``assemble()`` is ``self.bit(11) || self.bit(4)``,
+#: ``crates/crypt/src/lib.rs:116-118``).
+ASSEMBLY_RIGHTS = fitz.PDF_PERM_ASSEMBLE | fitz.PDF_PERM_MODIFY
+
+
 @dataclass(frozen=True)
 class Encryption:
     """How the file on disk is protected, captured while we still had it.
@@ -130,6 +139,33 @@ class Encryption:
     @property
     def is_owner_access(self) -> bool:
         return not self.authenticated & 2
+
+    @property
+    def allows_assembly(self) -> bool:
+        """Whether the rights this file grants cover changing its own page tree.
+
+        One bit test on ``permissions`` — which is what MuPDF reported *for the
+        password that opened the document*, and the two cases that look like they
+        need a second rule arrive answered.  **The owner**: an owner-authenticated
+        handle is given every right, measured as ``-4`` on the same file that reports
+        ``-3884`` past the user password, so the lift PdfCraft writes inside their own
+        permission struct (``bit()`` is ``self.owner || ...``,
+        ``crates/crypt/src/lib.rs:96-98``) is not ours to repeat.  **Every bit set is a
+        yes**: ``-4`` is what an unencrypted document reports and ``-1`` is what a mask
+        with nothing withheld looks like, and the one test reads the same way on both —
+        a rights check that fails closed locks a reader out of their own file with
+        nothing left to ask them for.
+
+        What is *not* a rule here is the owner password's absence from a file that
+        asks for nothing: an owner-only document opens unasked, records
+        ``authenticated`` as 0 and so :attr:`is_owner_access` as true, and still
+        reports the restricted ``/P`` — the kind of file a publisher seals a report
+        with.  The bits are what a page edit has to be measured against, and that flag
+        is a record of which password was typed, which is what the save path needs and
+        nothing else.  A document with no encryption at all has no rights to consult;
+        its caller holds that case (``DocumentSession.allows_assembly``).
+        """
+        return bool(self.permissions & ASSEMBLY_RIGHTS)
 
     @property
     def reproducible(self) -> bool:

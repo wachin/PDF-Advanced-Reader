@@ -139,6 +139,17 @@ class Edit(ABC):
     #: named pages that turned out not to change.
     pages: Optional[Tuple[int, ...]] = None
 
+    #: Whether carrying this edit out needs the document's own permission to
+    #: assemble its pages — ISO 32000-1 §7.6.4.2 Table 22 bit 11, with bit 4
+    #: standing in for it in a file written before bit 11 existed.  Page-tree edits
+    #: override it; ``False`` is the default because most of what PDFAR changes is
+    #: *on* a page rather than the tree.  It decides nothing on its own: **MuPDF
+    #: does not consult ``/P`` at all** (measured — a delete, a move and an outline
+    #: rewrite all go through on a document whose mask forbids them), so
+    #: :meth:`DocumentSession.apply` asks this of the rights the file reported when
+    #: it was opened, the one record that survives the working copy.
+    requires_assembly: bool = False
+
     @property
     def changed(self) -> Optional[Tuple[int, ...]]:
         """Which pages a cache keyed by page number has to look at again.

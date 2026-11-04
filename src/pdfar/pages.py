@@ -87,6 +87,7 @@ class RotatePages(Edit):
     delta: int = 90
 
     scope = Scope.STRUCTURE
+    requires_assembly = True
 
     @property
     def label(self) -> str:
@@ -139,6 +140,7 @@ class DeletePages(Edit):
     pages: Tuple[int, ...]
 
     scope = Scope.STRUCTURE
+    requires_assembly = True
 
     @property
     def changed(self) -> Optional[Tuple[int, ...]]:
@@ -479,6 +481,7 @@ class SettlePageTree(Edit):
 
     scope = Scope.STRUCTURE
     pages = ()
+    requires_assembly = True
 
     @property
     def label(self) -> str:
@@ -779,6 +782,7 @@ class MovePages(Edit):
     target: int = 0
 
     scope = Scope.STRUCTURE
+    requires_assembly = True
 
     @property
     def changed(self) -> Optional[Tuple[int, ...]]:
@@ -876,6 +880,7 @@ class ReversePages(Edit):
     pages: Tuple[int, ...]
 
     scope = Scope.STRUCTURE
+    requires_assembly = True
 
     def _intended(self, count: int) -> List[int]:
         """The order the tree is asked to read: ``out[i]`` is the sheet slot *i* holds."""

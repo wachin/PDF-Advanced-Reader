@@ -169,6 +169,22 @@ class DocumentSession:
                 "was opened, so nothing was written. Reopen it to see the "
                 "current file, or use Save As to keep these changes separately.")
 
+    # ------------------------------------------------------------ permissions
+    @property
+    def allows_assembly(self) -> bool:
+        """Whether this document's own rights cover reorganizing its pages.
+
+        Read from :attr:`encryption` rather than from ``self.doc.permissions``,
+        because the working copy an edit is applied to is opened from bytes
+        serialized out of an authenticated document — and those bytes are
+        decrypted, so the copy reports every right granted even when the file on
+        disk forbids most of them.  The capture is the only record that survives.
+
+        ``encryption is None`` is a plain document: no rights were withheld from
+        it, so nothing is asked and the edit goes ahead.
+        """
+        return self.encryption is None or self.encryption.allows_assembly
+
     # ------------------------------------------------------------- ownership
     def _require_owner(self) -> None:
         if threading.get_ident() != self._owner_thread:
@@ -186,8 +202,16 @@ class DocumentSession:
         the undo stack is untouched: the working copy is a separate file (or a
         separate buffer) that is thrown away, and the revision the user was
         looking at is still on disk under the history's hands.
+
+        An edit that needs the assembly right is refused before any of that
+        bookkeeping starts.  MuPDF does not consult the document's ``/P`` when it
+        is asked to move pages about, so this is the only place the restriction
+        can be honoured (F10-4x).
         """
         self._require_owner()
+        if edit.requires_assembly and not self.allows_assembly:
+            raise EditError(
+                "this document's permissions do not allow changing its pages")
         before = self._before_snapshot()
         # Read while the document still holds the count from before the edit: an
         # order tuple is a statement about the old numbering, and after the

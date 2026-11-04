@@ -1738,10 +1738,57 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       PDFAR does not display it — and it is a display ask with its own jump-to-label,
       status-bar and print-range questions to answer, so it is not folded into a
       page-tree step.
-- [ ] The **assemble** permission asked before a page-tree edit, as PdfCraft gates
-      `DeletePages` / `MovePages` / `RotatePages` on the document's `/P` flags: PDFAR keeps
-      a file's permissions through a save and never consults them at edit time, so a
-      document that forbids assembling accepts a delete like any other
+- [x] **F10-4x** — *The **assemble** permission asked before a page-tree edit, as PdfCraft
+      gates `DeletePages` / `MovePages` / `RotatePages` on the document's `/P` flags.*
+      ISO 32000-1 §7.6.4.2 Table 22 bit 11 is the right to insert, delete and rotate pages
+      and to touch the outline; bit 4, the older right to modify, covers the same ground in
+      a file written before bit 11 existed.  **MuPDF reads neither**: measured on a
+      user-password document with both cleared, `delete_page`, `move_page` and `set_toc` all
+      go through on the authenticated handle and the result saves.  PDFAR has kept a file's
+      permissions through a save since F10-2 and consulted them at no point before an edit,
+      so a sealed report accepted a re-order like any other book.  The read is
+      `Encryption.allows_assembly` — one mask test against the rights captured at open,
+      because the working copy an edit runs on is serialized out of an authenticated
+      document and its `tobytes()` fallback is *decrypted*, answering `-4` (every right) for
+      a file that grants three of twelve.  Two facts arrive already answered: the owner
+      password lifts the restriction inside MuPDF (`-4` where the same file hands the reader
+      `-3884`), so nothing keys off `authenticated`, and the test reads the whole word — an
+      all-ones `-1` grants everything, because a rights check that guesses no on a number it
+      does not recognise locks a reader out of their own file.  What is **not** a basis is
+      `is_owner_access`: an owner-password-only file
+      opens unasked, records `authenticated` 0 and so that flag as true, and still reports
+      the restricted `/P`.  `Edit.requires_assembly` names the five edits that ask,
+      `DocumentSession.apply` refuses before any snapshot is taken, and a title change on
+      the same document still applies — the gate is the page tree, not a read-only mode.
+- [x] **F10-4y** — *A password-protected document could not be opened at all.*  Found by
+      F10-4x's window case.  `MainWindow.open_document` answered `needs_pass` by collecting
+      a password and **re-entering itself** (`return self.open_document(path,
+      password=password)`, since b7b65aa), and a fresh `fitz.open` of an encrypted file
+      reports `needs_pass` however good the password is — so the answer sent it back to the
+      same question, nine hundred frames deep, where the outer `except` reported
+      `Could not open PDF: maximum recursion depth exceeded`.  That is what a reader who
+      typed the right password saw, and what one who typed the wrong saw instead of
+      `Wrong password.`; every way in — Open dialog, drag-and-drop, recent file, command
+      line — went there.  No test had ever passed a password to `open_document`, while all
+      of F10-2's encryption work assumed the document was already open.  The probe document
+      is now authenticated where it stands, so the page count comes from a document that has
+      been let in and the recursion is gone.
+- [ ] Grey the page commands out **before** the reader asks, as PdfCraft's organize panel and
+      canvas do (`organize_panel.rs:46`, `panels.rs:344`, `canvas.rs:2901/2933`).  F10-4x's
+      refusal is the only feedback a sealed book gives, and it arrives after the click.
+- [ ] **Enter permissions password** — let a refusal be lifted inside the open document, as
+      `can_unlock()` (`document.rs:442-445`) behind `CommandGate::Unlock`
+      (`commands.rs:376`) does.  PDFAR's session carries one password and one capture, so its
+      refusal stands until the file is re-opened, and on an **owner-password-only** book —
+      `needs_pass` 0, nothing asked — a typed owner password is ignored.
+- [ ] Gate the **outline** and `/NumberPages` on the same bit 11.  Table 22 puts them under
+      assembly and PdfCraft's `check_permission` gates them with the page edits
+      (`edit.rs:878-905`); a bookmark edit still goes through on a sealed book.
+- [ ] Show `/P` in Document Properties.  The Security tab lists four of Table 22's twelve
+      rights (`main.py:2220-2223`) and says nothing about assembly, so the reader cannot see
+      the reason a refusal quoted.
+- [ ] Carry `requires_assembly` onto extract, duplicate, split and merge when those edits
+      exist — the flag has nothing to sit on for them yet.
 - [ ] Insert blank page
 - [ ] Split, merge/combine
 - [ ] Page boxes (crop)
@@ -7177,8 +7224,198 @@ as it is — measured on `-1 << /S /D /St 1 >> 2 << /S /r /St 1 >>`, the six she
 mid-book) and `set_page_labels` writes the `-1` straight back, so it is a producer's
 sloppiness rather than a shape a viewer can be shown wrongly.  The re-aim itself stays the
 library's job on every array that is in order; extract's `Document.select` still drops the
-numbering outright; and the **assemble** permission is still not asked of any page-tree
-edit.
+numbering outright; and the **assemble** permission was still not asked of any page-tree
+edit, which **F10-4x** takes.
+
+---
+
+### F10-4x A sealed document is asked before its pages are touched — [x] Implemented
+
+**Task**: PDFAR has carried a file's encryption and its `/P` mask since **F10-2**, purely so
+a save could rebuild them, and nothing read that record back before an edit.  The gap was
+not theoretical: **MuPDF does not consult `/P` at all.**  Measured on a document that grants
+print and copy and clears Table 22's bits 11 and 4, opened past its user password,
+`delete_page`, `move_page` and `set_toc` all go through on the authenticated handle, the
+result serializes, and what comes out is a re-ordered version of the book whose producer
+asked for exactly that not to happen.  PdfCraft reads the dictionary: `check_permission`
+(`crates/engine/src/edit.rs:878-905`) puts every page-tree edit, the outline and
+`/NumberPages` under `assemble()`, whose comment at `:891` quotes the standard — "insert,
+rotate or delete pages and create bookmarks" — and `Document::allows_assembly`
+(`crates/engine/src/document.rs:353-354`) is the one predicate the command palette
+(`crates/engine/src/commands.rs:419`) and the organize panel both ask before they act.
+
+**Measured before anything was written**, on the fixtures these tests now build:
+
+- **what the mask looks like.** `Document.permissions` is the set of rights *granted*, as a
+  negative integer with its high bits set: `-4` for an unencrypted document (every right),
+  `0` for an encrypted one nobody has authenticated, and `-3884` for the print-and-copy file
+  opened past its user password.  A bit test therefore needs no special case for a plain
+  book.
+- **the owner password lifts everything, and MuPDF does the lifting.** The same file typed
+  past the owner password reports `-4` where the reader's password gives `-3884`.  PdfCraft
+  keeps that rule inside their own permission struct (`bit()` is `self.owner || …`,
+  `crates/crypt/src/lib.rs:96-98`) because their parser has to state it; here the library
+  has stated it before the question is asked, so nothing below mentions `authenticated`.
+- **a file locked only by its owner password is the trap.** It reports `needs_pass == 0`,
+  opens with nobody typing anything, records `authenticated` as 0 — so
+  `Encryption.is_owner_access`, written for the save path, is *true* of it — and still
+  reports the restricted `/P`.  That is the common sealed report, and a gate written on the
+  flag would hand every one of them the page tree it was written to protect.  The gate reads
+  the bits.
+- **the live document is not a source the gate can trust.** The working copy an edit runs on
+  is normally a file copy that keeps its encryption and answers honestly; when there is no
+  room for revisions it is `Document.tobytes()` — and serializing an authenticated document
+  yields *decrypted* bytes.  Measured on that path `session.doc.permissions` is `-4` for a
+  file that grants three rights of twelve, while `session.encryption.permissions` is still
+  `-3884`.  Only the capture says the same thing on both paths, which is already why F10-2
+  made it.
+- **every bit set is a yes.** `-4` is what an unencrypted document reports and `-1` is the
+  mask with nothing withheld; MuPDF was never seen to answer the latter, and the hand-built
+  case reads the predicate on both.  Guessing no is the wrong failure mode: it locks a
+  reader out of their own file with nothing left to ask them.
+
+**The gate** is a flag, a bit test and three lines:
+
+```
+if edit.requires_assembly and not self.allows_assembly:
+    raise EditError(
+        "this document's permissions do not allow changing its pages")
+```
+
+`Edit.requires_assembly` — default `False`, because most of what PDFAR changes sits *on* a
+page rather than in the tree — is set by the five edits in `pages.py` that rewrite the tree:
+`RotatePages`, `DeletePages`, `MovePages`, `ReversePages` and `SettlePageTree`.
+`Encryption.allows_assembly` is one mask test against `ASSEMBLY_RIGHTS`, bit 11 with bit 4
+alongside it: the fallback the standard asks for and PdfCraft's too (`assemble()` is
+`self.bit(11) || self.bit(4)`, `crates/crypt/src/lib.rs:116-118`), because a file written
+before PDF 1.4 grants modification and says nothing about assembly.
+`DocumentSession.allows_assembly` holds the plain-file case, `encryption is None`, so the
+mask never has to be consulted where there is no mask.  `apply` refuses after the thread
+check and **before** `_before_snapshot`, which makes a refusal a rejection rather than a step
+that failed halfway: no version, no undo entry, no published snapshot, no revision file, the
+document never opened for writing.  The reader gets
+`Delete Page: this document's permissions do not allow changing its pages` in the status bar
+through `PDFView.apply_edit`'s existing `f"{edit.label}: {exc}"`, so nothing new had to be
+built to say it.
+
+**Tests**: 14 cases in the new `tests/test_page_permission.py`, whose module docstring is
+where the measurements above are recorded, and the four **F10-4y** brought to
+`tests/test_main.py`.  What the fourteen pin, in order: the capture carrying `-3884` with
+both bits clear; the fallback path losing its protection on the document and not on the
+record, and refusing the cut all the same; the owner password lifting the restriction before
+anything is asked; the owner-only file refusing through the very state `is_owner_access`
+calls owner access; all four page-tree edits answered by one sentence; that a refusal leaves
+version, history, snapshot, revision file, dirty flag and sheet order exactly as they were
+and `undo()` still answers "Nothing to undo"; the message pinned whole, because it is the
+only feedback a refusal gives; a title on the same sealed document still applying, which is
+what makes this a page-tree gate rather than a read-only mode; bit 11 granted by itself; bit
+4 granted by itself, with all four edits going through; an unencrypted book never asked; the
+predicate read off hand-built `Encryption` values including the all-ones `-1`;
+`SettlePageTree` asked like the rest; and the real window — the refusal in the status bar,
+the tab still clean, the pages still there.
+
+**Suite**: 2627 passed, three consecutive runs on the final tree (171.94 / 171.29 /
+171.41 s — a spread of 0.65 s, against the 8.9 s the F10-4u tree's own three runs spread
+over at 170.94 / 162.02 / 163.25 s).  The eighteen new cases cost **4.8 s** read on their
+own: `tests/test_page_permission.py` runs its fourteen in 2.80 s and the four in
+`tests/test_main.py` in 2.05 s, and both are dominated by writing an encrypted PDF per
+case — thirteen of the fourteen build one, and the sealed and granted fixtures are
+4,448 B each.  That accounts for most of the gap between the two trees, and no
+other file changed a line.
+Ruff unchanged at 7.  mypy **555 errors in 16 files**: two over F10-4u, both of them the
+`PDF_PERM_ASSEMBLE` and `PDF_PERM_MODIFY` reads on the new `ASSEMBLY_RIGHTS` line, which is
+the same class the eight encryption constants in that file have always raised — the
+`Module has no attribute` family a `try: import pymupdf / except: import fitz` fallback
+leaves behind.  Nothing else in the tree gained a line mypy complains about.
+
+**Mutations**: **14 mutants, 14 killed** over `session.py`, `save.py` and `pages.py` (544
+cases in the eight-file group — the seven of F10-4u plus the new permission file — about
+21 s each): the gate removed whole (**7 failed**), moved to run *after* `_before_snapshot`
+(**1**, and that one is the case that reads version, history, snapshot, revision file and
+dirty flag back), `allows_assembly` answering `True` for every document (**9**), bit 4
+dropped from the mask (**2**), bit 11 dropped (**2**), the plain-document case inverted so a
+book with no encryption is refused (**46**), the mask read off `self.doc.permissions` rather
+than off the capture (**1** — the no-room-for-revisions case, and the only thing in the tree
+that sees that path), the gate written on `is_owner_access` instead of on the bits (**4**),
+no edit flagged at all (**7**), and each of the five flags dropped one at a time: settle
+(**1**), rotate (**2**), delete (**6**), move (**2**), reverse (**2**).  Every line of the
+gate, and every edit it covers, is pinned by something that fails without it.
+
+**Performance**: the gate is one boolean attribute and one mask test — **0.142 µs** per
+`apply`, measured against **75.1–78.5 ms** for the same 540-sheet move on a plain book, six
+runs.  A refusal costs **2–6 µs**, less than the edit it prevents, because it happens before
+the working copy is opened and before anything is written.  The gate changes no bytes: the
+two six-sheet fixtures that differ only in the `/P` they state are both **4,448 B**, and the
+document a reader saves after a refusal is the document they opened.
+
+**Verified by eye**: the real window, offscreen at 1100×760
+(`1-window-sealed-before.png`, `2-window-refusal-statusbar.png`,
+`3-window-granted-delete.png`).  Opened past its user password the sealed book shows `/ 6`,
+six thumbnails and an unmarked tab; `Delete Pages` leaves the status bar reading
+`Delete Page: this document's permissions do not allow changing its pages` with the spinner
+still at `/ 6`, the strip still six sheets deep and still no bullet on the tab — the refusal
+is visible and nothing else moved.  The same ask on a book that grants bit 11 takes the
+sheet: the tab gains its bullet and the toolbar reads `/ 5`.
+
+**What is not here**: the outline and `/NumberPages`, which Table 22 puts under the same bit
+11 and PdfCraft gates with it (`crates/engine/src/edit.rs:878-905`) — a bookmark edit still
+goes through on a sealed book; the panel greying that tells the reader before they ask rather
+than after (PdfCraft's `organize_panel.rs:46`, `panels.rs:344`, `canvas.rs:2901/2933`); and
+the half that makes a refusal survivable, PdfCraft's `can_unlock()`
+(`crates/engine/src/document.rs:442-445`) behind the command "Enter permissions password…"
+(`crates/engine/src/commands.rs:376`), which lets their reader lift the restriction inside
+the open document.  PDFAR's session carries one password and one capture, so its refusal
+stands until the file is re-opened — and on an **owner-password-only** book, which never asks
+anything, `needs_pass` is 0, so `PDFView` authenticates nothing, a typed owner password is
+ignored, and the gate reads the restricted `/P` MuPDF reports anyway: the correct answer for
+the file and a hard one for the reader who owns it, which is what an unlock is for.  The
+Security tab of Document Properties still lists four of Table 22's twelve rights
+(`main.py:2220-2223`) and says nothing about assembly, and extract, duplicate, split and
+merge have no edit class yet for the flag to sit on.
+
+---
+
+### F10-4y A password-protected document could not be opened — [x] Implemented
+
+**Task**: F10-4x's window case could not reach a sealed document.  `MainWindow.open_document`
+answered `needs_pass` by collecting a password and **re-entering itself** —
+`return self.open_document(path, password=password)`, since b7b65aa — and a fresh
+`fitz.open` of an encrypted file reports `needs_pass` however good the password is, so the
+answer sent it back to the same question.  Nine hundred frames later the outer `except`
+reported `Could not open PDF:\nmaximum recursion depth exceeded`, which is what a reader who
+typed the *right* password saw, and what one who typed the wrong one saw instead of
+`Wrong password.`.  Every way into a protected file went there — the Open dialog, a
+drag-and-drop, a recent file, a command-line argument — and no test had ever passed a
+password to `open_document`, while all of F10-2's encryption work assumed the document was
+already open.
+
+**The fix** is to stop re-opening: the probe document is authenticated where it stands, so
+the page count comes from a document that has been let in, a wrong answer is reported once
+and returns `False`, and the recursion is gone.  Nothing else had to change, because the
+session path was already right — `PDFView.__init__` authenticates its own handle, raises
+`ValueError("encrypted")` when the answer does not work, and `Encryption.capture` has always
+recorded which password opened the file.  The defect was one line of plumbing in the window,
+invisible to every test that ever opened a plain fixture.
+
+**Tests**: four cases in `tests/test_main.py` — the password handed to the call opens the
+file and the tab reads the protected session; the password asked for is asked **once**, and
+the answer opens it; a wrong answer says `Wrong password.` and leaves no tab; cancelling the
+prompt opens nothing.  The second and third failed here before the fix with a `RecursionError`
+from `pathlib`, reached through the very `QMessageBox` the reader would have been shown.
+
+**Mutations**: **4 mutants, 4 killed** against `main.py` (53 cases — `test_main.py` and
+`test_page_permission.py` together, 12.6 s each): the recursion put back (**runaway** — the
+group does not finish in 240 s, which is the answer the reader was getting), the cancel path
+closing nothing (**1 failed**), the wrong answer closing nothing (**1**), and the probe never
+authenticated (**1**).  The last three each die to exactly one case, which is why each of
+those cases exists: the two leaks are pinned by watching `fitz.Document.close` on the probe
+handle, and the unauthenticated probe by watching what `DocumentTab` is actually handed.
+
+**Verified by eye**: the first of F10-4x's three screenshots is this fix's evidence.
+`1-window-sealed-before.png` is the real window, offscreen at 1100×760, on a document whose
+user password was typed into it: `/ 6`, six thumbnails, the tab reading `sealed.pdf` and no
+dialog left on screen.  Before the fix the same script never reached that picture — it
+stopped on `Could not open PDF:\nmaximum recursion depth exceeded`.
 
 ---
 
