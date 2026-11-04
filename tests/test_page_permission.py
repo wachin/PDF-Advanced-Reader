@@ -57,7 +57,10 @@ MODIFY = fitz.PDF_PERM_MODIFY
 #: What a producer who wants the sheet order kept tends to grant: read it, print it,
 #: copy from it — and touch nothing about its pages.
 PRINT_AND_COPY = fitz.PDF_PERM_PRINT | fitz.PDF_PERM_COPY
-REFUSAL = "this document's permissions do not allow changing its pages"
+#: The whole of what a refusal says, pinned as a literal rather than imported: the
+#: sentence is the only feedback a refused edit gives, and F10-4z puts the same words in
+#: the tooltip of the item it greys instead of refusing.
+REFUSAL = "This document's permissions do not allow changing its pages"
 
 
 def protected_pdf(path, permissions, *, user=READER, owner=OWNER, pages=PAGES):

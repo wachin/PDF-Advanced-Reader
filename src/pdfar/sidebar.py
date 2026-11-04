@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate, QLabel, QToolButton, QLayout, QLayoutItem,
 )
 from . import APP_NAME
-from .edits import Renumbering, Scope
+from .edits import ASSEMBLY_NOTE, Renumbering, Scope
 from .pages import MovePages, ReversePages, gap_for_drop
 from .icons import tinted_icon
 from .render import RenderPool, RenderResult
@@ -841,7 +841,33 @@ class Sidebar(QWidget):
         whole = tuple(range(self.doc.page_count))
         self._add_rotation_actions(menu, whole, "Rotate All Pages")
         self._add_reverse_action(menu, whole, "Reverse All Pages")
+        self._gate_page_commands(menu)
         return menu
+
+    def _gate_page_commands(self, menu: QMenu) -> None:
+        """Grey every page command the document's own rights forbid, and say why.
+
+        F10-4x refuses these edits when a reader asks for one; this is the half PdfCraft
+        shows *instead* of the answer — ``command_enabled`` over the organize panel's
+        buttons (`crates/ui-egui/src/organize_panel.rs:46`), the palette refusing to
+        select a greyed entry (`panels.rs:344`), the canvas greying them again where it
+        draws them (`canvas.rs:2901` and `:2933`) — and it asks the one predicate the
+        refusal asks, so an item cannot offer what the session would reject.
+
+        Greyed, not missing: a command that is nowhere to be found teaches the reader
+        nothing about the file they opened, and the sentence the refusal puts in the
+        status bar is the sentence this puts in the tooltip.  It overwrites the reason
+        F10-4t wrote for a reverse with nothing to reverse, because the permission is the
+        outer of the two — and it is called twice, once over the menu and once after the
+        delete has been added, because that item is not built here.
+        """
+        if self.session.allows_assembly:
+            return
+        for action in menu.actions():
+            if action.isSeparator():
+                continue
+            action.setEnabled(False)
+            action.setToolTip(ASSEMBLY_NOTE)
 
     def _add_reverse_action(self, menu: QMenu, pages: Tuple[int, ...],
                             name: str) -> None:
@@ -900,6 +926,7 @@ class Sidebar(QWidget):
         action.triggered.connect(
             lambda _checked=False, pages=pages:
             self.page_deletion_requested.emit(pages))
+        self._gate_page_commands(menu)
         menu.exec(self.thumbs.viewport().mapToGlobal(pos))
 
     def _on_outline(self, item: QTreeWidgetItem, _col: int) -> None:

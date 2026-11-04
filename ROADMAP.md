@@ -1773,9 +1773,28 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       of F10-2's encryption work assumed the document was already open.  The probe document
       is now authenticated where it stands, so the page count comes from a document that has
       been let in and the recursion is gone.
-- [ ] Grey the page commands out **before** the reader asks, as PdfCraft's organize panel and
-      canvas do (`organize_panel.rs:46`, `panels.rs:344`, `canvas.rs:2901/2933`).  F10-4x's
-      refusal is the only feedback a sealed book gives, and it arrives after the click.
+- [x] **F10-4z** — *The page commands a sealed book cannot use are greyed **before** the
+      reader asks, not only refused after.*  F10-4x answers in the status bar; PdfCraft never
+      offers the command — `command_enabled` over the organize panel's buttons
+      (`crates/ui-egui/src/organize_panel.rs:46`), the palette refusing to select a greyed
+      entry (`panels.rs:344`), the canvas greying it again where it draws it
+      (`canvas.rs:2901/2933`) — and all three ask the very `allows_assembly` the refusal asks,
+      which is what keeps an offer and a step from disagreeing.  PDFAR has two surfaces for
+      the same commands: the strip's context menu, and the window's three `QAction`s, which
+      are also `Ctrl+Shift+Left`, `Ctrl+Shift+Right` and `Ctrl+Shift+Backspace` and are the
+      route a reader who never opens a menu takes.  Both ask
+      `DocumentSession.allows_assembly`; the items stay **in** the menu, because a command
+      that is nowhere to be found teaches the reader nothing about the file they opened, and
+      the tooltip says the refusal's sentence — one constant now, `edits.ASSEMBLY_NOTE`, so
+      the two surfaces cannot be reworded apart.  The permission is the **outer** of the two
+      reasons a reverse can be greyed, so it overwrites F10-4t's "nothing to reverse" rather
+      than joining it.  What is *not* greyed is the strip's drop: a drop is not a `QAction`,
+      and the move it names reaches the same `MovePages` refusal, which is pinned by the
+      sheets not moving and the sentence appearing under them.  A plain book and a book that
+      grants bit 11 are offered everything they were, and the window's actions get their
+      design-time tooltips back when the next tab is an ordinary file — `QAction.toolTip`
+      keeps whatever was set last, so a gate that wrote without restoring would leave
+      *Delete Page* explaining a restriction the new document does not have.
 - [ ] **Enter permissions password** — let a refusal be lifted inside the open document, as
       `can_unlock()` (`document.rs:442-445`) behind `CommandGate::Unlock`
       (`commands.rs:376`) does.  PDFAR's session carries one password and one capture, so its
@@ -7416,6 +7435,124 @@ handle, and the unauthenticated probe by watching what `DocumentTab` is actually
 user password was typed into it: `/ 6`, six thumbnails, the tab reading `sealed.pdf` and no
 dialog left on screen.  Before the fix the same script never reached that picture — it
 stopped on `Could not open PDF:\nmaximum recursion depth exceeded`.
+
+---
+
+### F10-4z A sealed book does not offer the commands its own rights forbid — [x] Implemented
+
+**Task**: F10-4x answers a reader who asks for a page edit on a file that forbids it.
+PdfCraft does not have that conversation, because it never offers the command: the
+organize panel builds its buttons through `command_enabled`
+(`crates/ui-egui/src/organize_panel.rs:46`), the command palette refuses to select a
+greyed entry (`crates/ui-egui/src/panels.rs:344`), and the canvas greys the same thing
+again where it draws it (`crates/ui-egui/src/canvas.rs:2901` and `:2933`).  All three ask
+`Document::allows_assembly` (`crates/engine/src/document.rs:353-354`) — the predicate
+F10-4x gates on — so the offer and the step cannot disagree about what a document
+permits.  PDFAR had the predicate and one surface that consulted it: the status bar,
+after the click.
+
+**The two surfaces** are the strip's context menu and the window's three page `QAction`s.
+The menu is built fresh per right click, so its gate is a pass over the items it already
+contains; the actions outlive the document, so theirs is written where the window already
+decides what is enabled:
+
+```
+pages_ok = view is not None and view.session.allows_assembly
+for action in (self.act_page_rotl, self.act_page_rotr,
+               self.act_page_delete):
+    action.setEnabled(pages_ok)
+    action.setToolTip(ASSEMBLY_NOTE if has_doc and not pages_ok
+                      else action.property("plainToolTip") or "")
+```
+
+Greyed, **not missing**: a command that is nowhere in the menu teaches the reader nothing
+about the file they opened, and a producer who seals a report expects the reader to see
+what they may not use.  The same three actions are `Ctrl+Shift+Left`,
+`Ctrl+Shift+Right` and `Ctrl+Shift+Backspace`, and a disabled `QAction` does not fire on
+its shortcut, so the keyboard route closes with the item — which is why the window's half
+is not a nicety but the only way a reader who never opens a menu learns the rule.
+
+**One sentence, two surfaces**: the refusal's text and the tooltip's are now one constant,
+`edits.ASSEMBLY_NOTE`, so a rewording cannot leave a reader told two different things
+about the same file.  That changes the shipped wording by one letter — the sentence starts
+capital now, and the status bar reads `Delete Page: This document's permissions do not
+allow changing its pages` — because the same words sit at the end of a label in one place
+and stand alone in the other.  Where two reasons could grey one item — F10-4t's reverse
+with nothing to reverse, on a book that also forbids assembly — the permission wins,
+because it is the reason that does not go away when the reader picks a second sheet.
+
+**Tests**: 13 cases in the new `tests/test_page_permission_menu.py`.  What they pin, in
+order: the sealed book's menu offering all six page commands greyed with the sentence on
+each; the **delete**, which is added by the context handler rather than by
+`_page_commands_menu` and is the one item a gate written inside that method alone would
+leave live; that a plain book is greyed for nothing but its own rules, which is the
+regression pin that keeps the new gate from overwriting the old reason or disabling an
+item it has no business disabling; a book granting bit 11 offered everything; the
+**owner-password-only** file — `needs_pass` 0, nothing ever typed — greyed all the same,
+because the bits are what the widget reads; that triggering a greyed item emits no signal
+at all; the permission being the outer reason; the tooltip and the `EditError` being the
+same string, checked against a real refusal; the window's three actions greyed, their
+triggers recording no step and leaving the tab clean; a window with **no document at all**
+greyed for the absence alone and carrying no permission sentence, because a reader who
+opened nothing has not been refused anything — the case the mutation pass asked for; a
+plain book in the next tab getting both the commands **and** the design-time tooltips
+back; that Save and the annotation
+tools stay live on a sealed book, which is what makes this a page-tree gate and not a
+read-only mode; and a refused move leaving the strip's rows exactly as they were with the
+sentence in the status bar — the drop being the one page command with no item to grey.
+
+**Suite**: 2640 passed, three consecutive runs on the final tree (187.31 / 179.91 /
+183.05 s, against the F10-4x/F10-4y tree's 171.94 / 171.29 / 171.41 s).  The thirteen new
+cases read alone cost **5.54 s**, and six of them raise a `MainWindow` — five of those
+opening an encrypted document into it, the sixth proving the window behaves with nothing
+open; the remaining gap is the spread this suite has always carried —
+the step before this one spread 8.9 s across its own three runs.  Ruff unchanged at 7, mypy
+unchanged at 555 errors in 16 files: the one Optional the new line touches, `view.session`,
+is narrowed by the `view is not None` already in the same expression, so the count did not
+move.
+
+**Mutations**: **12 mutants, 11 killed** over `sidebar.py` and `main.py` (174 cases in the
+six files that could see the change — both permission files, rotate, delete, the reverse
+menu and `test_main.py` — about 27 s each): the gate removed whole (**6 failed**), the
+delete left out of it (**1**), the menu's own items left out (**5**), the reason never said
+(**4**), the rights read backwards (**21**), an already-greyed item keeping its inner reason
+(**1**), the window ignoring the rights (**3**), the reason never taken back out (**2**), no
+document treated as a sealed one (**1**), the window greying without saying why (**1**), and
+the delete left live in the window (**4**).  The single survivor is greying the separators
+too: equivalent rather than wrong, since a disabled separator paints the same line and
+nothing reads it back.  The first pass left **the tooltip never taken back out** alive as
+well, and the hole was in the test rather than in the gate — the baseline tooltips were
+snapshotted at startup, when a window with no document is already greyed, so a gate that
+restored nothing compared wrong against wrong.  Two cases answer for it now: the baseline is
+read with a plain book open, and a window with **no document at all** is greyed for the
+absence and must not carry the permission sentence, which is also what kills the
+no-document-as-sealed mutant.
+
+**Performance**: `DocumentSession.allows_assembly` is **0.190 µs** on a sealed session and
+**0.100 µs** on a plain one; building the strip's menu goes **268.6 → 294.7 µs** for the six
+`setEnabled` plus `setToolTip` pairs, on a right click; `_update_tool_actions` measures
+**52.6 µs** with a sealed document open against **59.0 µs** with a plain one, the same call
+inside its own noise.  Nothing is read from disk and no document is opened — the gate is a
+boolean the session already had, so a sealed file's bytes are the bytes it arrived with.
+
+**Verified by eye**: the real window offscreen at 1100×760 with the menus grabbed as
+drawn — `1-strip-menu-sealed.png` (all six page commands in pale grey, both the pick's and
+the book's), `2-tools-menu-sealed.png` (*Rotate Page Left*, *Rotate Page Right* and
+*Delete Page* greyed with their shortcuts dimmed while *Rotate View Left/Right* — which
+turns the view, not the tree — stay live), `4-strip-menu-granted.png` and
+`5-tools-menu-granted.png` (the same two menus on a book that grants bit 11, every item
+black), `3-window-sealed.png` and `6-window-granted.png` for the window around them.
+
+**What is not here**: the **unlock** that makes a greyed command live again without
+re-opening the file — PdfCraft's `can_unlock()` (`crates/engine/src/document.rs:442-445`)
+behind "Enter permissions password…" (`crates/engine/src/commands.rs:376`) — so on an
+owner-password-only book the reader who owns the file sees six greyed items and has no way
+to type the password that would lift them; the drop indicator, which is a painted line
+rather than an action and so cannot be greyed (the refusal answers for it, and the sheets
+do not move); the outline and `/NumberPages`, which have no edit class in PDFAR yet for
+either the flag or the greying to sit on; and the Security tab, which still lists four of
+Table 22's twelve rights (`main.py:2220-2223`) and so cannot show the reader the flag the
+menu is answering from.
 
 ---
 

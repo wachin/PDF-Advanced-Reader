@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 
 from .edits import (
-    Edit, EditError, EditHistory, Renumbering, Scope, Snapshot,
+    ASSEMBLY_NOTE, Edit, EditError, EditHistory, Renumbering, Scope, Snapshot,
 )
 from .revisions import RevisionStore, RevisionStoreError
 from .save import Encryption, SaveError
@@ -210,8 +210,7 @@ class DocumentSession:
         """
         self._require_owner()
         if edit.requires_assembly and not self.allows_assembly:
-            raise EditError(
-                "this document's permissions do not allow changing its pages")
+            raise EditError(ASSEMBLY_NOTE)
         before = self._before_snapshot()
         # Read while the document still holds the count from before the edit: an
         # order tuple is a statement about the old numbering, and after the

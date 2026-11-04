@@ -55,6 +55,15 @@ class EditError(Exception):
     """An edit that could not be carried out.  The document is left untouched."""
 
 
+#: Why a page-tree edit is neither offered nor carried out on a document whose
+#: permissions withhold Table 22's assembly right.  One sentence because there are
+#: two surfaces that say it: :meth:`DocumentSession.apply` raises it, and the strip's
+#: menu and the window's page actions put it in the tooltip of the item they grey
+#: (F10-4z).  A rewording that reaches one of them and not the other leaves a reader
+#: told two different things about the same file.
+ASSEMBLY_NOTE = "This document's permissions do not allow changing its pages"
+
+
 @dataclass(frozen=True)
 class Renumbering:
     """What one step did to the page *numbers*, in the direction it went.

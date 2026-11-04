@@ -39,7 +39,7 @@ from .annotations import (
     scale_from_reference,
 )
 from .bookmarks import settings_key_for
-from .edits import EditError
+from .edits import ASSEMBLY_NOTE, EditError
 from .i18n import I18n
 from .icons import asset_path as _asset_path, tinted_icon
 from .page_numbers import (
@@ -728,6 +728,13 @@ class MainWindow(QMainWindow):
             "Take the page you are reading out of the document, after asking "
             "(Ctrl+Shift+Backspace)")
         self.act_page_delete.triggered.connect(self._page_delete)
+
+        # The permission gate writes its reason into these three tooltips and takes it
+        # out again for the next document, so the sentence each action was built with is
+        # kept on the action rather than restated where it is restored (F10-4z).
+        for _page_action in (self.act_page_rotl, self.act_page_rotr,
+                             self.act_page_delete):
+            _page_action.setProperty("plainToolTip", _page_action.toolTip())
 
         self.act_add_bookmark = QAction("Add Bookmark", self)
         self.act_add_bookmark.setShortcut("Ctrl+B")
@@ -3343,11 +3350,17 @@ class MainWindow(QMainWindow):
         self.act_draw.setEnabled(selection_ok)
         # A page turn needs a document and nothing else: no selection, no tool,
         # and reflow notwithstanding — it changes the tree the reading is taken from.
-        self.act_page_rotl.setEnabled(has_doc)
-        self.act_page_rotr.setEnabled(has_doc)
-        # So does taking a page out.  Whether the document can be emptied is the
-        # edit's to refuse; a greyed item would have to answer for a pick it cannot see.
-        self.act_page_delete.setEnabled(has_doc)
+        # Whether the document can be emptied is the edit's to refuse; a greyed item
+        # would have to answer for a pick it cannot see.  What the document *can* say
+        # before the click is that its own permissions withhold the right to change
+        # its pages at all (F10-4z) — one reason all three share, so it goes into the
+        # item the reader hovers instead of only into the status bar after a refusal.
+        pages_ok = view is not None and view.session.allows_assembly
+        for action in (self.act_page_rotl, self.act_page_rotr,
+                       self.act_page_delete):
+            action.setEnabled(pages_ok)
+            action.setToolTip(ASSEMBLY_NOTE if has_doc and not pages_ok
+                              else action.property("plainToolTip") or "")
         for action in self._shape_actions.values():
             action.setEnabled(selection_ok)
         for action in self._stamp_actions.values():
