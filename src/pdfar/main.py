@@ -736,6 +736,15 @@ class MainWindow(QMainWindow):
                              self.act_page_delete):
             _page_action.setProperty("plainToolTip", _page_action.toolTip())
 
+        # The permissions password lifts the refusal those three items answer to, in
+        # the session that raised it (F10-4aa).  No shortcut: this is a command whose
+        # whole point is being asked before it lets anything else happen.
+        self.act_unlock_permissions = QAction("Enter Permissions Password…", self)
+        self.act_unlock_permissions.setToolTip(
+            "Type the password that owns this document's restrictions to lift them for "
+            "this session.  The file itself keeps them.")
+        self.act_unlock_permissions.triggered.connect(self._unlock_permissions)
+
         self.act_add_bookmark = QAction("Add Bookmark", self)
         self.act_add_bookmark.setShortcut("Ctrl+B")
         self.act_add_bookmark.setToolTip("Add bookmark at current page (Ctrl+B)")
@@ -864,6 +873,9 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.act_page_rotl)
         tools_menu.addAction(self.act_page_rotr)
         tools_menu.addAction(self.act_page_delete)
+        # Directly under the three items the sealed book greys: the command that turns
+        # them back on, for the reader who wonders why they are pale (F10-4aa).
+        tools_menu.addAction(self.act_unlock_permissions)
         tools_menu.addAction(self.act_save_annotations)
         tools_menu.addSeparator()
         tools_menu.addAction(self.act_settings)
@@ -1310,6 +1322,39 @@ class MainWindow(QMainWindow):
 
     def _rot_right(self) -> None:
         self._rotate(90)
+
+    def _unlock_permissions(self) -> None:
+        """Ask for the password that owns this document's restrictions (F10-4aa).
+
+        The way out of the refusal F10-4x raises and the greying F10-4z does: PdfCraft's
+        "Enter permissions password…" (`crates/engine/src/commands.rs:376`), offered only
+        where ``can_unlock`` says something would lift.  Nothing is rebuilt afterwards —
+        the document did not change, only what this session may ask of it — so the refresh
+        is the one the actions need, and the strip's menu needs none because it asks per
+        right click.
+        """
+        view = self.view
+        if view is None:
+            return
+        session = view.session
+        name = os.path.basename(session.path) if session.path else "this document"
+        password, ok = QInputDialog.getText(
+            self, "Permissions Password",
+            f"“{name}” has security restrictions.\n"
+            "Enter its permissions password to lift them for this session:",
+            QLineEdit.EchoMode.Password)
+        if not ok:
+            return
+        if session.unlock_permissions(password):
+            self._update_zoom_actions(view.reflow_mode)
+            self.statusBar().showMessage(
+                "Restrictions lifted for this session", 5000)
+        else:
+            # Not "wrong password": the open password is a right answer to a different
+            # question, and a mistype is reported as what the reader sees — nothing moved.
+            QMessageBox.warning(
+                self, "Permissions Password",
+                "That password did not lift the restrictions.")
 
     def _page_rot_left(self) -> None:
         self._rotate_page(-90)
@@ -3361,6 +3406,11 @@ class MainWindow(QMainWindow):
             action.setEnabled(pages_ok)
             action.setToolTip(ASSEMBLY_NOTE if has_doc and not pages_ok
                               else action.property("plainToolTip") or "")
+        # The way out, offered exactly when it would do something: a plain book, a book
+        # that already grants every right Table 22 defines and a book whose password was
+        # typed this session all have nothing left to lift (F10-4aa).
+        self.act_unlock_permissions.setEnabled(
+            view is not None and view.session.can_unlock)
         for action in self._shape_actions.values():
             action.setEnabled(selection_ok)
         for action in self._stamp_actions.values():

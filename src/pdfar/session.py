@@ -185,6 +185,84 @@ class DocumentSession:
         """
         return self.encryption is None or self.encryption.allows_assembly
 
+    @property
+    def can_unlock(self) -> bool:
+        """Whether a permissions password would change anything about this document.
+
+        PdfCraft's ``can_unlock`` (`crates/engine/src/document.rs:442-445`): encrypted,
+        and not already holding every right the standard defines.  A book that grants all
+        of them has nothing for a password to lift, and an unencrypted one has no
+        encryption dictionary at all — which is what keeps the command out of the menu
+        for both, rather than promising a box that cannot do anything.
+        """
+        return (self.encryption is not None
+                and not self.encryption.grants_everything)
+
+    @property
+    def _open_password(self) -> str:
+        """The password to open another handle of this document with.
+
+        Once the permissions password has been typed, the session holds it, and PdfCraft
+        unlocks the states its history keeps with the same answer rather than leaving the
+        older ones sealed (`crates/engine/src/session.rs:769-775`).  MuPDF handles are the
+        same matter: every working copy is a fresh handle authenticated with whatever this
+        returns, so a session that went on handing out user-password handles would have an
+        unlock that survives exactly one edit.
+        """
+        encryption = self.encryption
+        if encryption is not None and encryption.unlocked and encryption.owner_pw:
+            return encryption.owner_pw
+        return self.password
+
+    def unlock_permissions(self, password: str) -> bool:
+        """Lift the document's restrictions with its permissions (owner) password.
+
+        This is the way out of :meth:`allows_assembly`'s refusal that does not exist
+        today: the reader who owns the file has to close the tab and re-open it, and on
+        an owner-password-only book — which opens unasked — there is no box at all to
+        type it into.  PdfCraft's ``Session::unlock``
+        (`crates/engine/src/session.rs:751-777`) does the same job by authenticating the
+        owner channel and flipping one boolean on the permission record; the rights the
+        *file* grants stay exactly as the producer wrote them.
+
+        Returns whether the reader's rights now cover the document.  ``True`` for a book
+        that was never restricted, ``False`` when the password did not match the owner
+        channel — including the *open* password, which is a real password for a real
+        door and MuPDF answers ``2`` for it, and which lifts nothing here.
+
+        The answer is tested on a throwaway handle of the file rather than on
+        ``self.doc``, and that is the whole care of this method.  Measured on a document
+        this session had already lifted, ``authenticate("wrong")`` answers 0 **and takes
+        the rights back**; ``authenticate(<the user password>)`` does the same.  A
+        mistype in the box would otherwise be a way to re-seal a book the reader was
+        working in, and the handle they are looking at is never asked a question that
+        could be answered wrongly.
+        """
+        self._require_owner()
+        encryption = self.encryption
+        if encryption is None or encryption.grants_everything:
+            return True
+        try:
+            probe = fitz.open(self.path)
+        except Exception:                             # noqa: BLE001 - user-facing
+            # Nothing to ask the file: no path, a path that moved, a file that is not a
+            # PDF any more.  The answer is that nothing was lifted, which is what the
+            # reader sees either way, and the document they are working in is untouched.
+            return False
+        try:
+            answered = probe.authenticate(password)
+        finally:
+            probe.close()
+        # 1 or 4 for the owner channel, 2 for the user channel, 0 for neither — the
+        # same reading `Encryption.capture` makes of the same number.
+        if not answered or answered & 2:
+            return False
+        self.encryption = encryption.with_owner_password(password)
+        # Proven now, so the handle can be brought round to agree with the record this
+        # session actually reads.
+        self.doc.authenticate(password)
+        return True
+
     # ------------------------------------------------------------- ownership
     def _require_owner(self) -> None:
         if threading.get_ident() != self._owner_thread:
@@ -365,8 +443,8 @@ class DocumentSession:
         except Exception as exc:                      # noqa: BLE001 - user-facing
             raise EditError(f"Could not open a working copy: {exc}") from exc
         try:
-            if doc.needs_pass and self.password:
-                doc.authenticate(self.password)
+            if doc.needs_pass and self._open_password:
+                doc.authenticate(self._open_password)
         except Exception:
             doc.close()
             raise
@@ -403,7 +481,7 @@ class DocumentSession:
             reopened = fitz.open(self.path)
         except Exception as exc:                      # noqa: BLE001 - user-facing
             raise SaveError(f"Could not reopen “{name}”: {exc}") from exc
-        if reopened.needs_pass and not reopened.authenticate(self.password):
+        if reopened.needs_pass and not reopened.authenticate(self._open_password):
             reopened.close()
             raise SaveError(f"“{name}” needs its password to be reopened.")
         self._adopt(reopened)
@@ -500,8 +578,8 @@ class DocumentSession:
         doc = fitz.open(self.path) if data is None else fitz.open(stream=data,
                                                                   filetype="pdf")
         try:
-            if doc.needs_pass and self.password:
-                doc.authenticate(self.password)
+            if doc.needs_pass and self._open_password:
+                doc.authenticate(self._open_password)
         except Exception:
             doc.close()
             raise

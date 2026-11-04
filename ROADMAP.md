@@ -1795,11 +1795,17 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       design-time tooltips back when the next tab is an ordinary file — `QAction.toolTip`
       keeps whatever was set last, so a gate that wrote without restoring would leave
       *Delete Page* explaining a restriction the new document does not have.
-- [ ] **Enter permissions password** — let a refusal be lifted inside the open document, as
-      `can_unlock()` (`document.rs:442-445`) behind `CommandGate::Unlock`
-      (`commands.rs:376`) does.  PDFAR's session carries one password and one capture, so its
-      refusal stands until the file is re-opened, and on an **owner-password-only** book —
-      `needs_pass` 0, nothing asked — a typed owner password is ignored.
+- [x] **F10-4aa** — *The refusal has a way out inside the open document: one typed
+      password lifts it for the session, and the file keeps saying no to everyone else.*
+      PdfCraft's `can_unlock()` (`document.rs:442-445`) behind "Enter permissions
+      password…" (`commands.rs:376`) is what F10-4x's refusal and F10-4z's greying answer
+      to.  The password is asked of a **throwaway handle** of the file — measured, a
+      lifted handle asked a wrong answer loses its rights again — and what a good answer
+      flips is one boolean on the capture, never the `/P` the file carries: the reader
+      works, the next reader is refused again, and both save paths are pinned on the
+      bytes.  On an **owner-password-only** book, which opens unasked, it is also the
+      first way PDFAR ever learns the owner password, which turns the next save's refusal
+      to rebuild the protection into an ordinary save that keeps it.
 - [ ] Gate the **outline** and `/NumberPages` on the same bit 11.  Table 22 puts them under
       assembly and PdfCraft's `check_permission` gates them with the page edits
       (`edit.rs:878-905`); a bookmark edit still goes through on a sealed book.
@@ -7553,6 +7559,141 @@ do not move); the outline and `/NumberPages`, which have no edit class in PDFAR 
 either the flag or the greying to sit on; and the Security tab, which still lists four of
 Table 22's twelve rights (`main.py:2220-2223`) and so cannot show the reader the flag the
 menu is answering from.
+
+### F10-4aa The permissions password lifts the refusal inside the open document — [x] Implemented
+
+**Task**: F10-4x answers a reader who asks; F10-4z warns one who looks.  Neither has a
+way *out*: the refusal stands until the file is re-opened, and on an
+**owner-password-only** book — `needs_pass` 0, nothing ever asked — there is no box at
+all to type the lifting password into.  PdfCraft has the out:
+`can_unlock()` (`crates/engine/src/document.rs:442-445`) gates
+`CommandGate::Unlock` behind "Enter permissions password…"
+(`crates/engine/src/commands.rs:376`), and `Session::unlock`
+(`crates/engine/src/session.rs:751-777`) authenticates the owner channel of a document
+already opened past its user password.  What it flips is one boolean on the permission
+record — `bit()` is `self.owner || ...` (`crates/crypt/src/lib.rs:96-98`) — so the
+lifted session grants everything while the file's `/P` stays exactly as the producer
+wrote it.  That asymmetry is the whole design, and it is why the last cases here are
+save cases: **lifting is not de-protecting**.
+
+**The boolean, not the mask.**  `Encryption` gains `unlocked: bool = False` and
+`with_owner_password(password)` returns `replace(self, unlocked=True,
+owner_pw=password)` — a frozen record, so the failed path cannot half-write it.  Both
+rights questions read the boolean *before* the bits: `allows_assembly` is
+`unlocked or bits & ASSEMBLY_RIGHTS` and the new `grants_everything` is
+`unlocked or (bits & DEFINED_RIGHTS) == DEFINED_RIGHTS`, where `DEFINED_RIGHTS` is
+PdfCraft's own literal (`crates/engine/src/protection.rs:155-158`), `0b1111_0011_1100`,
+pinned against PyMuPDF's eight constants by a test so a renumbered bit fails there
+rather than turning a restricted book into an unrestricted one.  `permissions` — the
+mask the *file* carries — is deliberately never touched: typing a password into a
+viewer cannot rewrite what the next reader will be refused.  `can_unlock` is the
+consequence: encrypted and not `grants_everything`, which keeps the command out of the
+menu for a plain book, for a book that withholds nothing, and for one this session has
+already lifted.
+
+**Why the file is asked, not the handle.**  These are the measurements on PyMuPDF
+1.28.2 that make the method open a throwaway `fitz.open(self.path)` rather than ask
+`self.doc`: on a handle this session had
+already lifted, `authenticate("wrong")` answers 0 **and takes the rights back**, and so
+does `authenticate(<the open password>)` — a real password for the other door.  A
+mistype in the box would otherwise be a way to re-seal the book the reader is working
+in.  The buffered working copy is worse still: a decrypted document answers 1 —
+success — to *every* password, so asking the live handle would read any typo as the
+owner stepping up.  The file behind the session is the only thing that knows the real
+answer; the probe asks it, closes, and only a good answer reaches the record — after
+which the live handle is authenticated too, so handle and record agree.  No path, a
+moved file, a non-PDF: the probe's open raises and the answer is *nothing was lifted*,
+with the reader's document untouched.  A second ask after a lift short-circuits on
+`grants_everything` and never puts the question anywhere.
+
+**What the lift buys on the save path.**  `owner_pw` stops being unknown, so
+`reproducible` turns true and the F10-2 weakened-save — a random replacement owner
+password behind `allow_weakened` — is no longer the only way to write an
+owner-password-only book after an edit with no room for revisions.  And the incremental
+path proves the asymmetry on bytes: `PDF_ENCRYPT_KEEP` after a lift still writes
+`/P -3884`, the owner password still opens the result as owner, and the next reader is
+refused again.  The unlock also survives the two things that replace the handle:
+`_open_password` hands the owner password to every working copy, revision adoption and
+revert re-open, so the lift does not die at the next edit — PdfCraft puts the same
+answer to the states its history keeps (`crates/engine/src/session.rs:769-775`).
+
+**The menu.**  One `QAction`, *Enter Permissions Password…*, added directly under the
+three items the sealed book greys — it answers their question, and a reader who wonders
+why they are pale finds the way out beside them.  No shortcut: a command whose point is
+being asked for before it lets anything happen should not fire from the keyboard by
+accident.  Enablement is `view.session.can_unlock` in the same pass that greys the
+page commands, so offer and lift read one predicate; after a lift the refresh is the
+one the actions need (`_update_zoom_actions` → `_update_tool_actions`) and nothing else
+— the document did not change, so no cache, no thumbnail and no reading of the reader's
+place is rebuilt.  The strip's menu needs no refresh at all because it asks per right
+click.  Cancel is not an error: no complaint box, nothing changed, the item stays live.
+A wrong answer warns "That password did not lift the restrictions" — not *wrong
+password*, because the open password is a right answer to a different question — and
+leaves the item live for the next try.
+
+**Tests**: 21 cases in the new `tests/test_permission_unlock.py`, whose module
+docstring is where the measurements are recorded.  In order: a plain book has nothing
+to lift and the ask says so without inventing a record; a book that grants every bit
+has nothing to lift and the record is not marked; a file that moved cannot be asked and
+the open book stays exactly as it was, refusal included; the open password is a real
+answer to the wrong question and the refusal's sentence still arrives; a wrong password
+touches nothing — not the capture, not the handle, and the real password is never
+stored; the permissions password opens the gate, and the same rotate F10-4x refused is
+applied; the lift does not rewrite the mask the file grants; a mistype *after* a lift
+costs the reader nothing, four answers deep; an unlocked book saves a file that is
+still sealed, checked by re-opening the bytes; an owner-only book stops being unsavable
+once lifted, on the no-room-for-revisions path, and the file that comes out still
+opens unasked and still forbids the sheets; the unlock survives a revert; every working
+copy a lifted session opens comes in lifted; a buffered decrypted handle that claims
+every right and accepts every password is still refused, because the gate reads the
+capture and the ask goes to the file; the record unit — one boolean, mask kept,
+`authenticated` left as history, `-4` unrestricted; the mask literal pinned to the
+library's eight names; and six window cases: the item offered exactly where it would
+do something and per current tab, the greyed trio coming back black with their
+design-time tooltips and the box naming the file with password echo, a cancelled box
+asking once and complaining never, a wrong answer complaining and staying live for the
+right one, the menu holding the same `QAction` directly under *Delete Page* and
+triggering the handler, and a save through the real window path leaving the file
+sealed.
+
+**Suite**: 2661 passed, three consecutive runs on the final tree (217.09 / 197.30 /
+223.61 s), against the F10-4z tree's 187.31 / 179.91 / 183.05 s.  The twenty-one new
+cases read alone cost **8.3 s**, six of them raising a `MainWindow`; the rest of the
+spread is the one this suite has always carried.  Ruff unchanged at 7, mypy 557 errors
+in 16 files — the two added reads, `QMenu.addAction` for the new item and
+`QStatusBar.showMessage` for the lifted notice, are the same Optional family this file
+has always raised, counted the way F10-4x counted its own two.
+
+**Mutations**: **15 mutants, 15 killed** over `session.py`, `save.py` and `main.py` (48 cases — the new file and the two permission files of F10-4x/4z, ~16 s each): the live handle asked instead of the file (**1** — and the one case is the buffered copy, which measures that a decrypted document answers `1` to *every* password), the user channel accepted as a lift (**1**), the lift without the password stored (**4**), working copies kept opening with the user password (**2**), `can_unlock` blind to the all-rights case (**5**), a moved file raised through the dialog (**1** — the one case is the moved file), the lifted boolean stopped answering the rights question (**10**), `grants_everything` blind to the lift (**7**), the lift without the owner password (**9**), the password stored without the boolean (**13**), a reserved bit joining the mask (**1** — the one case is the test that pins the literal against the library's eight names), the item offered for every document (**1** — the one case is the plain book), a lift refreshing nothing (**2**), the item moved above the commands it answers (**1** — the one case reads the menu), and any typed password counted as a lift (**5**).  No survivors; the five single-case kills each die to exactly the case that exists for that line, which is the shape the pass is meant to produce.
+
+**Performance**: `can_unlock` is **0.32 µs**, `grants_everything` **0.27 µs**,
+`allows_assembly` **0.33 µs** on a sealed session and `_open_password` **0.24 µs** —
+all of them a boolean test beside the mask test F10-4x already paid.  The command
+itself is not free and is not meant to be: a wrong answer costs **45 ms** and a right
+one **70 ms**, because the probe opens the file and MuPDF derives the AES-256 key —
+the same order as opening the document, once per typed password.  A second ask after a
+lift short-circuits at **5 µs** and never asks.  The refusal stays a rejection
+(**14 µs**, before the snapshot), the accepted edit costs what it always cost
+(**66 ms** for a turn of one page), and a lifted working copy opens at the same
+**65 ms** an unlifted one does — one `authenticate` either way, just a different
+answer.
+
+**Verified by eye**: the real window offscreen at 1100×760 with the Tools menu grabbed
+as drawn — `1-tools-menu-sealed.png` (*Rotate Page Left/Right* and *Delete Page* pale
+with their shortcuts dimmed, *Enter Permissions Password…* black directly under them),
+`2-password-box.png` (the box itself: password echo, the file named in the first line),
+`3-tools-menu-lifted.png` (the trio black, the unlock item pale because nothing is
+left to lift), `4-tools-menu-plain.png` (a plain book: everything black except the
+command, which has nothing to do).  All four under `/tmp/f104aa/`.
+
+**What is not here**: the **open** dialog still asks one password and does not offer
+the owner channel there — the way in is the command, once the book is open, which is
+PdfCraft's order too; `/P` is still absent from the Security tab, so a reader who
+lifted a book cannot see the mask that stayed behind; the outline and `/NumberPages`
+still go through on a sealed book, their bit-11 gate waiting on the checklist item
+above; and the lift is deliberately **not** remembered across sessions — it is a
+password typed into a viewer, not a fact about the file, and the next opening answers
+the producer's `/P` again.
 
 ---
 

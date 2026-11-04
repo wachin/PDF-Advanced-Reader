@@ -25,7 +25,7 @@ import os
 import secrets
 import stat
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
 try:
@@ -81,6 +81,15 @@ def _new_owner_password() -> str:
 #: ``crates/crypt/src/lib.rs:116-118``).
 ASSEMBLY_RIGHTS = fitz.PDF_PERM_ASSEMBLE | fitz.PDF_PERM_MODIFY
 
+#: Every right Table 22 defines: bits 3–6 and 9–12 (§7.6.4.2), which is
+#: ``PRINT|MODIFY|COPY|ANNOTATE|FORM|ACCESSIBILITY|ASSEMBLE|PRINT_HQ`` =
+#: ``4+8+16+32+256+512+1024+2048``.  The other bits of ``/P`` are reserved and read as
+#: 1, so this is the only mask a "nothing is withheld" question can be answered against
+#: — the same literal PdfCraft compares (`crates/engine/src/protection.rs:155-158`), and
+#: written as one here for the same reason: a test keeps it tied to PyMuPDF's own
+#: constants, so the eight names are checked once instead of at every use.
+DEFINED_RIGHTS = 0b1111_0011_1100
+
 
 @dataclass(frozen=True)
 class Encryption:
@@ -98,6 +107,12 @@ class Encryption:
     owner_pw: str
     user_pw: str
     authenticated: int
+    #: Whether the permissions (owner) password has been typed for this document *in
+    #: this session*.  PdfCraft keeps the same fact as a boolean on the permission
+    #: record — ``bit()`` is ``self.owner || ...``, ``crates/crypt/src/lib.rs:96-98`` —
+    #: precisely so that ``bits``, the rights the *file* grants, survives the lift.
+    #: ``capture`` can never set it: it records what the opening password bought.
+    unlocked: bool = False
 
     @classmethod
     def capture(cls, doc: fitz.Document, password: str,
@@ -164,8 +179,41 @@ class Encryption:
         is a record of which password was typed, which is what the save path needs and
         nothing else.  A document with no encryption at all has no rights to consult;
         its caller holds that case (``DocumentSession.allows_assembly``).
+
+        The one thing that outranks the bits is :attr:`unlocked` — the same password
+        typed *after* the file was opened, which MuPDF records on the handle and which
+        the handle is not a place this can read (a working copy comes back decrypted and
+        answers every right).  So it is recorded here, and it says yes to everything the
+        bits would have said no to.
         """
-        return bool(self.permissions & ASSEMBLY_RIGHTS)
+        return self.unlocked or bool(self.permissions & ASSEMBLY_RIGHTS)
+
+    @property
+    def grants_everything(self) -> bool:
+        """Whether nothing Table 22 defines is being withheld from this reader.
+
+        The question :attr:`DocumentSession.can_unlock` asks the other way round: a
+        document with every bit set has no restrictions for a password to lift, and
+        offering to type one at it would be a menu item that cannot do anything.
+        Reserved bits are not read, which is what makes ``-4`` — what an unencrypted
+        document answers, and what a handle lifted by its owner password answers — come
+        out unrestricted rather than as an unparseable number.
+        """
+        return self.unlocked or (self.permissions & DEFINED_RIGHTS) == DEFINED_RIGHTS
+
+    def with_owner_password(self, password: str) -> "Encryption":
+        """This protection, lifted for the session that was just given *password*.
+
+        Two things move and one is deliberately left alone.  :attr:`unlocked` is the
+        boolean every rights question reads, and :attr:`owner_pw` stops being unknown —
+        which is what lets the next save rebuild the file's protection instead of
+        asking the reader to accept an approximation of it.  What does not move is
+        :attr:`permissions`: that mask is what the *file* grants whoever opens it next,
+        and typing a password into a viewer here cannot rewrite it.  Measured on both
+        save paths — ``PDF_ENCRYPT_KEEP`` after a lift still writes the sealed ``/P``,
+        and so does a rewrite replaying this record.
+        """
+        return replace(self, unlocked=True, owner_pw=password)
 
     @property
     def reproducible(self) -> bool:
