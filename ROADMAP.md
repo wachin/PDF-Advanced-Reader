@@ -1809,9 +1809,22 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
 - [ ] Gate the **outline** and `/NumberPages` on the same bit 11.  Table 22 puts them under
       assembly and PdfCraft's `check_permission` gates them with the page edits
       (`edit.rs:878-905`); a bookmark edit still goes through on a sealed book.
-- [ ] Show `/P` in Document Properties.  The Security tab lists four of Table 22's twelve
-      rights (`main.py:2220-2223`) and says nothing about assembly, so the reader cannot see
-      the reason a refusal quoted.
+      **Blocked (measured 2026-11-04)**: PDFAR has no session edit for either yet — the
+      PDF outline is read-only (`BookmarkManager` reads `get_toc` and user bookmarks live
+      in QSettings, outside the document, where no file permission reaches), the only
+      in-session writes of `/NumberPages` and the outline are the repairs inside
+      `DeletePages`, which its own `requires_assembly` already gates, and the Page
+      Numbers panel stamps a **separate copy** (`stamp_copy`) rather than editing the
+      book.  The flag has nothing to sit on until an outline or labels edit exists,
+      exactly as for extract, duplicate, split and merge below.
+- [x] **F10-4ab** — *`/P` is shown in Document Properties: the Security tab answers all
+      eight rights Table 22 defines, reads them from the capture, and a lifted session
+      says so beside them.*  The reason F10-4x quotes is finally somewhere the reader can
+      look: the withheld assemble row carries `ASSEMBLY_NOTE` as its tooltip, the answers
+      come from the record the gate reads — not from the working-copy handle, which for a
+      buffered decrypted book reports "not encrypted" and every right — and the lift
+      F10-4aa types gets its own line while the file's answers stay as the producer wrote
+      them.
 - [ ] Carry `requires_assembly` onto extract, duplicate, split and merge when those edits
       exist — the flag has nothing to sit on for them yet.
 - [ ] Insert blank page
@@ -7694,6 +7707,74 @@ still go through on a sealed book, their bit-11 gate waiting on the checklist it
 above; and the lift is deliberately **not** remembered across sessions — it is a
 password typed into a viewer, not a fact about the file, and the next opening answers
 the producer's `/P` again.
+
+### F10-4ab Document Properties shows `/P` — the whole table, read from the record — [x] Implemented
+
+**Task**: F10-4x quotes a sentence, F10-4z pales an item and F10-4aa lifts the refusal,
+and none of them ever *showed* the mask.  The Security tab listed four of Table 22's
+twelve bits as a comma list of the granted ones and said nothing about assembly, so the
+reader handed "This document's permissions do not allow changing its pages" had nowhere
+to look for the permission behind the sentence — and the reader who lifted a book could
+not see the mask that stayed behind, the exact gap F10-4aa's "what is not here" named.
+
+**The first display surface that must read the capture.**  The dialog asked
+`doc.permissions` and `doc.is_encrypted` from `open_copy()` — the same handle that
+answers `-4` and *not encrypted* for the buffered working copy F10-2 falls back to when
+there is no room for revisions, measured in F10-4x's mutation pass as the only path that
+sees it.  A tab that asks the copy tells a reader of a sealed book that nothing is
+withheld: a display bug with the same root as the gate bug the refusal exists to avoid.
+The rows now read `session.encryption.permissions`, the very record
+`allows_assembly` consults, and *Encrypted* answers `encryption is not None` — which is
+also what gives the **owner-password-only** book, which never asked anything of the
+reader, its table.
+
+**The rows** are the eight rights Table 22 names, in bit order (3–6, 9–12), each
+Yes/No, each carrying the standard's own wording as its tooltip.  The assemble row
+prepends `ASSEMBLY_NOTE` while the right is withheld — the refusal's sentence and the
+bit's meaning in one tooltip, and the same constant keeps the two surfaces from being
+reworded apart, which is F10-4z's one-sentence rule applied to a third surface.  The
+lifted session gets a line of its own *below* the unchanged answers: rewriting the rows
+to what this session may ask would turn a properties dialog into a lie about the bytes,
+where F10-4aa's whole design is that the file's answer did not move.
+
+**Tests**: 7 cases in the new `tests/test_security_tab.py`: the plain book gets one line
+and no table to misread; the sealed book gets all eight rows, exactly *Print* and
+*Copy* answering Yes, and the refusal's sentence in the assemble tooltip; the
+all-rights book gets eight Yes and no quoted refusal; the buffered copy cannot lie —
+`mkdtemp` refused, an edit applied, the handle itself measured claiming every right,
+and the tab still answering Encrypted Yes / Assemble No; the owner-only book gets its
+table though `needs_pass` is 0; the lifted session shows both answers at once; and the
+lifting line does not appear where no lifting happened.
+
+**Suite**: 2668 passed, three consecutive runs on the final tree (217.02 / 208.35 /
+218.73 s) against the F10-4aa tree's 217.09 / 197.30 / 223.61 s — the seven over its
+2661 are exactly this tab's cases, and the rest of the spread is the one this suite has
+always carried.  Ruff unchanged at 7, mypy 562 errors in 16 files: the five added reads
+are `fitz.PDF_PERM_{FORM,ACCESSIBILITY,PRINT_HQ}` once each and `PDF_PERM_ASSEMBLE`
+twice, the same attr-defined family `main.py` and `save.py` have always raised against
+this module's runtime constants.
+
+**Mutations**: **ten mutants, ten killed** against the tab in `main.py` (this file's seven cases plus the old `test_main.py` tab builder, ~8 s each): the working copy asked instead of the capture (**5** — every case that needs a table, the buffered copy and the owner-password-only book among them losing it outright), the table built for a book with no `Encryption` (**2** — the plain book and the tab-builder), the mask test inverted (**5**), the refusal quote dropped from the withheld row (**2** — the two books that withhold assembly), the quote kept where assembly is granted (**1** — the all-rights book), the lifting line always there (**1** — the one case is the unlifted book that pins its absence), never there (**1** — the one case is the lifted session), the assemble row reading bit 9 (**2** — both cases that read the refusal tooltip), a row renamed away from the standard's name (**2**, same shape), and the lift rewriting the file's answers (**1** — the lifted session, which reads a `No` row under the line that says *lifted*).  No survivors; the four single-kill mutants each die to exactly the case written for that line, and the tree came back byte-identical.
+
+**Performance**: the table is eight mask tests against a record already in memory —
+measured **2.20 µs** for all eight together (**275 ns** per test) and **0.22 ms** to
+build the whole tab offscreen: eight answers, eight tooltips, eight form rows.  A plain
+book pays the one `is None` test and builds nothing; the tab rides a dialog that was
+already going to open, and adds no read of the file at all — the record was taken when
+the document was.
+
+**Verified by eye**: the real dialog offscreen — `1-security-sealed.png` (Encrypted Yes,
+eight rows, *Print* and *Copy* the only Yes), `2-security-lifted.png` (the same eight
+answers with *This session: Restrictions lifted…* below them), `3-security-plain.png`
+(one line: Encrypted No).  All three under `/tmp/f104ab/`.
+
+**What is not here**: the encryption *method* (`AES-256` vs `RC4` vs `AES-128`) and
+`authenticated` — which channel opened the file — are in the record and not on the tab;
+the other seven withheld rows quote the standard but not a refusal sentence, because
+only assembly has a refusal that quotes itself; the outline and `/NumberPages` gate is
+still waiting, and the checklist now records *why*: PDFAR has no session edit for either
+yet, so there is no flag to carry and no surface to grey; and the tab only reports the
+lift — typing the password that causes it stays a Tools-menu command.
 
 ---
 

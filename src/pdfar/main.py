@@ -2189,8 +2189,6 @@ class MainWindow(QMainWindow):
                         embedded = font[4] if len(font) > 4 else False
                         unique_fonts.setdefault((name, ftype),
                                                 (name, ftype, embedded))
-                permissions = doc.permissions
-                is_encrypted = doc.is_encrypted
         except Exception as exc:
             QMessageBox.critical(self, "Properties", f"Could not read document:\n{exc}")
             return
@@ -2263,21 +2261,57 @@ class MainWindow(QMainWindow):
         tabs.addTab(fonts_tab, "Fonts")
 
         # --- Security Tab ---
+        # The capture, not the copy: the buffered working document reports itself
+        # decrypted, so a tab that asked the handle would tell the reader of a sealed
+        # book that nothing is withheld — F10-4x's lesson, now on the first surface
+        # that *shows* the mask instead of gating on it.  The rows are Table 22's own
+        # eight rights in bit order; the withheld assemble row quotes the refusal's
+        # sentence, because that is the reason the reader has seen in the status bar
+        # and could not find here (F10-4ab).
         security_tab = QWidget()
         security_form = QFormLayout(security_tab)
-        security_form.addRow("Encrypted:", QLabel("Yes" if is_encrypted else "No"))
-        if is_encrypted:
-            perms = []
-            for mask, name in (
-                (fitz.PDF_PERM_PRINT, "Print"),
-                (fitz.PDF_PERM_MODIFY, "Modify"),
-                (fitz.PDF_PERM_COPY, "Copy"),
-                (fitz.PDF_PERM_ANNOTATE, "Annotate"),
+        encryption = self.view.session.encryption
+        security_form.addRow("Encrypted:",
+                             QLabel("Yes" if encryption else "No"))
+        if encryption is not None:
+            for mask, name, blurb in (
+                (fitz.PDF_PERM_PRINT, "Print",
+                 "Print the document (Table 22 bit 3)"),
+                (fitz.PDF_PERM_MODIFY, "Modify",
+                 "Modify the document by adding or changing text, images, "
+                 "annotations, or interactive form fields (bit 4)"),
+                (fitz.PDF_PERM_COPY, "Copy",
+                 "Copy, or otherwise extract, text and other information "
+                 "(bit 5)"),
+                (fitz.PDF_PERM_ANNOTATE, "Annotate",
+                 "Add or change text annotations and interactive form fields "
+                 "(bit 6)"),
+                (fitz.PDF_PERM_FORM, "Fill forms",
+                 "Fill in existing interactive form fields, including "
+                 "signing them (bit 9)"),
+                (fitz.PDF_PERM_ACCESSIBILITY, "Accessibility",
+                 "Repurpose text for accessibility, e.g. screen readers "
+                 "(bit 10)"),
+                (fitz.PDF_PERM_ASSEMBLE, "Assemble",
+                 "Insert, rotate or delete pages and create or modify "
+                 "bookmarks or form-field page positions (bit 11)"),
+                (fitz.PDF_PERM_PRINT_HQ, "High-quality print",
+                 "Print so that text and graphics may be extracted with high "
+                 "fidelity (bit 12)"),
             ):
-                if permissions & mask:
-                    perms.append(name)
-            security_form.addRow("Permissions:",
-                                 QLabel(", ".join(perms) if perms else "None"))
+                granted = bool(encryption.permissions & mask)
+                tip = blurb
+                if not granted and mask == fitz.PDF_PERM_ASSEMBLE:
+                    tip = ASSEMBLY_NOTE + "  " + blurb
+                answer = QLabel("Yes" if granted else "No")
+                answer.setToolTip(tip)
+                security_form.addRow(name + ":", answer)
+            if encryption.unlocked:
+                lifted = QLabel("Restrictions lifted by its permissions "
+                                "password — the answers above are what the "
+                                "file still grants.")
+                lifted.setWordWrap(True)
+                security_form.addRow("This session:", lifted)
         tabs.addTab(security_tab, "Security")
 
         # --- File Info Tab ---
