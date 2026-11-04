@@ -47,8 +47,8 @@ from .page_numbers import (
     erased_copy_path, numbered_copy_path, stamp_copy,
 )
 from .pages import (
-    DeletePages, MovePages, ReversePages, RotatePages, contiguous_runs,
-    shifted_index,
+    DeletePages, InsertBlankPage, MovePages, ReversePages, RotatePages,
+    contiguous_runs, shifted_index,
 )
 from .save import ProtectionError, SaveError, SaveReport, save_document
 from .search import (
@@ -729,14 +729,22 @@ class MainWindow(QMainWindow):
             "(Ctrl+Shift+Backspace)")
         self.act_page_delete.triggered.connect(self._page_delete)
 
-        # The permission gate writes its reason into these three tooltips and takes it
+        # No shortcut: this one invents a sheet, and a key that adds a page to the book
+        # the reader was reading is a key nobody should have to learn the undo of.
+        self.act_page_insert = QAction("Insert Blank Page", self)
+        self.act_page_insert.setToolTip(
+            "Open a gap under the page you are reading and put a blank sheet in it, "
+            "wearing the size and turn of the page below the gap")
+        self.act_page_insert.triggered.connect(self._page_insert_blank)
+
+        # The permission gate writes its reason into these four tooltips and takes it
         # out again for the next document, so the sentence each action was built with is
         # kept on the action rather than restated where it is restored (F10-4z).
         for _page_action in (self.act_page_rotl, self.act_page_rotr,
-                             self.act_page_delete):
+                             self.act_page_delete, self.act_page_insert):
             _page_action.setProperty("plainToolTip", _page_action.toolTip())
 
-        # The permissions password lifts the refusal those three items answer to, in
+        # The permissions password lifts the refusal those four items answer to, in
         # the session that raised it (F10-4aa).  No shortcut: this is a command whose
         # whole point is being asked before it lets anything else happen.
         self.act_unlock_permissions = QAction("Enter Permissions Password…", self)
@@ -872,8 +880,9 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.act_rotate_right)
         tools_menu.addAction(self.act_page_rotl)
         tools_menu.addAction(self.act_page_rotr)
+        tools_menu.addAction(self.act_page_insert)
         tools_menu.addAction(self.act_page_delete)
-        # Directly under the three items the sealed book greys: the command that turns
+        # Directly under the four items the sealed book greys: the command that turns
         # them back on, for the reader who wonders why they are pale (F10-4aa).
         tools_menu.addAction(self.act_unlock_permissions)
         tools_menu.addAction(self.act_save_annotations)
@@ -1454,6 +1463,23 @@ class MainWindow(QMainWindow):
         """
         if self.view:
             self.view.apply_edit(ReversePages(pages=tuple(pages)))
+
+    def _page_insert_blank(self) -> None:
+        """The Tools route: open the gap under the page the reader is on."""
+        if self.view:
+            self._insert_blank_pages((self.view.current_page,))
+
+    def _insert_blank_pages(self, pages: Tuple[int, ...]) -> None:
+        """Put a blank sheet in the gap under the last page of the pick.
+
+        The one page command that adds a sheet rather than rearranging the ones already
+        there, which is why there is nothing to ask and nothing to re-aim: the sheet
+        above the gap keeps its number, the reader stays on it, and the invented page is
+        the ``-1`` the published order carries — so the strip shows the blank where the
+        reader put it and Ctrl+Z takes it back out again.
+        """
+        if self.view and pages:
+            self.view.apply_edit(InsertBlankPage(at=max(pages) + 1))
 
     @staticmethod
     def _page_words(pages: Tuple[int, ...]) -> str:
@@ -2713,6 +2739,7 @@ class MainWindow(QMainWindow):
         tab.sidebar.page_deletion_requested.connect(self._delete_pages)
         tab.sidebar.page_move_requested.connect(self._move_pages)
         tab.sidebar.page_reverse_requested.connect(self._reverse_pages)
+        tab.sidebar.page_insert_requested.connect(self._insert_blank_pages)
         # Connect annotation manager to sidebar
         tab.sidebar.set_annotation_manager(tab.view.annotation_manager)
         self._connected_tab = tab
@@ -2741,6 +2768,7 @@ class MainWindow(QMainWindow):
             tab.sidebar.page_deletion_requested.disconnect(self._delete_pages)
             tab.sidebar.page_move_requested.disconnect(self._move_pages)
             tab.sidebar.page_reverse_requested.disconnect(self._reverse_pages)
+            tab.sidebar.page_insert_requested.disconnect(self._insert_blank_pages)
         except TypeError:
             pass
         tab.view.clear_numbering_preview()
@@ -3432,11 +3460,11 @@ class MainWindow(QMainWindow):
         # Whether the document can be emptied is the edit's to refuse; a greyed item
         # would have to answer for a pick it cannot see.  What the document *can* say
         # before the click is that its own permissions withhold the right to change
-        # its pages at all (F10-4z) — one reason all three share, so it goes into the
+        # its pages at all (F10-4z) — one reason all four share, so it goes into the
         # item the reader hovers instead of only into the status bar after a refusal.
         pages_ok = view is not None and view.session.allows_assembly
         for action in (self.act_page_rotl, self.act_page_rotr,
-                       self.act_page_delete):
+                       self.act_page_delete, self.act_page_insert):
             action.setEnabled(pages_ok)
             action.setToolTip(ASSEMBLY_NOTE if has_doc and not pages_ok
                               else action.property("plainToolTip") or "")

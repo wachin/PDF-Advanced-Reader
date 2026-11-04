@@ -357,6 +357,10 @@ class Sidebar(QWidget):
     # is measured by the strip and asked for by a gesture; this is the same ask from the
     # menu, where the reader names the pages instead of dragging them.
     page_reverse_requested = pyqtSignal(object)
+    # The sheets a new one is wanted under: the window opens the gap under the last page
+    # of the pick, which is the only position a selection that was never dragged can
+    # name.  An insert invents a sheet rather than rearranging the ones there are.
+    page_insert_requested = pyqtSignal(object)
     # The window owns saving: it is the one place that can explain a refusal, and
     # a second opinion from here would only be able to say "failed".
     save_requested = pyqtSignal()
@@ -835,6 +839,12 @@ class Sidebar(QWidget):
         self._add_reverse_action(menu, pages,
                                  "Reverse Page" if single
                                  else f"Reverse {len(pages)} Pages")
+        # The same pick that names which sheets to turn names the gap a new sheet goes
+        # under, so the reader who wants a blank after page 4 asks for it from page 4.
+        blank = menu.addAction("Insert Blank Page")
+        blank.triggered.connect(
+            lambda _checked=False, pages=pages:
+            self.page_insert_requested.emit(pages))
         menu.addSeparator()
         # The scanned book that arrived sideways end to end: asking a reader to
         # click five hundred thumbnails is work the menu is standing there to do.

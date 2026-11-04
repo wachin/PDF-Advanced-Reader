@@ -840,14 +840,14 @@ def test_the_tools_command_deletes_the_page_under_the_reader(window, answers, qa
 
 
 def test_the_tools_command_sits_beside_the_page_turn(window):
-    """Menu placement is documentation: the two page-tree commands a reader can reach."""
+    """Menu placement is documentation: the page commands a reader can reach."""
     menus = {menu.title(): menu for menu in window.menuBar().findChildren(QMenu)}
     tools = menus["&Tools"].actions()
     order = [action for action in tools
              if action in (window.act_page_rotl, window.act_page_rotr,
-                            window.act_page_delete)]
+                           window.act_page_insert, window.act_page_delete)]
     assert order == [window.act_page_rotl, window.act_page_rotr,
-                     window.act_page_delete], \
+                     window.act_page_insert, window.act_page_delete], \
         "an action that is in no menu is a command nobody can reach"
     assert window.act_page_delete.shortcut().toString() == "Ctrl+Shift+Backspace"
 

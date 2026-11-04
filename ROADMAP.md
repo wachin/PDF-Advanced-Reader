@@ -1827,7 +1827,19 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       them.
 - [ ] Carry `requires_assembly` onto extract, duplicate, split and merge when those edits
       exist — the flag has nothing to sit on for them yet.
-- [ ] Insert blank page
+- [x] **F10-4ba** — *Insert blank page: the first page-tree ask that invents a sheet,
+      spliced by MuPDF into the node that owns the gap and wearing the geometry the sheet
+      below it states.*  Rotate, delete, move and reverse rearrange sheets that exist; this
+      one makes a sheet, so it is the first step whose published `Renumbering` carries a
+      `-1` — which is what lets the reading position, the pick and the bookmarks spend the
+      map F10-4p taught them instead of losing their place.  PdfCraft settle-and-flattens
+      the whole book for an insert (`organize/src/lib.rs:168`); PDFAR keeps the producer's
+      tree, because `new_page(pno=at)` files the sheet into the `/Kids` of the node that
+      owns the slot and re-derives `/Count` itself.  `/MediaBox`, `/CropBox` and `/Rotate`
+      are copied from the pushed-down sheet **as stated**, so an inherited turn is inherited
+      by the blank too and the two resolve through one `/Parent` chain; `/PageLabels` and
+      the outline need no repair, measured rather than hoped.  The command carries
+      `requires_assembly`, so F10-4x's refusal and F10-4z's greying arrive already written.
 - [ ] Split, merge/combine
 - [ ] Page boxes (crop)
 - [x] **F10-4o** — *Inherited page-tree attributes (`/Resources`, `/MediaBox`,
@@ -7775,6 +7787,127 @@ only assembly has a refusal that quotes itself; the outline and `/NumberPages` g
 still waiting, and the checklist now records *why*: PDFAR has no session edit for either
 yet, so there is no flag to carry and no surface to grey; and the tab only reports the
 lift — typing the password that causes it stays a Tools-menu command.
+
+### F10-4ba Insert blank page — the first page-tree ask that invents a sheet — [x] Implemented
+
+**Task**: the roadmap's four page-tree asks were rotate, delete, move and reverse, and all
+four rearrange sheets that already exist.  Inserting a blank is the fifth and the first that
+*invents* one, and it is where three things the earlier steps had never had to answer arrive
+at once: a page count that grows, a `/Kids` array that has to gain a reference inside a tree
+the producer built, and a `Renumbering` whose map has a slot with no sheet behind it — the
+first `-1` a *forward* step publishes, not just an undo.  PdfCraft offers the command on the
+same selection (`organize/src/lib.rs:597 insert_blank_page`), and gates it on `assemble()`
+(`engine/src/edit.rs`), which F10-4x already asks and F10-4z already pales; the work here is
+the edit itself and the two routes to it.
+
+**The splice is MuPDF's, and the tree stays the producer's.**  `doc.new_page(pno=at)` files
+the sheet into the `/Kids` of **the node that owns the slot** and re-derives `/Count` up the
+chain — measured on a split tree: a blank inserted at 2 of the `nested_pdf` fixture landed
+inside the ancestor holding old page 2, and the other ancestor was not touched.  PdfCraft's
+`rebuild` (`organize/src/lib.rs:168`) does the opposite for any insert: a settle-and-flatten
+of the whole book, which is the same choice it makes for a reorder and for the same reason —
+its writer wants one flat `/Kids`.  PDFAR already settled *before* a reorder instead of
+flattening (F10-4o), and the insert inherits that decision: `SettlePageTree` is not run,
+because the splice needs no geometry repaired underneath it.  `pno == page_count` appends,
+and past the end MuPDF raises a library sentence, so the edit refuses a position outside
+`0..count` with the book's own count in the message first.
+
+**The blank wears the sheet below the gap — as that sheet states it.**  MuPDF writes
+`/Rotate 0` and an empty `/Resources` on every page it creates, which beside a book whose
+turn lives on an ancestor arrives *upright* next to turned neighbours; PdfCraft, which omits
+the key into a flattened root that states nothing, arrives upright beside **sideways**
+neighbours for the same reason.  Here the three geometry keys `/MediaBox`, `/CropBox` and
+`/Rotate` are copied from the pushed-down sheet **as stated**: what it holds, the blank
+holds; what it leaves to the ancestors, the blank leaves — and because MuPDF spliced the
+blank into that same sheet's `/Parent`, the two resolve through an identical chain, which
+makes "asks the same questions, gets the same answers" a theorem rather than a hope.  At the
+end of the book there is no sheet below the gap, and the one above is the last, which is also
+the node the append files into.  The xref is read *before* the splice and the `Page` object
+never again: `new_page` rebuilds the tree and frees every handle the library was holding, and
+touching one afterwards dereferences a null MuPDF pointer — the bug the first draft of this
+step shipped with, caught by the stated-geometry case.
+
+**Nothing else needs repair, and that is a measured claim, not an assumption.**  MuPDF
+re-aims `/PageLabels` under an insert by itself — a range that starts at the pushed-down
+sheet follows it (start 2 became 3), and a roman run continues over the blank — and outline
+*destinations* are page objects, so a row comes back with the sheet it names: `[[1, front,
+1], [1, middle, 3], [1, back, 4]]` reads `1, 4, 5` after an insert at 1.  The delete had to
+say both of those things itself; the insert only has to not undo them, and the two cases
+below pin the library to that answer so a future one cannot disagree silently.
+
+**The map is what makes the blank a page of the book rather than a drawing.**  The published
+order is `(0 … at-1, -1, at … count-1)`, so every surviving sheet keeps its own number and
+the invented one is the single column nobody pointed at before it existed: the reader stays
+on the sheet above the gap, a bookmark on a pushed-down sheet follows it, and undo runs the
+same tuple backwards — `where(3) == 2` takes the sheet home and `where(2) == 2` leaves a mark
+the reader made *on the blank* on the number that now names the sheet which came back, the
+rule F10-4g found for a page whose past has gone asked of a page with no past at all.
+
+**Two routes, one position each.**  The Tools command inserts under the page being read
+(`at = current_page + 1`), and the strip's item inserts under the last sheet of the pick
+(`at = max(pages) + 1`) — the only gap a selection that was never dragged can name.  Both go
+through the same `InsertBlankPage`, and the item joins the four-action grey group, so a sealed
+book pales it with its three siblings and says `ASSEMBLY_NOTE` in its tooltip before anyone
+clicks.
+
+**Tests**: 18 cases in the new `tests/test_insert_blank.py`: the blank lands on the number the
+gap names and nothing else moves; both ends of the book; three positions outside `0..count`
+refused whole, with the count in the sentence and no renumbering published; the three geometry
+keys copied as stated; an insert beside *inherited* geometry inheriting the same way (the blank
+and its neighbour answering `null` and resolving to the ancestor's turn); a stated `180`
+copied as `180`; an appended blank wearing the last sheet's inherited crop; the published order
+for three gaps; the forward and backward maps; the edit's own answers (`requires_assembly`,
+`STRUCTURE`, `changed` is `None`, the label); `/PageLabels` live, on disk and after a reopen;
+the outline's rows following their own sheets; undo taking the blank back; the sealed refusal
+and the lifted session that then allows it; the Tools command inserting under the eyes without
+moving the reader; the item greying with its group and coming back for a plain book; and the
+strip's item asking for the gap after the last page picked.  Six existing suites were widened
+rather than worked around: `the_page_tree_edits()` gained the insert so F10-4x's gate sweep
+covers five edits, `PICK_ITEMS`/`PAGE_ACTIONS`/`the menu's shape`/the Tools-menu placement
+assertion and the unlock suite's `PAGE_ACTIONS` all now name the fifth item.
+
+**Suite**: 2686 passed, three consecutive runs on the final tree (219.55 / 220.89 / 204.95 s)
+against F10-4ab's 217.02 / 208.35 / 218.73 s — the eighteen over its 2668 are exactly this
+step's cases.  Ruff unchanged at 7, all seven in files this step did not touch.  mypy 564
+errors in 16 files against the same tree's HEAD at 562, measured by backing the three modified
+sources up, checking them out, re-running and restoring byte-identically: the two added lines
+are one more occurrence each of two families this code has always raised — `QMenu | Any |
+None` from `addMenu` (47 → 48) and `QAction | None` from `addAction` (17 → 18) — no new kind.
+
+**Mutations**: **fourteen mutants, fourteen killed** against `tests/test_insert_blank.py`
+(~2 s each; the label mutant also against the four menu suites): the assembly bit no longer
+asked, the end of the book refused (`<= count` → `< count`), an append reading past the last
+sheet, the geometry copy dropped, the xref read after the splice — the bug the first draft
+actually shipped — the blank borrowing a real sheet's number instead of `-1`, the pushed-down
+sheets miscounted in the published order, the label renamed away from what both menus assert,
+`changed` claiming to know, the gap opening *above* the last sheet picked, the Tools route
+inserting above the page read, the strip emitting a gap it invented instead of its pick, the
+strip's ask connected to nobody, and the item left out of the grey group.  No survivors, and
+the tree came back byte-identical.
+
+**Performance**: one insert is **1.08 ms** measured as open + splice + close on a 4-page book;
+inside a live 540-page tree the marginal cost is **1.20 ms** per insert over twenty of them, of
+which the three `xref_get_key` + `xref_set_key` pairs are **330 µs** and reading the neighbour's
+xref, rect and page **50 µs** — the rest is MuPDF's splice, whose *first* call after an open
+costs **4.4 ms** because that is when the page-tree array gets built.  Through the session, one
+insert at gap 270 of the real 25 MB, 540-page GS262 book costs **122.9 ms**, which is the
+working-copy snapshot F10-2 introduced and every page-tree edit pays — the insert itself is the
+millisecond the numbers above name — and undoing it costs **4.7 ms**.
+
+**Verified by eye**: the real window offscreen — `1-strip-menu-plain.png` (the item under the
+pick's *Reverse*, above the separator, the book's commands below it), `6-strip-menu-sealed.png`
+(the same menu with all seven pale), `2-window-after-insert.png` (7 of 7 pages, the reader still
+on page 3), `3-strip-after-insert.png`, `4-page-under-the-eyes.png` and
+`5-the-blank-page-itself.png` (a clean sheet of the neighbour's size between *Page 3 content* and
+*Page 4 content*).  All six under `/tmp/f104ba/shots/`.
+
+**What is not here**: no size is *chosen* — the blank always wears its neighbour's, so a book
+whose pages differ in size gets the sheet below the gap's dimensions and a dialog asking is not
+written; one sheet per ask, so a five-page pick inserts one blank under its last page rather
+than five; the new page is not added to the strip's pick, and nothing scrolls to it; the blank
+is not marked as such anywhere in the file (there is no such thing); PdfCraft's flatten on
+insert is deliberately not copied, and a book that arrives with a deep tree keeps it; and the
+insert is not offered by the command palette, because PDFAR has no palette.
 
 ---
 

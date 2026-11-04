@@ -922,3 +922,104 @@ class ReversePages(Edit):
         if self.changes_nothing(count):
             return
         _reorder(doc, self._intended(count))
+
+
+#: The three geometry keys a ``/Page`` may state for itself or leave to its
+#: ``/Parent`` chain (the fourth inheritable, ``/Resources``, an empty dictionary
+#: on the sheet MuPDF creates — a blank page draws nothing, so it resolves
+#: nothing).  The insert hands each one over exactly as the neighbour states it,
+#: including "not stated here".
+_BLANK_GEOMETRY = ("MediaBox", "CropBox", "Rotate")
+
+
+@dataclass(frozen=True)
+class InsertBlankPage(Edit):
+    """Slide an empty sheet into the book at position *at* (0 = before the first).
+
+    The only page-tree ask that invents rather than rearranges: every number from
+    the gap up moves one step along, the new sheet has no past, and its geometry
+    belongs to nobody yet.  The three decisions, each measured first:
+
+    * **The splice is MuPDF's own.**  ``new_page(pno=at)`` files the sheet into
+      the ``/Kids`` of **the node that owns the slot** and re-derives ``/Count``
+      up the chain — measured on a split tree, where a blank inserted at 2 landed
+      inside the ancestor holding old page 2, not under the root.  PdfCraft's
+      ``rebuild`` (``crates/organize/src/lib.rs:168``) instead settle-and-flattens
+      the whole book for any insert; PDFAR keeps the producer's tree, because the
+      library lets it.
+    * **The blank wears the sheet below the gap.**  MuPDF writes ``/Rotate 0`` on
+      every page it creates, which beside an ancestor-turned book arrives upright
+      next to turned neighbours — and PdfCraft, which omits the key into a
+      flattened root that states nothing, arrives upright beside *sideways*
+      neighbours too.  Here the three geometry keys are copied from the pushed-
+      down sheet as **stated**: what it holds, the blank holds; what it leaves to
+      the ancestors, the blank leaves, in the very node it leaves them in.  Same
+      stated values, same ``/Parent`` chain — the two display alike as a matter of
+      resolution, not of arithmetic.  (At the end of the book there is no sheet
+      below the gap, and the one above is the last, which is also the node MuPDF
+      appends into.)
+    * **Nothing else needs repair.**  MuPDF re-aims ``/PageLabels`` under an
+      insert by itself — a range that starts at the pushed-down sheet follows it —
+      and outline destinations name page *objects*, so rows come back with the
+      sheets they point at.  The delete had to say both of those things itself;
+      the insert only has to not undo them, which it does not: it touches no
+      catalog key except through the library.
+
+    ``at`` counts gaps the way the strip numbers rows: the page that was at *at*
+    is the one the blank takes the number from, and ``at == page_count`` is the
+    end of the book.  A position outside ``0..count`` is refused before anything
+    is asked of MuPDF, which raises a library sentence for the same mistake.
+    """
+
+    at: int
+
+    scope = Scope.STRUCTURE
+    requires_assembly = True
+
+    @property
+    def changed(self) -> Optional[Tuple[int, ...]]:
+        """Every number from the gap upwards, which is not worth pretending to know.
+
+        The sheets keep their words — nothing on them was written — but each one
+        at or above the gap now wears the number of the sheet one step along, so
+        the only honest cache answer is :meth:`page_order`'s map, and the edit
+        cannot narrow it.
+        """
+        return None
+
+    def page_order(self, before_count: int) -> Tuple[int, ...]:
+        """The survivors in their new numbers, with ``-1`` where the blank stands.
+
+        The map is exact for every sheet that survives — nothing is lost to land
+        on a neighbour, because the step takes nothing away — and the invented
+        sheet is the one column no bookmark or reading position pointed at before
+        it was made.  Undoing the insert runs the same tuple backwards: a mark
+        made *on* the blank while it existed keeps the number it sits on, the
+        rule F10-4g found for a page whose past has gone.
+        """
+        return (tuple(range(self.at)) + (-1,)
+                + tuple(range(self.at, before_count)))
+
+    @property
+    def label(self) -> str:
+        return "Insert Blank Page"
+
+    def apply(self, doc: fitz.Document) -> None:
+        count = doc.page_count
+        if not 0 <= self.at <= count:
+            word = "page" if count == 1 else "pages"
+            raise EditError(
+                f"Insertion names gap {self.at}, and this book has {count} "
+                f"{word}: the gaps run from 0 to {count}")
+        below = self.at if self.at < count else count - 1
+        src = doc.load_page(below)
+        # The xref is read before the splice and the page object never again:
+        # ``new_page`` rebuilds the page tree, which frees every ``Page`` handle
+        # the library was holding — touching one afterwards dereferences a null
+        # MuPDF pointer.
+        src_xref = src.xref
+        rect = src.rect
+        page = doc.new_page(pno=self.at, width=rect.width, height=rect.height)
+        for key in _BLANK_GEOMETRY:
+            doc.xref_set_key(page.xref, key,
+                             doc.xref_get_key(src_xref, key)[1])

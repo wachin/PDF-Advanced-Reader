@@ -61,7 +61,8 @@ WHOLE = SEALED | fitz.PDF_PERM_MODIFY | fitz.PDF_PERM_ANNOTATE | \
     fitz.PDF_PERM_PRINT_HQ
 #: What the sealed book's mask looks like from the user password (F10-4x).
 SEALED_MASK = -3884
-PAGE_ACTIONS = ("act_page_rotl", "act_page_rotr", "act_page_delete")
+PAGE_ACTIONS = ("act_page_rotl", "act_page_rotr", "act_page_delete",
+                "act_page_insert")
 WINDOW_WIDTH = 1100
 WINDOW_HEIGHT = 760
 

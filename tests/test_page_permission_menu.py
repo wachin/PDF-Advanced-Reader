@@ -63,9 +63,11 @@ WINDOW_HEIGHT = 1700
 
 #: Everything ``_page_commands_menu`` puts up for a two-sheet pick of a six-sheet book.
 PICK_ITEMS = ["Rotate 2 Pages Left", "Rotate 2 Pages Right", "Reverse 2 Pages",
+              "Insert Blank Page",
               "Rotate All Pages Left", "Rotate All Pages Right", "Reverse All Pages"]
 
-PAGE_ACTIONS = ("act_page_rotl", "act_page_rotr", "act_page_delete")
+PAGE_ACTIONS = ("act_page_rotl", "act_page_rotr", "act_page_delete",
+                "act_page_insert")
 
 
 def protected_pdf(path, permissions, *, user=READER, owner=OWNER, pages=PAGES):
