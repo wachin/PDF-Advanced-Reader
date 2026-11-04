@@ -6,6 +6,7 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+import pymupdf as fitz
 
 from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtTest import QTest
@@ -14,6 +15,7 @@ from PyQt6.QtWidgets import (
     QToolButton, QToolTip,
 )
 
+from conftest import build_sample_pdf
 from pdfar import APP_NAME, __version__
 from pdfar.main import HIGHLIGHT_ROLE, MainWindow
 from pdfar.search import SearchHit
@@ -1099,3 +1101,158 @@ def test_view_mode_icons_exist_and_tint_dark(qapp, sample_pdf):
         win.close()
         win.deleteLater()
         qapp.processEvents()
+
+
+# ------------------------------------------------ opening a password-protected file
+
+
+@pytest.fixture
+def window(qapp):
+    """A shown MainWindow, torn down without asking about unsaved work."""
+    w = MainWindow()
+    w.show()
+    qapp.processEvents()
+    yield w
+    w._close_all_tabs(confirm=False)
+    w.close()
+    w.deleteLater()
+    qapp.processEvents()
+
+
+def _protected(path, *, user="reader", owner="someone-elses-password", pages=3):
+    """The sample book re-saved so that opening it needs *user*."""
+    build_sample_pdf(path, pages=pages)
+    doc = fitz.open(str(path))
+    staged = str(path) + ".enc"
+    doc.save(staged, encryption=fitz.PDF_ENCRYPT_AES_256, owner_pw=owner,
+             user_pw=user)
+    doc.close()
+    os.replace(staged, path)
+    return str(path)
+
+
+def _answer_prompt(monkeypatch, answer, ok=True):
+    """Feed the password dialog instead of showing it, and count the asks."""
+    from PyQt6.QtWidgets import QInputDialog
+
+    asked = []
+
+    def getText(*args, **kwargs):
+        asked.append(args[2])
+        return answer, ok
+
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(getText))
+    return asked
+
+
+def _boxes(monkeypatch):
+    """Collect what the window said through ``QMessageBox.critical``."""
+    said = []
+    monkeypatch.setattr(
+        QMessageBox, "critical",
+        staticmethod(lambda *a, **k: said.append(a[2])))
+    return said
+
+
+def _closings(monkeypatch):
+    """Which documents the window closed, in order.
+
+    The password paths all hand back a probe handle they opened themselves, and an
+    early ``return False`` is exactly where a MuPDF document gets forgotten.  Nothing
+    else in the suite can see that — there is no open-handle counter to read — so the
+    close is watched where it happens.
+    """
+    seen = []
+    real = fitz.Document.close
+
+    def watch(self, *args, **kwargs):
+        seen.append(self.name)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(fitz.Document, "close", watch)
+    return seen
+
+
+def test_a_protected_document_opens_with_the_password_it_was_handed(window,
+                                                                     qapp,
+                                                                     tmp_path):
+    """The password arrives with the call — a drag-and-drop, a recent file, a CLI arg.
+
+    Nothing here shows a dialog: the file is protected, the answer is known, and what has
+    to follow is a tab reading the restricted document.  The page box is asserted with it
+    because that number is read off the probe handle the window opens itself, and the
+    probe is authenticated first so that what is read from it comes from a document that
+    has been let in rather than one MuPDF has only half opened.
+    """
+    path = _protected(tmp_path / "sealed.pdf")
+    assert window.open_document(path, password="reader") is True
+    qapp.processEvents()
+    assert window.tabs.count() == 1
+    assert window.view.page_count == 3
+    assert window.page_spin.maximum() == 3
+    assert window.page_label.text() == "/ 3"
+    assert window.view.session.encryption is not None
+
+
+def test_the_password_is_asked_once_and_the_answer_opens_the_file(window, qapp,
+                                                                 tmp_path,
+                                                                 monkeypatch):
+    """One question, then the document — the dialog is not the whole password path.
+
+    Asking again after the reader has answered means opening the file a second time
+    from the top, and a protected file asks again every time it is opened.
+    """
+    path = _protected(tmp_path / "sealed.pdf")
+    asked = _answer_prompt(monkeypatch, "reader")
+    assert window.open_document(path) is True
+    qapp.processEvents()
+    assert asked == ["This PDF is protected.\nPassword:"]
+    assert window.tabs.count() == 1
+    assert window.view.session.password == "reader"
+
+
+def _tab_builds(monkeypatch):
+    """The documents the window builds, counted as it builds them."""
+    from pdfar import main as main_module
+
+    built = []
+    real = main_module.DocumentTab
+
+    def counting(*args, **kwargs):
+        built.append(args[0])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(main_module, "DocumentTab", counting)
+    return built
+
+
+def test_a_wrong_password_says_so_and_opens_no_tab(window, qapp, tmp_path,
+                                                  monkeypatch):
+    """Refused on the answer, not on the wreckage of a half-built document.
+
+    The probe handle is what the password is tried against, so a wrong one is turned
+    away before a tab, a thumbnail worker or a session exists — and the document opened
+    to ask is closed on the way out, which nothing else in this suite can see.
+    """
+    path = _protected(tmp_path / "sealed.pdf")
+    built = _tab_builds(monkeypatch)
+    _answer_prompt(monkeypatch, "not-it")
+    said = _boxes(monkeypatch)
+    closed = _closings(monkeypatch)
+    assert window.open_document(path) is False
+    assert window.tabs.count() == 0
+    assert not built, "no document was built in order to be refused"
+    assert said == ["Wrong password."]
+    assert closed == [path], "the document opened to ask is the one that gets closed"
+
+
+def test_cancelling_the_password_prompt_opens_nothing(window, qapp, tmp_path,
+                                                     monkeypatch):
+    """The reader changed their mind; the window stays as it was, holding nothing."""
+    path = _protected(tmp_path / "sealed.pdf")
+    asked = _answer_prompt(monkeypatch, "", ok=False)
+    closed = _closings(monkeypatch)
+    assert window.open_document(path) is False
+    assert asked, "the file is protected, so it had to ask"
+    assert window.tabs.count() == 0
+    assert closed == [path]

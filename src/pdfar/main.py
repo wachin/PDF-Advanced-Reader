@@ -2532,14 +2532,21 @@ class MainWindow(QMainWindow):
             return False
 
         if doc.needs_pass:
-            doc.close()
             if not password:
                 password, ok = QInputDialog.getText(
                     self, "Password", "This PDF is protected.\nPassword:",
                     QLineEdit.EchoMode.Password)
                 if not ok or not password:
+                    doc.close()
                     return False
-            return self.open_document(path, password=password)
+            # Authenticate here rather than opening the file again with the answer:
+            # a fresh handle reports ``needs_pass`` however good the password is, so
+            # re-entering this method re-asks it, and asking re-enters.  What the
+            # count below needs is a document that has been let in.
+            if not doc.authenticate(password):
+                doc.close()
+                QMessageBox.critical(self, "Open", "Wrong password.")
+                return False
 
         page_count = doc.page_count
         doc.close()
