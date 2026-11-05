@@ -63,7 +63,7 @@ from PyQt6.QtWidgets import QApplication, QMessageBox
 from test_page_labels import PAGES, ROMAN_THEN_ARABIC, numbered_pdf, printed
 
 from pdfar.main import MainWindow
-from pdfar.page_labels import PageSpinBox, label_for, resolve_label
+from pdfar.page_labels import PageSpinBox, label_for, longest_label, resolve_label
 from pdfar.pages import DeletePages
 
 #: The same six sheets, said the way a reader reading them would say them.
@@ -828,3 +828,110 @@ def test_the_reflow_line_names_the_sheet_too(window, book):
         assert "Reflow" in window.status_right.text()
     finally:
         window.view.reflow_mode = False
+
+
+# ------------------------------------------------------------- F10-4bc
+# The page box is sized to the longest label the document can produce, rather than
+# to a constant.  A fixed width clipped long names — halving the width to 48 px left
+# the whole suite green, which is how the constant was discovered — and this step
+# sizes it the way Okular sizes its location bar (part/minibar.cpp:99-108).
+
+
+def test_the_page_box_is_wide_enough_for_the_longest_label(window, book, tmp_path):
+    """A long prefix forces the box wider than the 96 px it started at.
+
+    ``/P (Appendix A-1) >>`` names every sheet ``Appendix A-1``, so the box shows
+    ``Page Appendix A-1`` and must be wider than the 96 px it was sized to before
+    F10-4bc.  The fixture is rewritten in place, so this also exercises the width
+    being applied when the document the reader is on changes.
+    """
+    from PyQt6.QtGui import QFontMetrics
+    src = book
+    dst = str(tmp_path / "appendix.pdf")
+    import shutil
+    shutil.copy(src, dst)
+    doc = fitz.open(dst)
+    doc.set_page_labels([{"startpage": 0, "prefix": "Appendix A-1",
+                          "firstpagenum": 0, "count": PAGES}])
+    # Save to a different path to avoid "save to original must be incremental"
+    out = str(tmp_path / "appendix_out.pdf")
+    doc.save(out)
+    doc.close()
+    assert window.open_document(out)
+    settle(window)
+
+    fm = QFontMetrics(window.page_spin.font())
+    longest = longest_label(fitz.open(out), font_metrics=fm)
+    expected = window._page_box_width_for(longest)
+    assert window.page_spin.width() >= expected
+    assert window.page_spin.width() > 96
+    assert window.page_spin.text() == f"Page {longest}"
+
+
+def test_a_plain_book_keeps_the_default_width(window, plain):
+    """A book that numbers by position leaves the box at its default width."""
+    assert window.open_document(plain)
+    settle(window)
+    assert window.page_spin.width() == 96, "no numbering means no resize"
+
+
+def test_a_numbered_book_shrinks_back_on_close(window, book, tmp_path):
+    """Closing a long-label book returns the box to its default width."""
+    from PyQt6.QtGui import QFontMetrics
+    src = book
+    dst = str(tmp_path / "appendix.pdf")
+    import shutil
+    shutil.copy(src, dst)
+    doc = fitz.open(dst)
+    doc.set_page_labels([{"startpage": 0, "prefix": "Appendix A-1",
+                          "firstpagenum": 0, "count": PAGES}])
+    out = str(tmp_path / "appendix_out.pdf")
+    doc.save(out)
+    doc.close()
+    assert window.open_document(out)
+    settle(window)
+
+    fm = QFontMetrics(window.page_spin.font())
+    longest = longest_label(fitz.open(out), font_metrics=fm)
+    assert window.page_spin.width() > 96
+    assert window.page_spin.width() >= window._page_box_width_for(longest)
+    window._close_all_tabs(confirm=False)
+    settle(window)
+    assert window.page_spin.width() == 96
+
+
+def test_the_page_box_wider_for_appendix_than_for_body(window, book, plain, tmp_path):
+    """The width follows the document in front of the reader: two books, two widths.
+
+    Open a long-prefix book, then a plain one, then the long-prefix book again: the
+    box must grow for the appendix and shrink back for the plain book, because the
+    width is re-derived for whichever document the reader is on.
+    """
+    from PyQt6.QtGui import QFontMetrics
+    src = book
+    dst = str(tmp_path / "appendix.pdf")
+    import shutil
+    shutil.copy(src, dst)
+    doc = fitz.open(dst)
+    doc.set_page_labels([{"startpage": 0, "prefix": "Appendix A-1",
+                          "firstpagenum": 0, "count": PAGES}])
+    out = str(tmp_path / "appendix_out.pdf")
+    doc.save(out)
+    doc.close()
+    assert window.open_document(out)
+    settle(window)
+
+    fm = QFontMetrics(window.page_spin.font())
+    longest = longest_label(fitz.open(out), font_metrics=fm)
+    appendix_width = window.page_spin.width()
+    assert appendix_width > 96
+    assert appendix_width >= window._page_box_width_for(longest)
+
+    assert window.open_document(plain)
+    settle(window)
+    assert window.page_spin.width() == 96
+
+    window._close_all_tabs(confirm=False)
+    assert window.open_document(out)
+    settle(window)
+    assert window.page_spin.width() == appendix_width

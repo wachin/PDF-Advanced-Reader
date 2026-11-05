@@ -18,8 +18,8 @@ import time
 from PyQt6.QtCore import QEvent, QObject, QPoint, QSettings, QSize, QThread, QTimer, Qt
 from PyQt6.QtGui import (
     QAction, QActionGroup, QCloseEvent, QColor, QDragEnterEvent,
-    QDropEvent, QIcon, QKeySequence, QPainter, QPalette, QPixmap, QShortcut,
-    QTextDocument,
+    QDropEvent, QFontMetrics, QIcon, QKeySequence, QPainter, QPalette,
+    QPixmap, QShortcut, QTextDocument,
 )
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
@@ -42,7 +42,7 @@ from .bookmarks import settings_key_for
 from .edits import ASSEMBLY_NOTE, EditError
 from .i18n import I18n
 from .icons import asset_path as _asset_path, tinted_icon
-from .page_labels import PageSpinBox, label_for
+from .page_labels import PageSpinBox, label_for, longest_label
 from .page_numbers import (
     EraseSettings, PageNumbersPanel, PageNumberSettings, erase_copy,
     erased_copy_path, numbered_copy_path, stamp_copy,
@@ -923,7 +923,7 @@ class MainWindow(QMainWindow):
         self.page_spin.setMinimum(1)
         self.page_spin.setMaximum(1)
         self.page_spin.setPrefix("Page ")
-        self.page_spin.setFixedWidth(96)
+        self.page_spin.setFixedWidth(self._page_box_width_for(""))
         # Asked for, never held: a session swaps its Document when an edit is undone, so
         # a pointer kept here would be a closed file by the time the box next renders.
         self.page_spin.set_source(
@@ -1308,6 +1308,40 @@ class MainWindow(QMainWindow):
 
     def _page_spin_edited(self) -> None:
         self._goto(self.page_spin.value() - 1)
+
+    def _page_box_width_for(self, longest: str) -> int:
+        """Width the page box needs to show ``Page `` + *longest*.
+
+        Measured with the box's own font (the font it will actually render in),
+        with a little breathing room so the box never clips a live label.  If
+        *longest* is empty the book numbers every sheet by position and the box
+        keeps the default width.  The 11 px floor is the width the box had before
+        this step and is what ``tests/test_page_label_display.py``'s one-paragraph
+        note says is not held: anything wider is only wider because a book asked
+        for it.
+        """
+        if not longest:
+            return 96
+        prefix = self.page_spin.prefix()
+        full = prefix + longest
+        w = QFontMetrics(self.page_spin.font()).horizontalAdvance(full)
+        return max(int(w) + 11, 96)
+
+    def _layout_page_box(self) -> None:
+        """Size the page box for the document the reader is on, if any.
+
+        F10-4bc: ``/PageLabels`` numbers positions, so a book can call its fifth
+        sheet ``Appendix A-1`` and the box that says it must be wide enough for
+        ``Page Appendix A-1`` or it clips.  The widest label in the document is
+        walked once, measured in the box's font, and applied; nothing is written
+        to the file.  A book that closes leaves the box at its default width.
+        """
+        if self.view is None or self.view.session is None:
+            self.page_spin.setFixedWidth(96)
+            return
+        fm = QFontMetrics(self.page_spin.font())
+        longest = longest_label(self.view.session.doc, font_metrics=fm)
+        self.page_spin.setFixedWidth(self._page_box_width_for(longest))
 
     def _zoom_in(self) -> None:
         if not self.view:
@@ -2746,6 +2780,7 @@ class MainWindow(QMainWindow):
         self.page_spin.setValue(1)
         self.page_label.setText(f"/ {page_count}")
 
+        self._layout_page_box()
         self._set_fit("width")
         # Restore saved view state for this document (after initial fit mode)
         self._restore_tab_state(tab.view, path)
@@ -3039,6 +3074,7 @@ class MainWindow(QMainWindow):
         self._cancel_search()
         self.page_spin.setMaximum(1)
         self.page_spin.setValue(1)
+        self.page_spin.setFixedWidth(96)
         self.page_label.setText("/ 0")
         self.zoom_label.setText("100%")
         self.zoom_label.setToolTip("Zoom level")

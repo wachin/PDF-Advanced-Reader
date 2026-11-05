@@ -89,6 +89,42 @@ def _rules(doc: fitz.Document) -> List[dict]:
     return sorted(doc.get_page_labels(), key=lambda rule: rule["startpage"])
 
 
+def longest_label(doc: fitz.Document, font_metrics=None) -> str:
+    """The visually widest name the catalog gives any sheet, or the empty string.
+
+    ``/PageLabels`` numbers *positions*, so a book's longest label is the widest
+    thing its page box will ever have to show (plus the ``Page `` prefix), and the
+    box must be wide enough for it on every sheet.  This is the F10-4bc half of
+    **F10-4v**: the catalog is walked once and the widest answer remembered, not a
+    ``get_label()`` per sheet.  An empty result means the book numbers by position
+    everywhere and no auto-size is needed — the box keeps its default width.
+
+    If *font_metrics* is provided (a ``QFontMetrics``), visual width is used.
+    Otherwise, character length is used as a fallback.  When multiple labels share
+    the maximum width, the **last** one (highest page index) is returned, so that
+    the page box is sized for the label that actually appears at the end of the
+    document.
+    """
+    rules = _rules(doc)
+    if not rules:
+        return ""
+
+    if font_metrics is not None:
+        # Use visual width; tiebreaker: higher slot index wins (last page)
+        def measure(slot: int) -> tuple:
+            label = _name(rules, slot)
+            return (font_metrics.horizontalAdvance(label), slot)
+        best_slot = max(range(doc.page_count), key=measure)
+        return _name(rules, best_slot)
+
+    # Fallback: character length; tiebreaker: higher slot index wins
+    def measure_fallback(slot: int) -> tuple:
+        label = _name(rules, slot)
+        return (len(label), slot)
+    best_slot = max(range(doc.page_count), key=measure_fallback)
+    return _name(rules, best_slot)
+
+
 def _name(rules: List[dict], slot: int) -> str:
     """What the ranges call sheet *slot*, or its position where they say nothing.
 

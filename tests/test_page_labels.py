@@ -64,6 +64,15 @@ from pdfar.save import save_document
 from test_page_move import numbers
 
 from pdfar.pages import DeletePages, MovePages, ReversePages
+from pdfar.page_labels import longest_label
+
+# Visual width measurement for longest_label tests (F10-4bc)
+@pytest.fixture(scope="session")
+def font_metrics(qapp):
+    """QFontMetrics for measuring label widths in tests."""
+    from PyQt6.QtGui import QFont, QFontMetrics
+    font = QFont("DejaVu Sans", 8)
+    return QFontMetrics(font)
 
 #: Six sheets: two of roman front matter, four of arabic body.
 PAGES = 6
@@ -101,6 +110,12 @@ def numbered_pdf(path, ranges=TWO_RANGES, pages=PAGES):
 def book(tmp_path):
     """A six-sheet book with a numbering whose boundaries can move."""
     return numbered_pdf(str(tmp_path / "numbered.pdf"))
+
+
+@pytest.fixture
+def plain(tmp_path):
+    """The same six sheets with nothing written in the catalog."""
+    return build_sample_pdf(str(tmp_path / "plain.pdf"), pages=PAGES)
 
 
 def printed(doc):
@@ -617,3 +632,100 @@ def test_a_bookmark_follows_its_sheet_while_the_number_stays_with_the_slot(book,
             "the number stayed with the slot, so the sheet's own changed")
     finally:
         session.close()
+
+
+# ---------------------------------------------------------------- F10-4bc
+# The longest name a book carries — the unit of measurement for the page box's
+# width, sized to the longest label the document can produce (Okular sizes the
+# location bar the same way: part/minibar.cpp:99-108).
+
+
+def test_longest_label_returns_the_widest_name_the_book_carrying_one(book, font_metrics):
+    """The longest label a book carries is the widest thing its page box must show.
+
+    The box renders ``Page `` + the name, so this is the longest *name* alone: the
+    box's own prefix is applied by the code that sizes it (main.py, F10-4bc).
+    """
+    longest = longest_label(fitz.open(book), font_metrics=font_metrics)
+    assert longest == "4", "the body's last sheet is the longest in i ii 1 2 3 4"
+
+
+def test_longest_label_handles_a_long_prefix(tmp_path, font_metrics):
+    """A prefix-only range calls every sheet it covers the same long name.
+
+    ``/P (Appendix A-1) >>`` names all six sheets ``Appendix A-1``, so that is the
+    longest thing the page box will ever have to carry — and the reason a fixed
+    96 px is no longer enough on such a book.
+    """
+    path = str(tmp_path / "appendix.pdf")
+    build_sample_pdf(path, pages=PAGES)
+    doc = fitz.open(path)
+    doc.set_page_labels([{"startpage": 0, "prefix": "Appendix A-1",
+                          "firstpagenum": 0, "count": 6}])
+    doc.save(path + ".tmp")
+    doc.close()
+    os.replace(path + ".tmp", path)
+
+    longest = longest_label(fitz.open(path), font_metrics=font_metrics)
+    assert longest == "Appendix A-1"
+
+
+def test_longest_label_returns_empty_for_no_numbering(plain, font_metrics):
+    """A book that numbers by position has nothing to auto-size for."""
+    longest = longest_label(fitz.open(plain), font_metrics=font_metrics)
+    assert longest == ""
+
+
+def test_longest_label_returns_the_position_when_it_is_wider(tmp_path, font_metrics):
+    """Where the catalog says nothing, the position is the name — and it wins.
+
+    A single roman range starting at sheet 2 names sheets 2,3,4,5 as i, ii, iii, iv
+    (the PDF stores only the startpage; the range runs to the end).  Sheets 0 and 1
+    fall back to their positions ``1`` and ``2``.  In DejaVu Sans the widest label
+    is ``iv`` (10 px), so that is what the page box must accommodate.
+    """
+    path = str(tmp_path / "roman.pdf")
+    build_sample_pdf(path, pages=PAGES)
+    doc = fitz.open(path)
+    doc.set_page_labels([{"startpage": 2, "style": "r",
+                          "firstpagenum": 1, "count": 3}])
+    doc.save(path + ".tmp")
+    doc.close()
+    os.replace(path + ".tmp", path)
+
+    longest = longest_label(fitz.open(path), font_metrics=font_metrics)
+    assert longest == "iv"
+
+
+def test_longest_label_respects_the_style_that_counts_from_zero(tmp_path, font_metrics):
+    """``/S /A`` over one sheet is ``A``, not ``B``.
+
+    If the walk used the wrong delta it would report ``B`` when the box will show
+    ``A``, and size the box for a string that is not written anywhere.  With two
+    consecutive ``/S /A`` ranges (the second starting at sheet 1) the labels are
+    A, A, B, C, D, E for six sheets.  All uppercase letters have the same visual
+    width; the tiebreaker picks the last maximum at sheet 4 (``D``).
+    """
+    path = str(tmp_path / "alpha.pdf")
+    build_sample_pdf(path, pages=PAGES)
+    doc = fitz.open(path)
+    doc.set_page_labels([{"startpage": 0, "style": "A",
+                          "firstpagenum": 1, "count": 1},
+                         {"startpage": 1, "style": "A",
+                          "firstpagenum": 1, "count": 6}])
+    doc.save(path + ".tmp")
+    doc.close()
+    os.replace(path + ".tmp", path)
+
+    longest = longest_label(fitz.open(path), font_metrics=font_metrics)
+    assert longest == "D"
+
+    with fitz.open(path) as back:
+        assert printed(back) == ["A", "A", "B", "C", "D", "E"]
+
+
+def test_longest_label_is_constant_across_reopens(book, font_metrics):
+    """The same catalog produces the same longest label, every time."""
+    longest_first = longest_label(fitz.open(book), font_metrics=font_metrics)
+    longest_again = longest_label(fitz.open(book), font_metrics=font_metrics)
+    assert longest_first == longest_again
