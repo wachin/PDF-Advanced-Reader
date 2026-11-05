@@ -42,6 +42,7 @@ from .bookmarks import settings_key_for
 from .edits import ASSEMBLY_NOTE, EditError
 from .i18n import I18n
 from .icons import asset_path as _asset_path, tinted_icon
+from .page_labels import PageSpinBox, label_for
 from .page_numbers import (
     EraseSettings, PageNumbersPanel, PageNumberSettings, erase_copy,
     erased_copy_path, numbered_copy_path, stamp_copy,
@@ -918,11 +919,15 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
 
         # Page navigation
-        self.page_spin = QSpinBox()
+        self.page_spin = PageSpinBox()
         self.page_spin.setMinimum(1)
         self.page_spin.setMaximum(1)
         self.page_spin.setPrefix("Page ")
         self.page_spin.setFixedWidth(96)
+        # Asked for, never held: a session swaps its Document when an edit is undone, so
+        # a pointer kept here would be a closed file by the time the box next renders.
+        self.page_spin.set_source(
+            lambda: self.view.session.doc if self.view is not None else None)
         self.page_spin.editingFinished.connect(self._page_spin_edited)
         tb.addWidget(self.page_spin)
 
@@ -3749,16 +3754,22 @@ class MainWindow(QMainWindow):
         if not self.view:
             self.status_right.setText("")
             return
+        # The toolbar box is on screen beside this line and says the same thing about the
+        # same sheet, so the name is read from the same function rather than re-derived:
+        # a window that printed "Page 1" up top and "Page 3/6" at the bottom would be
+        # arguing with itself.  The count after the slash stays the book's.
+        position = (f"Page {label_for(self.view.session.doc, self.view.current_page)}"
+                    f"/{self.view.page_count}")
         sel = self.view.selected_text()
         extra = f"   |   {len(sel)} chars selected" if sel else ""
         if self.view.reflow_mode:
             self.status_right.setText(
-                f"Page {self.view.current_page + 1}/{self.view.page_count}   |   "
+                f"{position}   |   "
                 f"Reflow — text {int(round(self.view.reflow_font_scale * 100))}%"
                 f"{extra}")
             return
         self.status_right.setText(
-            f"Page {self.view.current_page + 1}/{self.view.page_count}   |   "
+            f"{position}   |   "
             f"{_format_zoom(self.view.zoom)}   |   "
             f"{'Fit ' + self.view.fit_mode.title() if self.view.fit_mode != 'none' else 'Manual'}"
             f"{extra}")

@@ -1729,8 +1729,9 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       the walk changed something, the rule the outline prune already runs by, so a
       numbering the pick did not break keeps the producer's bytes and a plain book is
       never given a `/PageLabels`.
-- [ ] **F10-4w** — *A numbering that starts past the front of the book is left there.*
-      MuPDF's re-aim shifts every range **after the first entry it reads** and leaves that
+- [x] **F10-4w** — *A numbering that starts past the front of the book is left there, and
+      the reader over it is shown the position.*  MuPDF's re-aim shifts every range
+      **after the first entry it reads** and leaves that
       first entry where it is — harmless on a legal numbering, whose first entry sits at
       slot 0 and has nowhere to go, and wrong on one that does not: measured on
       `1 << /S /r /St 1 >> 4 << /S /D /St 40 >>` (roman over sheets 1-3, arabic over 4-5,
@@ -1742,22 +1743,42 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       repairs nothing here and the shape is pinned as a before picture by
       `test_a_numbering_that_starts_past_the_front_is_left_there_by_the_delete`.
       PdfCraft answers an uncovered slot with its **position**
-      (`crates/organize/src/labels.rs:263-272`), which is a reading decision with the
-      reader-visible half of F10-4v attached, so it is not folded into a page-tree step.
-- [ ] **F10-4v** — *The reader is shown a position where the file gives that slot a
-      label.*  `/PageLabels` is never read anywhere in `src/pdfar/` — no `get_label()`
-      call exists — and the toolbar's `page_label` widget prints a positional `/ N`, so a
-      book whose own catalog calls its third sheet 103, or `A-5`, or `ii`, is shown as
-      page 3.  Okular treats it as a first-class part of the reading position: the
-      location bar substitutes the label when it differs from the position
-      (`part/minibar.cpp:90-106`), the completion map resolves a typed label back to a
-      page (`:333-339`), and the annotations model prints
+      (`crates/organize/src/labels.rs:263-272`), and that is the answer **F10-4v** now
+      ships: the shape stays a before picture for the delete, and what the reader is *shown*
+      over it is `Page 1` — never a blank, never an `IndexError`, and never a numbering
+      invented for a sheet the producer left out.  Closed as a reading decision rather than
+      as a repair, which is why it is not folded into a page-tree step.
+- [x] **F10-4v** — *The reader is shown the name the file gives the sheet, and the position
+      where it gives none.*  `/PageLabels` had never been read anywhere in `src/pdfar/` — no
+      `get_label()` call existed — and the toolbar's page box printed a positional `Page N`
+      with a positional `/ N` beside it, so a book whose own catalog calls its third sheet
+      103, or `A-5`, or `ii`, was shown as page 3.  Okular treats it as a first-class part of
+      the reading position: the location bar substitutes the label when it differs from the
+      position (`part/minibar.cpp:90-106`) and sizes itself by the longest label in the
+      document (`:99-108`), the completion map resolves a typed label back to a page
+      (`:333-339`), and the annotations model prints
       *"Page %1 (%2)"* with the label and the number together
       (`part/annotationmodel.cpp:321-322`).  F10-4q settled what a reorder does to the
-      numbering; this is the other half of the same fact — the numbering is real and
-      PDFAR does not display it — and it is a display ask with its own jump-to-label,
-      status-bar and print-range questions to answer, so it is not folded into a
-      page-tree step.
+      numbering; this is the other half of the same fact — the numbering is real and PDFAR did
+      not display it.  Closed by `src/pdfar/page_labels.py`: the box renders the catalog's own
+      name for the sheet it holds, the status line names the same sheet the same way, a name
+      typed into the box is resolved back to the sheet that carries it, and where the catalog
+      says nothing the position is shown — **F10-4w**'s answer, which is PdfCraft's too
+      (`crates/organize/src/labels.rs:263-272`).  What stays positional is written down in
+      ### F10-4v: the count beside the box, the sidebar's rows, the search panel's rows, and
+      the box's fixed width, which is the one Okular rule not copied and is now **F10-4bc**.
+- [ ] **F10-4bc** — *The page box is 96 px whatever the book is called.*  Okular measures
+      every label in the document and, when any of them is longer than the page count, sizes
+      the location bar by the longest (`part/minibar.cpp:99-108`) — the rule that cannot
+      clip.  PDFAR's width is a constant, and the measurement that justified it says nothing
+      about a numbering with a long prefix: the widest name a 540-sheet roman/arabic book
+      produces is `Page ccxxxviii` at 71 px of the line edit's 76 px, while `/P (Appendix`
+      ` section )` over the same sheets would not fit.  A mutant proves the number is
+      unheld: halving the width to 48 px leaves all 2772 tests green.  The ask is to size the
+      box from `Document.get_page_labels()` the way Okular sizes its bar; it is not folded
+      into F10-4v because it is a widget-sizing decision with its own measurement, and the
+      print-range half of the same question waits for a print dialog that does not exist yet
+      (`main.py:1954` answers "not yet implemented").
 - [x] **F10-4x** — *The **assemble** permission asked before a page-tree edit, as PdfCraft
       gates `DeletePages` / `MovePages` / `RotatePages` on the document's `/P` flags.*
       ISO 32000-1 §7.6.4.2 Table 22 bit 11 is the right to insert, delete and rotate pages
@@ -8080,6 +8101,167 @@ is not here either, because writing the answer to a file of its own needs a new-
 this application does not have yet, and it carries the catalog loss F10-4q leaves open; a book
 whose pages differ in size duplicates faithfully rather than flattening, so a copy keeps its own
 box and the tree keeps its depth; and the command is not in a palette, because PDFAR has none.
+
+### F10-4v The name the file wrote — [x] Implemented
+
+**Task**: the display half of the fact F10-4q found and F10-4u repaired.  A catalog can say what
+its own sheets are called: `/PageLabels` is a list of ranges over *positions* — "from sheet 0,
+roman, from 1; from sheet 2, arabic, from 101" — and PDFAR had never read it.  No `get_label()`
+call existed anywhere in `src/pdfar/`, so a thesis whose body starts at 101 was shown as "Page 3"
+and a manual numbered `i, ii, 1, 2` was shown as `1, 2, 3, 4` in the one place the reader looks to
+find out where they are.  Okular treats the name as part of the reading position rather than as
+decoration, and its three routes map onto this ask's three questions: the location bar substitutes
+the label when it differs from the position (`part/minibar.cpp:90-106`), a name typed there is
+resolved back to a page (`:333-339`), and where both numbers matter it prints both
+(`part/annotationmodel.cpp:321-322` — "Page 4 (ii)").
+
+**Measured before it was chosen**, against MuPDF 1.28.2 and PyQt6 6.8.  `Page.get_label()` answers
+a **string**, not the `(number, text)` pair its docstring describes, and costs **110 µs** a call
+because it re-reads and re-parses the catalog every time: 86 ms to walk the 540-sheet book.  One
+`Document.get_page_labels()` read plus the library's own `utils.construct_label` is the same
+answer 25× cheaper — **3.45 ms** for the same walk — and roman is not re-written here, so the only
+arithmetic copied from underneath `get_label_pno` is the one rule that is easy to get wrong: `/S /a`
+and `/S /A` enumerate from **zero** (`/S /A` over one sheet is `A`, not `B`) and every other style
+counts from the number its range starts at.  That rule is not trusted; a parametrized case holds
+the two answers equal sheet by sheet over sixteen raw `/Nums` bodies, including the shapes a setter
+would normalise and a producer may not: `D`, `r`, `R`, `a`, `A`, `/S /None`, a prefix with no style,
+ranges listed out of order, `/St 0`, `/St -5` and `/St 999999999999`.  The odd starts are the reason
+nothing here bounds the number the way PdfCraft does at 32 bits and at 1,024 UTF-8 bytes
+(`crates/organize/src/labels.rs:263-272`, `crates/cos/src/page_labels.rs:14,19`): MuPDF formats all
+three without complaint, and a limit invented on top of a library answer is a limit nobody asked for.
+
+**Three shapes answer nothing, and the reader is shown the position.**  A book with no
+`/PageLabels` and a range written `/S /None` with no prefix both answer `''` — measured on each —
+and a blank in the toolbar reads as a crash.  And for a slot **below every range** the library
+raises `IndexError: list index out of range` despite both docstrings promising an empty string:
+**F10-4w**'s shape, the one `delete_page(0)` leaves behind on
+`1 << /S /r /St 1 >> 4 << /S /D /St 40 >>`.  PdfCraft answers an uncovered slot with its position
+and an empty label with its position, in the same three lines
+(`crates/organize/src/labels.rs:263-272`), and its lenient `iter()` does the same when a label
+cannot be formatted at all (`:275-278`); Okular's inspector carries the same fallback in the field's
+own doc comment — "Page label (`/PageLabels`), falling back to the 1-based page number"
+(`crates/render/src/inspect.rs:220-221`) — and *says so* when the tree is unusable
+(`:844-846`, "Page labels were skipped … using physical page numbers").  PDFAR takes the same
+answer and, with it, closes **F10-4w as a reading decision**: the numbering is never repaired to
+make the question go away, the shape stays a before picture for the delete, and what the reader is
+shown over it is `Page 1`.  A prefix that carries no number — `/P (sec )` with no `/S` — is not a
+gap in one: it answers `'sec '`, it is shown exactly that, and every sheet it covers is called the
+same thing, so the first of them is where a typed name goes.
+
+**The library's own inverse lookup is refused, on measurement.**  `Document.get_page_numbers(label)`
+is "which sheet is called X", and on this MuPDF it raises the same `IndexError` from inside
+`validate` on the first sheet of an uncovered book, and resolves names against `get_label` rather
+than against what the display shows.  Either half is enough to reject it: a sheet rendered as
+`Page 1` would be unreachable by typing `1`.  So `resolve_label` walks the sheets through the same
+`_name` the box renders with, and returns the first slot that answers to the text plus whether any
+name merely *begins* with it — both out of one walk, because both are asked while the reader is
+still typing and `i` is on its way to `iii`.
+
+**The widget is the hard half, because a box whose text is not its value is not what `QSpinBox` was
+built for.**  Four facts, each measured, each pinned:
+
+* Qt calls the subclass's `textFromValue` **from the base constructor**, before `__init__` has
+  assigned anything — the first draft died on `AttributeError` — so the document arrives through a
+  class attribute the instance later overrides.
+* `validate` and `valueFromText` are handed the **whole line-edit text** (`'Page 4'`) and not the
+  bare typing on this Qt; a `valueFromText` that compared names to its argument as given never
+  matched one and sent the reader to the position instead of the sheet they asked for.  Both forms
+  are stripped, and both are tested.  A `validate` that recognised only the bare form *refused a
+  valid label* and the box quietly kept the old page.
+* `setValue` with the value it already holds **still re-renders** the text.  That is the whole
+  refresh an edit needs, because a delete above the reader changes what the sheet is *called* and
+  not which sheet it is — and every one of the five existing update sites already calls
+  `setMaximum` and `setValue`, some of them with the signals blocked, which is why the tooltip is
+  written from the render hook rather than from `valueChanged`.
+* The same render hook is called by Qt to **sample how wide the widget has to be**: measured, a
+  layout pass walked a dozen other sheets' names through it and left the tooltip describing a page
+  nobody was on.  It is therefore written only for the value the box holds, and a test says so.
+
+The document is **asked, not held** — `DocumentSession._adopt` swaps `self.doc` for a clone on
+undo, so a pointer kept by the widget would be a closed file by the time the box next renders; the
+undo case asserts the swap really happened before it asserts the name.  And a name that is also a
+number resolves as the **name**: on a book whose body starts at 40, `40` typed is the sheet labelled
+40, not the fortieth sheet, because it is what the reader sees and what they typed, and the position
+it collides with is the number the box would have shown had the file said nothing.  (Okular never
+faces the collision: it keeps numeric labels out of its completion list — `part/minibar.cpp:336-340`
+— which is a different answer to a different question.)
+
+**The status line is the same sentence in a second place.**  `Page 3/6 | 172.9% | Fit Width` sits
+at the bottom of the same window as the box, so it prints the name too, from one expression shared
+by both of its branches — plain and reflow — which is why one pair of tests covers the two of them.
+The count after the slash stays the book's: a total is nobody's name, and `/ 6` is pinned as
+positional on purpose.
+
+**Tests**: 55 cases in the new `tests/test_page_label_display.py`: the reading rule (no numbering,
+the file's own names, the uncovered slot, the empty label, the prefix-only range, the odd starts,
+what a delete does to the names, and the sixteen-way equality with the library); the name typed
+back (shared names, a name the book does not carry, and a case that pins *why*
+`get_page_numbers` is refused); the widget (both text forms, the collision, the refresh, the
+tooltip's exact sentence, the layout probe, a box pointed at another book, and a box with no
+document at all); and the real window (the toolbar reads the book, turning pages walks `i ii 1 2 3
+4`, a delete above the reader renames the sheet without moving anybody, undo after the document
+swap, the count beside the box, typing a name moves the reader, F10-4w shows a position, closing
+leaves no name behind, a second book cannot inherit the first's names, and the status line agrees
+with the box in both of its branches).  Nothing existing had to be widened: the two suites that
+assert status-line text (`test_main.py:415`, `test_reflow.py:844`) assert the zoom and the text
+size, and both still pass unchanged.
+
+**Suite**: 2772 passed, three consecutive runs on the final tree (212.07 / 209.87 / 208.93 s)
+against F10-4bb's 229.68 / 245.08 / 217.50 s — the fifty-five over its 2717 are exactly this step's
+cases.  Ruff unchanged at 7, all seven in files this step did not touch.  mypy **568** in 17 files
+against the same tree's HEAD at **566**: the two added lines are both `page_labels.py:74`, the house
+`import-untyped` + `no-redef` pair every module that imports `fitz` under a try/except has always
+raised (`pages.py:30` is the same two lines), and no new kind.
+
+**Mutations**: **twenty-six mutants, twenty-five killed** against
+`tests/test_page_label_display.py` (the wiring mutants also against the label, main, tabs, delete
+and reading-position suites): the alphabet counting from one, the ranges read in the order they were
+written, the *first* range that reaches a sheet naming it, a sheet below every range shown nothing,
+the start the file asks for ignored, an empty answer treated as a name, the position counted from
+zero, the last sheet never asked, a sheet found by name reporting it was not, the "growing" test
+reversed, typing nothing meaning the front of the book, the box naming the sheet one below the one
+it holds, the tooltip following every render, the tooltip written when the name *is* the number, the
+box keeping its own word in front of the typing, a name still being typed refused, anything at all
+acceptable, a typed number read as a position first, the document remembered rather than asked,
+pointing the box at a book leaving the old name up, a changed numbering leaving the text alone, the
+box being a plain `QSpinBox` again, never being told which book to read, losing the word *Page*, and
+the status line keeping the position.  One survivor: **halving the box's width to 48 px leaves the
+whole suite green** — the width is a measured choice (71 px of 76 px for the widest name this book
+produces) and no test holds a pixel, which is why it is now **F10-4bc** rather than a silent fact.
+Both sources came back byte-identical.
+
+**Performance**: the read is one `get_page_labels()` (71-120 µs) and a sort over a dozen ranges, so
+naming the sheet under the eyes costs what the catalog read costs — **18.7 µs** on a six-sheet book,
+**111.1 µs** on the 540-sheet one, against **135.2 µs** for the library's own `get_label()` on the
+same sheet.  The status line goes from **2.4 µs** to **150.3 µs** on the big book, once per page
+turn, zoom or selection change; the walk a *typed* name needs is the expensive one — **3.45 ms** for
+all 540 sheets, against 86 ms through `get_label()` — and it runs on Enter, not on every keystroke.
+
+**Verified by eye**: the real window offscreen, toolbar grab and status grab paired —
+`1-toolbar-roman.png` / `1b-status-roman.png` (*Page ii* and *Page ii/6 | 172.9% | Fit Width*),
+`2-toolbar-arabic.png` (the body starting at *Page 101*), `3-toolbar-typing.png` /
+`3b-toolbar-typed.png` (*104* typed, then the reader on sheet 6 with the tooltip moved with it),
+`4-toolbar-huge.png` / `4b-status-huge.png` (*Page cxii* and *Page cxii/540* on the 540-sheet book —
+the widest name it can produce is `Page ccxxxviii` at 71 px of the line edit's 76 px, and nothing is
+clipped), `5-toolbar-plain.png` / `5b-status-plain.png` (a plain book reading exactly what it read
+before), `6-toolbar-front.png` (**F10-4w**'s unnamed front sheet shown as *Page 1*),
+`6b-toolbar-forty.png` / `6c-status-forty.png` (*Page 40* and *Page 40/6*), `7-window-numbered.png`
+(the whole window, so the box is seen in the bar it lives in), and `8-toolbar-empty.png` /
+`9-toolbar-after-close.png` (no document, and a closed book, both reading *Page 1* with no tooltip
+behind).  All fifteen under `/tmp/f104v/shots/`.
+
+**What is not here**: the numbering is **read and never written** — PdfCraft's
+`set_page_label_ranges` (`crates/organize/src/lib.rs:36`) is an editor surface PDFAR does not have,
+so a reader cannot renumber a book, only be shown the book's own numbers; the sidebar's annotation
+rows and the search panel's rows stay positional, and the search row's are load-bearing in a way the
+box's are not (its highlight offsets are counted from the start of the number, `main.py:3890-3901`),
+so naming those is its own measurement; the outline's rows name a destination's page the way they
+always have; print ranges have no label rule because there is no print dialog
+(`main.py:1954` answers "not yet implemented"); the box's width is a constant rather than Okular's
+longest-label sizing, which is **F10-4bc**; nothing in the file is rewritten by displaying it, and a
+numbering the producer left one sheet short is left one sheet short; and no other widget — the
+thumbnail strip, the reading-position save, the session's stored page — reads a label, because every
+one of them is about *which* sheet and not about what it is called.
 
 ---
 
