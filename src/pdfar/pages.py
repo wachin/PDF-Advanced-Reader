@@ -1242,6 +1242,7 @@ class InsertDocumentPages(Edit):
 
     Settles the page tree of both the working copy of *doc* and the source document
     before inserting, so inherited attributes (/MediaBox, /CropBox, /Rotate) are kept.
+    Also copies and rewires outline (TOC), named destinations, and page labels.
     """
 
     source_path: str
@@ -1296,11 +1297,58 @@ class InsertDocumentPages(Edit):
                         raise EditError(
                             f"Page {p + 1} is not in source document, which has {src_count} pages")
 
+            # Build mapping from source page index -> target page index
+            src_set = set(src_pages)
+            src_to_tgt = {}
+            for tgt_idx, src_idx in enumerate(sorted(src_set)):
+                src_to_tgt[src_idx] = self.at + tgt_idx
+
             SettlePageTree().apply(doc)
             SettlePageTree().apply(src_doc)
 
+            # Insert pages with links, annotations, and widgets
             for start, end in contiguous_runs(src_pages):
-                doc.insert_pdf(src_doc, from_page=start, to_page=end, start_at=self.at)
+                doc.insert_pdf(
+                    src_doc,
+                    from_page=start,
+                    to_page=end,
+                    start_at=self.at,
+                    links=1,
+                    annots=1,
+                    widgets=1,
+                )
+
+            # Copy and rewire outline (TOC)
+            src_toc = src_doc.get_toc(simple=False)
+            if src_toc:
+                existing_toc = doc.get_toc(simple=False) or []
+                for entry in src_toc:
+                    src_pno = entry[2]  # 1-based page number in source
+                    src_idx = src_pno - 1
+                    if src_idx in src_to_tgt:
+                        new_entry = list(entry)
+                        new_entry[2] = src_to_tgt[src_idx] + 1  # Convert back to 1-based
+                        existing_toc.append(new_entry)
+                if existing_toc:
+                    doc.set_toc(existing_toc)
+
+            # Note: Named destinations (/Dests name tree) are not currently copied.
+            # PyMuPDF does not provide a simple API to add named destinations;
+            # they would require low-level xref manipulation of the /Names/Dests tree.
+
+            # Copy and rewire page labels
+            src_labels = src_doc.get_page_labels()
+            if src_labels:
+                existing_labels = doc.get_page_labels() or []
+                for lbl in src_labels:
+                    src_start = lbl["startpage"]
+                    if src_start in src_to_tgt:
+                        new_lbl = dict(lbl)
+                        new_lbl["startpage"] = src_to_tgt[src_start]
+                        existing_labels.append(new_lbl)
+                if existing_labels:
+                    doc.set_page_labels(existing_labels)
+
         finally:
             src_doc.close()
 
@@ -1326,7 +1374,12 @@ def merge_documents(source_paths: Sequence[str], target_path: str) -> None:
                     continue
                 SettlePageTree().apply(src_doc)
                 start_at_page = target_doc.page_count
-                target_doc.insert_pdf(src_doc)
+                target_doc.insert_pdf(
+                    src_doc,
+                    links=1,
+                    annots=1,
+                    widgets=1,
+                )
 
                 src_labels = src_doc.get_page_labels()
                 if src_labels:

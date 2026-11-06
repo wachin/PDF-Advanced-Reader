@@ -153,3 +153,109 @@ def test_split_document_refusals(doc_a, tmp_path):
             split_document(doc, str(tmp_path), chunk_size=0)
     finally:
         doc.close()
+
+
+def test_insert_document_rewires_toc(tmp_path):
+    """InsertDocumentPages rewires TOC entries pointing to copied pages."""
+    # Source with TOC
+    src_path = str(tmp_path / "src_toc.pdf")
+    src = fitz.open()
+    for i in range(4):
+        p = src.new_page(width=200, height=100)
+        p.insert_text(fitz.Point(10, 30), f"Src Page {i + 1}")
+    src.set_toc([[1, "Chapter 1", 1], [1, "Chapter 2", 3], [2, "Section 2.1", 4]])
+    src.save(src_path)
+    src.close()
+
+    # Target
+    dst_path = str(tmp_path / "dst.pdf")
+    dst = fitz.open()
+    p = dst.new_page(width=200, height=100)
+    p.insert_text(fitz.Point(10, 30), "Existing")
+    dst.save(dst_path)
+    dst.close()
+
+    session = make_session(dst_path)
+    try:
+        # Insert first 2 pages (indices 0, 1) at position 1
+        edit = InsertDocumentPages(source_path=src_path, at=1, pages=(0, 1))
+        session.apply(edit)
+
+        # TOC should be rewired: Chapter 1 (src page 1 -> tgt page 2)
+        # Chapter 2 (src page 3) not copied, Section 2.1 (src page 4) not copied
+        toc = session.doc.get_toc()
+        assert toc == [[1, "Chapter 1", 2]]
+    finally:
+        session.close()
+
+
+def test_insert_document_rewires_page_labels(tmp_path):
+    """InsertDocumentPages rewires page labels for copied pages."""
+    src_path = str(tmp_path / "src_labels.pdf")
+    src = fitz.open()
+    for i in range(4):
+        p = src.new_page(width=200, height=100)
+        p.insert_text(fitz.Point(10, 30), f"Src Page {i + 1}")
+    src.set_page_labels([
+        {"style": "D", "prefix": "A-", "startpage": 0, "firstpagenum": 1},
+        {"style": "D", "prefix": "B-", "startpage": 2, "firstpagenum": 1},
+    ])
+    src.save(src_path)
+    src.close()
+
+    dst_path = str(tmp_path / "dst.pdf")
+    dst = fitz.open()
+    p = dst.new_page(width=200, height=100)
+    p.insert_text(fitz.Point(10, 30), "Existing")
+    dst.save(dst_path)
+    dst.close()
+
+    session = make_session(dst_path)
+    try:
+        # Insert first 2 pages at position 1
+        edit = InsertDocumentPages(source_path=src_path, at=1, pages=(0, 1))
+        session.apply(edit)
+
+        # Labels should be rewired: A- starts at src page 0 -> tgt page 1
+        # B- starts at src page 2 -> not copied
+        labels = session.doc.get_page_labels()
+        assert labels == [{"style": "D", "prefix": "A-", "startpage": 1, "firstpagenum": 1}]
+    finally:
+        session.close()
+
+
+def test_insert_document_copies_links(tmp_path):
+    """InsertDocumentPages copies and rewires internal links."""
+    src_path = str(tmp_path / "src_links.pdf")
+    src = fitz.open()
+    for i in range(3):
+        p = src.new_page(width=200, height=100)
+        p.insert_text(fitz.Point(10, 30), f"Src Page {i + 1}")
+    # Link from page 0 to page 1
+    src[0].insert_link({
+        "kind": fitz.LINK_GOTO,
+        "from": fitz.Rect(100, 10, 190, 30),
+        "page": 1,
+    })
+    src.save(src_path)
+    src.close()
+
+    dst_path = str(tmp_path / "dst.pdf")
+    dst = fitz.open()
+    p = dst.new_page(width=200, height=100)
+    p.insert_text(fitz.Point(10, 30), "Existing")
+    dst.save(dst_path)
+    dst.close()
+
+    session = make_session(dst_path)
+    try:
+        # Insert pages 0 and 1 at position 1
+        edit = InsertDocumentPages(source_path=src_path, at=1, pages=(0, 1))
+        session.apply(edit)
+
+        # Link on inserted page 1 (was src page 0) should point to page 2 (was src page 1)
+        links = list(session.doc[1].links())
+        assert len(links) == 1
+        assert links[0]["page"] == 2
+    finally:
+        session.close()
