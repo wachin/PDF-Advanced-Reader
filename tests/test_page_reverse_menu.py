@@ -206,12 +206,12 @@ def test_the_menu_offers_the_pick_and_the_book_in_that_order(strip, menus, qapp)
     assert menus, "the right click opened no menu"
     assert labels(menus[-1]) == [
         "Rotate 2 Pages Left", "Rotate 2 Pages Right", PICK.format(2),
-        "Insert Blank Page", "Insert PDF File…", "Duplicate 2 Pages", "Extract 2 Pages…",
+        "Insert Blank Page", "Insert PDF File…", "Duplicate 2 Pages", "Extract 2 Pages…", "Crop 2 Pages…",
         "Rotate All Pages Left", "Rotate All Pages Right", ALL, "Extract All Pages…",
         "Delete 2 Pages",
     ]
     assert [action.isSeparator() for action in menus[-1].actions()] == [
-        False, False, False, False, False, False, False, True, False, False, False, False, True, False]
+        False, False, False, False, False, False, False, False, True, False, False, False, False, True, False]
 
 
 def test_the_reverse_is_named_with_the_pages_it_moves(strip):
@@ -222,7 +222,7 @@ def test_the_reverse_is_named_with_the_pages_it_moves(strip):
     """
     assert labels(strip._page_commands_menu((1,))) == [
         "Rotate Page Left", "Rotate Page Right", "Reverse Page", "Insert Blank Page",
-        "Insert PDF File…", "Duplicate Page", "Extract Page…",
+        "Insert PDF File…", "Duplicate Page", "Extract Page…", "Crop Page…",
         "Rotate All Pages Left", "Rotate All Pages Right", ALL, "Extract All Pages…"]
     assert labels(strip._page_commands_menu((0, 2, 4)))[2] == PICK.format(3)
 

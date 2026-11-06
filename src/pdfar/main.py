@@ -47,10 +47,11 @@ from .page_numbers import (
     EraseSettings, PageNumbersPanel, PageNumberSettings, erase_copy,
     erased_copy_path, numbered_copy_path, stamp_copy,
 )
+from .crop_dialog import CropDialog
 from .pages import (
-    DeletePages, DuplicatePages, InsertBlankPage, InsertDocumentPages, MovePages, ReversePages,
+    CropPages, DeletePages, DuplicatePages, InsertBlankPage, InsertDocumentPages, MovePages, ReversePages,
     RotatePages, contiguous_runs, extract_pages,
-    merge_documents, split_document, shifted_index,
+    get_page_content_bbox, merge_documents, split_document, shifted_index,
 )
 from .save import ProtectionError, SaveError, SaveReport, save_document
 from .search import (
@@ -758,13 +759,18 @@ class MainWindow(QMainWindow):
             "page under the cursor or selected pages")
         self.act_insert_pdf.triggered.connect(self._insert_pdf_file)
 
-        # The permission gate writes its reason into these seven tooltips and takes it
+        self.act_page_crop = QAction("Crop Pages…", self)
+        self.act_page_crop.setToolTip(
+            "Set or reset the crop box on the current page or selected pages")
+        self.act_page_crop.triggered.connect(self._page_crop)
+
+        # The permission gate writes its reason into these eight tooltips and takes it
         # out again for the next document, so the sentence each action was built with is
         # kept on the action rather than restated where it is restored (F10-4z).
         for _page_action in (self.act_page_rotl, self.act_page_rotr,
                              self.act_page_delete, self.act_page_insert,
                              self.act_page_duplicate, self.act_page_extract,
-                             self.act_insert_pdf):
+                             self.act_insert_pdf, self.act_page_crop):
             _page_action.setProperty("plainToolTip", _page_action.toolTip())
 
         # The permissions password lifts the refusal those five items answer to, in
@@ -920,6 +926,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.act_page_duplicate)
         tools_menu.addAction(self.act_page_extract)
         tools_menu.addAction(self.act_insert_pdf)
+        tools_menu.addAction(self.act_page_crop)
         tools_menu.addAction(self.act_page_delete)
         # Directly under the six items the sealed book greys: the command that turns
         # them back on, for the reader who wonders why they are pale (F10-4aa).
@@ -1641,6 +1648,52 @@ class MainWindow(QMainWindow):
                                     f"Inserted pages from:\n{source_path}")
         except Exception as exc:
             QMessageBox.critical(self, "Insert PDF File", f"Could not insert document: {exc}")
+
+    def _page_crop(self) -> None:
+        """Open the crop dialog for the current page or selected pages."""
+        if not self.view:
+            return
+        view = self.view
+        session = view.session
+
+        selected = list(self.sidebar.selected_pages()) if self.sidebar else []
+        pages = tuple(selected) if selected else (view.current_page,)
+
+        dlg = CropDialog(session.doc, pages, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        target_pages = dlg.get_target_pages()
+        if not target_pages:
+            QMessageBox.warning(self, "Crop Pages", "No valid pages selected.")
+            return
+
+        crop_rect = dlg.get_crop_rect()
+        if crop_rect == "auto":
+            margin = dlg.get_auto_margin()
+            # Compute per-page crop box from content
+            crop_map = {}
+            for idx in target_pages:
+                page = session.doc.load_page(idx)
+                bbox = get_page_content_bbox(page, margin)
+                if bbox.is_empty:
+                    bbox = page.mediabox
+                crop_map[idx] = bbox
+            # Apply per-page crops as separate edits for proper undo granularity
+            for idx, rect in crop_map.items():
+                try:
+                    view.apply_edit(CropPages(pages=(idx,), rect=rect))
+                except Exception as exc:
+                    QMessageBox.critical(self, "Crop Pages", f"Could not auto-crop page {idx + 1}: {exc}")
+                    return
+            QMessageBox.information(self, "Crop Pages", f"Auto-cropped {len(crop_map)} page(s).")
+        else:
+            try:
+                view.apply_edit(CropPages(pages=tuple(target_pages), rect=crop_rect))
+                action = "reset" if crop_rect is None else "cropped"
+                QMessageBox.information(self, "Crop Pages", f"{action.capitalize()} {len(target_pages)} page(s).")
+            except Exception as exc:
+                QMessageBox.critical(self, "Crop Pages", f"Could not crop pages: {exc}")
 
     def _merge_pdfs(self) -> None:
         """Combine multiple PDF files chosen by the user into a single PDF document."""
@@ -2956,6 +3009,7 @@ class MainWindow(QMainWindow):
         tab.sidebar.page_duplication_requested.connect(self._duplicate_pages)
         tab.sidebar.page_extract_requested.connect(self._extract_pages)
         tab.sidebar.page_insert_doc_requested.connect(self._insert_pdf_file)
+        tab.sidebar.page_crop_requested.connect(self._page_crop)
         # Connect annotation manager to sidebar
         tab.sidebar.set_annotation_manager(tab.view.annotation_manager)
         self._connected_tab = tab
@@ -2988,6 +3042,7 @@ class MainWindow(QMainWindow):
             tab.sidebar.page_duplication_requested.disconnect(self._duplicate_pages)
             tab.sidebar.page_extract_requested.disconnect(self._extract_pages)
             tab.sidebar.page_insert_doc_requested.disconnect(self._insert_pdf_file)
+            tab.sidebar.page_crop_requested.disconnect(self._page_crop)
         except TypeError:
             pass
         tab.view.clear_numbering_preview()
@@ -3686,7 +3741,7 @@ class MainWindow(QMainWindow):
         for action in (self.act_page_rotl, self.act_page_rotr,
                        self.act_page_delete, self.act_page_insert,
                        self.act_page_duplicate, self.act_page_extract,
-                       self.act_insert_pdf):
+                       self.act_insert_pdf, self.act_page_crop):
             action.setEnabled(pages_ok)
             action.setToolTip(ASSEMBLY_NOTE if has_doc and not pages_ok
                               else action.property("plainToolTip") or "")

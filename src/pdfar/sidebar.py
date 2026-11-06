@@ -369,6 +369,8 @@ class Sidebar(QWidget):
     page_duplication_requested = pyqtSignal(object)
     # The sheets to be written to a new PDF file.
     page_extract_requested = pyqtSignal(object)
+    # The sheets to be cropped (or have crop reset).
+    page_crop_requested = pyqtSignal(object)
     # The window owns saving: it is the one place that can explain a refusal, and
     # a second opinion from here would only be able to say "failed".
     save_requested = pyqtSignal()
@@ -869,6 +871,11 @@ class Sidebar(QWidget):
         extracted.triggered.connect(
             lambda _checked=False, pages=pages:
             self.page_extract_requested.emit(pages))
+        cropped = menu.addAction("Crop Page…" if single
+                                 else f"Crop {len(pages)} Pages…")
+        cropped.triggered.connect(
+            lambda _checked=False, pages=pages:
+            self.page_crop_requested.emit(pages))
         menu.addSeparator()
         # The scanned book that arrived sideways end to end: asking a reader to
         # click five hundred thumbnails is work the menu is standing there to do.

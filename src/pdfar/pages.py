@@ -1394,3 +1394,78 @@ def split_document(doc: fitz.Document, output_dir: str, chunk_size: int = 1,
     return created_paths
 
 
+def get_page_content_bbox(page: fitz.Page, margin: float = 0.0) -> fitz.Rect:
+    """Compute the tight bounding box of all visible content on *page*.
+
+    Includes text blocks and vector drawings. Annots, form fields and inline
+    images are not yet covered.
+    """
+    bbox = fitz.Rect()
+    for block in page.get_text("blocks"):
+        bbox.include_rect(fitz.Rect(block[:4]))
+    for drawing in page.get_drawings():
+        bbox.include_rect(drawing["rect"])
+    for info in page.get_image_info():
+        bbox.include_rect(info["bbox"])
+    if not bbox.is_empty:
+        bbox = fitz.Rect(
+            max(bbox.x0 - margin, 0),
+            max(bbox.y0 - margin, 0),
+            min(bbox.x1 + margin, page.rect.width),
+            min(bbox.y1 + margin, page.rect.height),
+        )
+    return bbox
+
+
+@dataclass(frozen=True)
+class CropPages(Edit):
+    """Set or reset the crop box (/CropBox) on the given pages.
+
+    *rect* is the new crop rectangle in page coordinates (points), or ``None``
+    to reset to the page's /MediaBox. The page tree is settled first so that
+    inherited /MediaBox and /CropBox are pushed down before the crop is applied.
+    """
+
+    pages: Tuple[int, ...]
+    rect: Optional[fitz.Rect] = None
+
+    scope = Scope.STRUCTURE
+    requires_assembly = True
+
+    @property
+    def label(self) -> str:
+        if len(self.pages) == 1:
+            return "Crop Page" if self.rect else "Reset Page Crop"
+        return f"Crop {len(self.pages)} Pages" if self.rect else f"Reset Crop on {len(self.pages)} Pages"
+
+    def page_order(self, before_count: int) -> Tuple[int, ...]:
+        return tuple(range(before_count))
+
+    def apply(self, doc: fitz.Document) -> None:
+        if not self.pages:
+            raise EditError("No pages selected to crop")
+        count = doc.page_count
+        for idx in self.pages:
+            if not 0 <= idx < count:
+                raise EditError(
+                    f"Page {idx + 1} is not in this document, which has {count} pages")
+
+        SettlePageTree().apply(doc)
+
+        for idx in dict.fromkeys(self.pages):
+            page = doc.load_page(idx)
+            if self.rect is None:
+                page.set_cropbox(page.mediabox)
+            else:
+                crop = fitz.Rect(
+                    max(self.rect.x0, 0),
+                    max(self.rect.y0, 0),
+                    min(self.rect.x1, page.rect.width),
+                    min(self.rect.y1, page.rect.height),
+                )
+                if crop.width <= 0 or crop.height <= 0:
+                    raise EditError(
+                        f"Crop rectangle for page {idx + 1} is empty or out of bounds")
+                page.set_cropbox(crop)
+
+
