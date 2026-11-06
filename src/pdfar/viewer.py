@@ -311,6 +311,9 @@ class PDFView(QAbstractScrollArea):
         #: ``{"page", "kind", "start", "current", "points"}`` in page space.
         self.shape_kind = "rect"
         self._shape_drag: Optional[dict] = None
+        #: The redaction mark drag in progress:
+        #: ``{"page", "start", "current"}`` in page space.
+        self._redact_drag: Optional[dict] = None
         #: The standard stamp the stamp tool places on the next click.
         self.stamp_name = "Draft"
         #: A stamp of PDFAR's own making, which takes the click instead:
@@ -840,7 +843,7 @@ class PDFView(QAbstractScrollArea):
                   "stamp", "measure")
 
     #: Tools that need the page geometry reflow does not have.
-    _PAGE_ONLY_TOOLS = ("area", "table", "draw", "shape", "stamp", "measure")
+    _PAGE_ONLY_TOOLS = ("area", "table", "draw", "shape", "stamp", "measure", "redact")
 
     def set_tool_mode(self, mode: str) -> None:
         """Switch the left-button tool: browse, text, area, table, pen, shape,
@@ -1029,6 +1032,12 @@ class PDFView(QAbstractScrollArea):
             self._shape_drag = None
             self.viewport().update()
 
+    def _cancel_redact(self) -> None:
+        """Give up the redaction mark in progress."""
+        if self._redact_drag is not None:
+            self._redact_drag = None
+            self.viewport().update()
+
     def _extend_shape(self, pos: QPoint) -> None:
         """Move the shape in progress to the point under the cursor.
 
@@ -1049,6 +1058,16 @@ class PDFView(QAbstractScrollArea):
             if abs(x - last_x) < step and abs(y - last_y) < step:
                 return
             drag["points"].append((x, y))
+        drag["current"] = (x, y)
+        self.viewport().update()
+
+    def _extend_redact(self, pos: QPoint) -> None:
+        """Move the redaction mark in progress to the point under the cursor."""
+        drag = self._redact_drag
+        hit = self._pdf_point_at(pos)
+        if hit is None or hit[0] != drag["page"]:
+            return
+        _page, x, y = hit
         drag["current"] = (x, y)
         self.viewport().update()
 
@@ -1086,6 +1105,20 @@ class PDFView(QAbstractScrollArea):
                 self.annotation_manager.add_shape(
                     drag["page"], "polygon", points=tuple(points),
                     color=color, width=width)
+
+    def _commit_redact(self, drag: dict) -> None:
+        """Hand the finished drag to the document as one redaction mark."""
+        sx, sy = drag["start"]
+        ex, ey = drag["current"]
+        # Require minimum size
+        if abs(ex - sx) < 2 or abs(ey - sy) < 2:
+            return
+        self.annotation_manager.add_redact(
+            drag["page"],
+            rect=(sx, sy, ex, ey),
+            fill_color=self.ink_color,  # Use current ink color for redaction fill
+            overlay_text="",  # Could add overlay text option later
+        )
 
     def _cancel_measure(self) -> None:
         """Give up the measurement in progress: it never reaches the document.
@@ -2109,6 +2142,7 @@ class PDFView(QAbstractScrollArea):
         self._paint_marquee(painter)
         self._paint_stroke(painter)
         self._paint_shape(painter)
+        self._paint_redact(painter)
         self._paint_measure(painter)
         painter.end()
 
@@ -2196,6 +2230,32 @@ class PDFView(QAbstractScrollArea):
                 path.lineTo(spot(point))
             path.closeSubpath()
             painter.drawPath(path)
+
+    def _paint_redact(self, painter: QPainter) -> None:
+        """Draw the redaction mark being dragged, in view coordinates."""
+        drag = self._redact_drag
+        if drag is None or drag["page"] >= len(self.page_sizes):
+            return
+        page = drag["page"]
+        w0, h0, turn = self._sheet_space(page)
+        ox, oy = self._page_origin(page)
+        ox -= self.horizontalScrollBar().value()
+        oy -= self.verticalScrollBar().value()
+
+        def spot(point):
+            u, v = map_point(point[0], point[1], w0, h0, turn)
+            return QPointF(ox + u * self.zoom, oy + v * self.zoom)
+
+        # Redaction marks use a red pen and semi-transparent red fill
+        pen = QPen(QColor("#FF0000"))
+        pen.setWidthF(max(2.0, 2.0 * self.zoom))
+        pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(QBrush(QColor(255, 0, 0, 50)))  # Semi-transparent red
+
+        start = spot(drag["start"])
+        current = spot(drag["current"])
+        painter.drawRect(QRectF(start, current).normalized())
 
     def _paint_arrowhead(self, painter: QPainter, start: QPointF,
                          head: QPointF) -> None:
@@ -3391,6 +3451,20 @@ class PDFView(QAbstractScrollArea):
             event.accept()
             return
         if (event.button() == Qt.MouseButton.LeftButton
+                and self.tool_mode == "redact"):
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            self.clear_selection()
+            hit = self._pdf_point_at(event.position().toPoint())
+            if hit is not None:
+                page, x, y = hit
+                self._redact_drag = {
+                    "page": page,
+                    "start": (x, y), "current": (x, y),
+                }
+                self.viewport().update()
+            event.accept()
+            return
+        if (event.button() == Qt.MouseButton.LeftButton
                 and self.tool_mode == "stamp"):
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             self.clear_selection()
@@ -3490,6 +3564,11 @@ class PDFView(QAbstractScrollArea):
             self._extend_shape(event.position().toPoint())
             event.accept()
             return
+        if (self._redact_drag is not None
+                and (event.buttons() & Qt.MouseButton.LeftButton)):
+            self._extend_redact(event.position().toPoint())
+            event.accept()
+            return
         if (self._measure_drag is not None
                 and self._measure_drag.get("kind") != "distance"
                 and self.measure_kind == self._measure_drag.get("kind")):
@@ -3557,6 +3636,15 @@ class PDFView(QAbstractScrollArea):
             self._shape_drag = None
             self.viewport().update()
             self._commit_shape(drag)
+            event.accept()
+            return
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self._redact_drag is not None):
+            drag = self._redact_drag
+            self._extend_redact(event.position().toPoint())
+            self._redact_drag = None
+            self.viewport().update()
+            self._commit_redact(drag)
             event.accept()
             return
         if (event.button() == Qt.MouseButton.LeftButton
@@ -3643,6 +3731,10 @@ class PDFView(QAbstractScrollArea):
             return
         if key == Qt.Key.Key_Escape and self._shape_drag is not None:
             self._cancel_shape()
+            event.accept()
+            return
+        if key == Qt.Key.Key_Escape and self._redact_drag is not None:
+            self._cancel_redact()
             event.accept()
             return
         if (key in (Qt.Key.Key_Return, Qt.Key.Key_Enter)

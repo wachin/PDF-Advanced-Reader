@@ -552,6 +552,12 @@ class MainWindow(QMainWindow):
         self.act_draw.triggered.connect(
             lambda: self._set_tool_mode("draw"))
 
+        self.act_redact = QAction("Redaction", self)
+        self.act_redact.setCheckable(True)
+        self.act_redact.setToolTip("Redaction: drag a rectangle to mark content for permanent removal")
+        self.act_redact.triggered.connect(
+            lambda: self._set_tool_mode("redact"))
+
         # Shape tools: one action per kind, all under one toolbar button.
         self._shape_tips = {
             "rect": "drag out a rectangle",
@@ -636,6 +642,7 @@ class MainWindow(QMainWindow):
 
         for action in (self.act_explore, self.act_sel_text,
                        self.act_sel_area, self.act_sel_table, self.act_draw,
+                       self.act_redact,
                        *self._shape_actions.values(),
                        *self._stamp_actions.values(),
                        *self._custom_stamp_actions.values(),
@@ -764,13 +771,19 @@ class MainWindow(QMainWindow):
             "Set or reset the crop box on the current page or selected pages")
         self.act_page_crop.triggered.connect(self._page_crop)
 
-        # The permission gate writes its reason into these eight tooltips and takes it
+        self.act_apply_redactions = QAction("Apply Redactions…", self)
+        self.act_apply_redactions.setToolTip(
+            "Permanently remove all content marked with redaction marks in the document")
+        self.act_apply_redactions.triggered.connect(self._apply_redactions)
+
+        # The permission gate writes its reason into these nine tooltips and takes it
         # out again for the next document, so the sentence each action was built with is
         # kept on the action rather than restated where it is restored (F10-4z).
         for _page_action in (self.act_page_rotl, self.act_page_rotr,
                              self.act_page_delete, self.act_page_insert,
                              self.act_page_duplicate, self.act_page_extract,
-                             self.act_insert_pdf, self.act_page_crop):
+                             self.act_insert_pdf, self.act_page_crop,
+                             self.act_apply_redactions):
             _page_action.setProperty("plainToolTip", _page_action.toolTip())
 
         # The permissions password lifts the refusal those five items answer to, in
@@ -927,6 +940,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.act_page_extract)
         tools_menu.addAction(self.act_insert_pdf)
         tools_menu.addAction(self.act_page_crop)
+        tools_menu.addAction(self.act_apply_redactions)
         tools_menu.addAction(self.act_page_delete)
         # Directly under the six items the sealed book greys: the command that turns
         # them back on, for the reader who wonders why they are pale (F10-4aa).
@@ -1694,6 +1708,44 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Crop Pages", f"{action.capitalize()} {len(target_pages)} page(s).")
             except Exception as exc:
                 QMessageBox.critical(self, "Crop Pages", f"Could not crop pages: {exc}")
+
+    def _apply_redactions(self) -> None:
+        """Apply all redaction marks in the document, permanently removing content."""
+        if not self.view:
+            return
+        view = self.view
+        session = view.session
+
+        # Count redaction marks first
+        redact_count = 0
+        for page_idx in range(session.doc.page_count):
+            page = session.doc.load_page(page_idx)
+            redacts = [a for a in page.annots() if a.type[0] == 12]
+            redact_count += len(redacts)
+
+        if redact_count == 0:
+            QMessageBox.information(self, "Apply Redactions",
+                                    "No redaction marks found in the document.")
+            return
+
+        # Confirm this destructive operation
+        reply = QMessageBox.warning(
+            self, "Apply Redactions",
+            f"This will permanently remove content from {redact_count} redaction mark(s) "
+            f"across the document. This operation cannot be undone after saving.\n\n"
+            f"Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            # Apply redactions through the annotation manager
+            count = self.view.annotation_manager.apply_redactions()
+            QMessageBox.information(self, "Apply Redactions",
+                                    f"Applied redactions. {redact_count} mark(s) processed.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Apply Redactions", f"Could not apply redactions: {exc}")
 
     def _merge_pdfs(self) -> None:
         """Combine multiple PDF files chosen by the user into a single PDF document."""
@@ -3741,7 +3793,8 @@ class MainWindow(QMainWindow):
         for action in (self.act_page_rotl, self.act_page_rotr,
                        self.act_page_delete, self.act_page_insert,
                        self.act_page_duplicate, self.act_page_extract,
-                       self.act_insert_pdf, self.act_page_crop):
+                       self.act_insert_pdf, self.act_page_crop,
+                       self.act_apply_redactions):
             action.setEnabled(pages_ok)
             action.setToolTip(ASSEMBLY_NOTE if has_doc and not pages_ok
                               else action.property("plainToolTip") or "")

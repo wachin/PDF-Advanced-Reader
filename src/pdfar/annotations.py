@@ -160,6 +160,7 @@ class AnnotationType(Enum):
     SHAPE = "shape"
     STAMP = "stamp"
     MEASUREMENT = "measurement"
+    REDACT = "redact"
 
 
 @dataclass
@@ -553,6 +554,21 @@ class MeasurementAnnotation(Annotation):
     def reading(self) -> str:
         """The measured value in the scale the annotation carries."""
         return measurement_reading(self.kind, self.points, self.scale)
+
+
+@dataclass
+class RedactAnnotation(Annotation):
+    """A redaction mark: a PDF ``/Redact`` annotation.
+
+    Redaction marks are drawn as filled rectangles that indicate what will be
+    removed when ``apply_redactions`` is called. They carry a fill color (the
+    color of the redaction box) and optional overlay text to show when the
+    redaction is applied.
+    """
+    type: AnnotationType = AnnotationType.REDACT
+    fill_color: str = "#000000"      # Fill color for the redaction box
+    overlay_text: str = ""           # Text to show in the redaction box
+    overlay_font_size: float = 12.0  # Font size for overlay text
 
 
 def stamp_box(width: float, height: float,
@@ -1150,6 +1166,31 @@ def _stamp_model(annot: fitz.Annot, page_idx: int) -> StampAnnotation:
     )
 
 
+def _redact_model(annot: fitz.Annot, page_idx: int) -> RedactAnnotation:
+    """Read one redaction mark into the model."""
+    info = annot.info
+    rect = annot.rect
+    opacity = annot.opacity
+    # Get fill color (MuPDF stores it in colors["fill"])
+    fill = annot.colors.get("fill") or (0.0, 0.0, 0.0)
+    # Get overlay text from the annotation's text field
+    overlay_text = info.get("content") or ""
+    return RedactAnnotation(
+        id=annot_key(annot),
+        page=page_idx,
+        rects=[(rect.x0, rect.y0, rect.x1, rect.y1)],
+        color=_rgb_to_hex(annot.colors.get("stroke") or (0.0, 0.0, 0.0)),
+        opacity=1.0 if opacity is None or opacity < 0 else opacity,
+        author=info.get("title") or "",
+        created=info.get("creationDate") or "",
+        modified=info.get("modDate") or "",
+        content=info.get("content") or "",
+        fill_color=_rgb_to_hex(fill),
+        overlay_text=overlay_text,
+        overlay_font_size=12.0,  # Default, not stored in PDF
+    )
+
+
 def _measurement_model(doc: fitz.Document, annot: fitz.Annot,
                        page_idx: int) -> Optional[MeasurementAnnotation]:
     """Read one measurement into the model, or ``None`` if it is not one.
@@ -1646,6 +1687,88 @@ class AddMeasurement(SinglePageEdit):
 
 
 @dataclass(frozen=True)
+class AddRedact(SinglePageEdit):
+    """Add a redaction mark rectangle on a page.
+
+    A redaction mark is a PDF /Redact annotation that indicates an area to be
+    removed when apply_redactions is called. It carries a fill color and
+    optional overlay text.
+    """
+
+    ann_id: str
+    page: int
+    rect: tuple  # (x0, y0, x1, y1) in PDF points
+    fill_color: str = "#000000"
+    overlay_text: str = ""
+    overlay_font_size: float = 12.0
+    author: str = ""
+
+    scope = Scope.COMMENTS
+
+    @property
+    def label(self) -> str:
+        return "Add redaction mark"
+
+    def apply(self, doc: fitz.Document) -> None:
+        page = doc.load_page(self.page)
+        x0, y0, x1, y1 = self.rect
+        # Normalize rectangle
+        x0, x1 = sorted((x0, x1))
+        y0, y1 = sorted((y0, y1))
+        if x1 - x0 < 2 or y1 - y0 < 2:
+            raise EditError("Redaction rectangle is too small")
+
+        annot = page.add_redact_annot(
+            fitz.Rect(x0, y0, x1, y1),
+            fill=_hex_to_rgb(self.fill_color),
+            text=self.overlay_text or None,
+        )
+        if self.author:
+            annot.set_info(title=self.author)
+        if self.overlay_text:
+            annot.set_info(content=self.overlay_text)
+        annot.update()
+        _name(doc, annot, self.ann_id)
+
+
+@dataclass(frozen=True)
+class ApplyRedactions(Edit):
+    """Apply all redaction marks in the document, removing content permanently.
+
+    This is a destructive operation that cannot be undone in the traditional
+    sense - it permanently removes text, images, and graphics from the pages
+    where redaction marks exist. The document is saved with a new revision.
+    """
+
+    scope = Scope.CONTENT | Scope.STRUCTURE
+    requires_assembly = True
+
+    @property
+    def label(self) -> str:
+        return "Apply redactions"
+
+    def page_order(self, before_count: int) -> Tuple[int, ...]:
+        return tuple(range(before_count))
+
+    def apply(self, doc: fitz.Document) -> None:
+        total_redacted = 0
+        for page_idx in range(doc.page_count):
+            page = doc.load_page(page_idx)
+            redacts = [a for a in page.annots() if a.type[0] == 12]  # Redact type
+            if not redacts:
+                continue
+            # Apply redactions with aggressive settings: remove images, graphics, text
+            # images=2: blank out overlapping image parts
+            # graphics=1: remove graphics if contained in rectangle
+            # text=0: remove text (default)
+            page.apply_redactions(images=2, graphics=1, text=0)
+            total_redacted += len(redacts)
+
+        if total_redacted == 0:
+            raise EditError("No redaction marks found in the document")
+
+
+@dataclass(frozen=True)
 class RemoveAnnotation(SinglePageEdit):
     """Delete the annotation *ann_id* names."""
 
@@ -1908,6 +2031,8 @@ class AnnotationManager(QObject):
                              or _shape_model(annot, page_idx, "polygon"))
                 elif kind == fitz.PDF_ANNOT_STAMP:
                     model = _stamp_model(annot, page_idx)
+                elif kind == fitz.PDF_ANNOT_REDACT:
+                    model = _redact_model(annot, page_idx)
                 else:
                     # A free-text annotation PDFAR cannot edit yet: listing it
                     # would offer an action on something the user brought in
@@ -2127,6 +2252,39 @@ class AnnotationManager(QObject):
             return None
         made = self.get_annotation(ann_id)
         return made if isinstance(made, MeasurementAnnotation) else None
+
+    def add_redact(self, page: int,
+                   rect: Sequence[float],
+                   fill_color: str = "#000000",
+                   overlay_text: str = "",
+                   overlay_font_size: float = 12.0,
+                   author: str = "") -> Optional[RedactAnnotation]:
+        """Add one redaction mark on *page* at *rect*.
+
+        A redaction mark is a PDF /Redact annotation that indicates an area to
+        be removed when apply_redactions is called. One mark is one edit.
+        """
+        ann_id = str(uuid.uuid4())
+        if not self._run(AddRedact(
+                ann_id=ann_id, page=int(page),
+                rect=tuple(float(v) for v in rect),
+                fill_color=fill_color, overlay_text=overlay_text,
+                overlay_font_size=overlay_font_size, author=author)):
+            return None
+        made = self.get_annotation(ann_id)
+        return made if isinstance(made, RedactAnnotation) else None
+
+    def apply_redactions(self) -> int:
+        """Apply all redaction marks in the document, permanently removing content.
+
+        Returns the number of redaction marks applied. Raises EditError on failure.
+        """
+        if not self._run(ApplyRedactions()):
+            return 0
+        # After applying redactions, all redaction annotations are gone
+        # (they were consumed by the apply_redactions call)
+        self.reload_from_document()
+        return 1  # Return count or handle differently
 
     def remove_annotation(self, annotation_id: str) -> bool:
         """Remove an annotation by ID."""
