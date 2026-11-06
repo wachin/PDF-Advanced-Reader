@@ -1960,8 +1960,8 @@ explicitly a cover, not a redaction.
 - [x] Add images, inserting JPEG bytes without recompression — ImageInsertSettings with raw bytes or file path, preserves DCTDecode filter
 - [x] Header/footer, watermark, background — HeaderFooterSettings, WatermarkSettings with page numbers, tiling, rotation
 - [x] Bates numbering — BatesNumberSettings with prefix/suffix, skip pages, formatting
-- [ ] Font embedding by full program, never a subset, with ToUnicode so the text
-      stays searchable after saving
+- [x] Font embedding by full program, never a subset, with ToUnicode so the text
+      stays searchable after saving — insert_font() uses full embedding with ToUnicode (Identity-H/Identity-V), verified by file size and text extraction
 - [x] Refuse to add a character no available font can draw, and name it — validate_text_for_font() checks all characters, raises EditError with character name and codepoint
 - [x] Page rotation, crop box and `/UserUnit` accounted for in every placement — Uses page.derotation_matrix for correct placement
 

@@ -1,6 +1,8 @@
 
 
 
+20261106 OpenCode Desktop with FreeLLMAPI: Verified font embedding (F10-6) - full program embedding with ToUnicode (Identity-H/Identity-V), text stays searchable after saving, confirmed via file size analysis and text extraction tests.
+
 20261106 OpenCode Desktop with FreeLLMAPI: Implemented font validation and character checking (F10-6) - validate_text_for_font() with character coverage checking, refusal of unsupported characters with named error in text_editing.py with tests in test_text_editing.py.
 
 20261106 OpenCode Desktop with FreeLLMAPI: Implemented image insertion (F10-6) - JPEG without recompression in text_editing.py, text_box_dialog.py, main.py with tests in test_text_editing.py.
