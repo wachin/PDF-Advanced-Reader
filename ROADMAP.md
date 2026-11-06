@@ -1899,7 +1899,9 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       by the blank too and the two resolve through one `/Parent` chain; `/PageLabels` and
       the outline need no repair, measured rather than hoped.  The command carries
       `requires_assembly`, so F10-4x's refusal and F10-4z's greying arrive already written.
-- [ ] Split, merge/combine
+- [x] **Insert PDF File** — `InsertDocumentPages` edit inserts pages from another PDF into the current document at a gap, settling page trees to preserve inherited geometry, and updating page labels and outlines
+- [x] **Merge PDFs** — `merge_documents()` combines multiple PDFs in order into one, preserving page labels, outlines, and metadata, writing atomically via `staged_write`
+- [x] **Split PDF** — `split_document()` splits a document into N-page chunks, using `extract_pages` so each chunk preserves geometry, labels, and outlines
 - [ ] Page boxes (crop)
 - [x] **F10-4o** — *Inherited page-tree attributes (`/Resources`, `/MediaBox`,
       `/CropBox`, `/Rotate`) pushed down onto every page before any reorder.*

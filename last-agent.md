@@ -1,6 +1,8 @@
 
 
 
+20261106 OpenCode Desktop with FreeLLMAPI: Implemented insert document pages (InsertDocumentPages), merge_documents(), and split_document() in pages.py, sidebar.py, main.py with unit tests in test_page_split_merge.py.
+
 20261106 OpenCode Desktop with FreeLLMAPI: Implemented page extraction (extract_pages) in pages.py, sidebar.py, main.py with unit tests in test_page_extract.py.
 
 20261105 09:00 qwen with NVIDIA NIM API (MI) model z-ai/glm-5.3-flash
