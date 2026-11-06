@@ -1956,14 +1956,14 @@ explicitly a cover, not a redaction.
 
 ## F10-6 Adding content — [ ]
 
-- [ ] Add text (box with wrapping, font, size, colour)
+- [x] Add text (box with wrapping, font, size, colour) — TextBoxSettings with word wrap, font selection, color, alignment, positioning
 - [ ] Add images, inserting JPEG bytes without recompression
-- [ ] Header/footer, watermark, background
-- [ ] Bates numbering (the page-numbering code is most of this already)
+- [x] Header/footer, watermark, background — HeaderFooterSettings, WatermarkSettings with page numbers, tiling, rotation
+- [x] Bates numbering — BatesNumberSettings with prefix/suffix, skip pages, formatting
 - [ ] Font embedding by full program, never a subset, with ToUnicode so the text
       stays searchable after saving
 - [ ] Refuse to add a character no available font can draw, and name it
-- [ ] Page rotation, crop box and `/UserUnit` accounted for in every placement
+- [x] Page rotation, crop box and `/UserUnit` accounted for in every placement — Uses page.derotation_matrix for correct placement
 
 ## F10-7 Editing existing text (was F8-1) — [ ]
 
