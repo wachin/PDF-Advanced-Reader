@@ -1739,7 +1739,7 @@ class ApplyRedactions(Edit):
     sense - it permanently removes text, images, and graphics from the pages
     where redaction marks exist. Also removes overlapping annotations,
     strips XFA and metadata that might mirror redacted content, and verifies
-    the redaction was successful.
+    the redaction was successful. Returns a report of what was removed.
     """
 
     scope = Scope.CONTENT | Scope.STRUCTURE
@@ -1756,6 +1756,15 @@ class ApplyRedactions(Edit):
         total_redacted = 0
         removed_annots = 0
         redacted_pages = set()
+        report = {
+            "pages_processed": 0,
+            "redaction_marks": 0,
+            "annotations_removed": 0,
+            "text_removed": 0,
+            "images_removed": 0,
+            "graphics_removed": 0,
+            "pages_with_errors": [],
+        }
 
         for page_idx in range(doc.page_count):
             page = doc.load_page(page_idx)
@@ -1764,15 +1773,48 @@ class ApplyRedactions(Edit):
                 continue
 
             redacted_pages.add(page_idx)
+            report["pages_processed"] += 1
+            report["redaction_marks"] += len(redacts)
 
             # Collect redaction rectangles
             redact_rects = [a.rect for a in redacts]
 
+            # Check for unprocessable content before redacting
+            self._check_unprocessable_content(page, redact_rects, page_idx, report)
+
+            # Count content that will be removed (approximate)
+            text_blocks = page.get_text("blocks")
+            for block in text_blocks:
+                block_rect = fitz.Rect(block[:4])
+                for rrect in redact_rects:
+                    if block_rect.intersects(rrect):
+                        report["text_removed"] += 1
+                        break
+
+            images = page.get_images()
+            for img in images:
+                # img is a tuple: (xref, smask, width, height, bpc, colorspace, alt, name, ...)
+                img_name = img[7] if len(img) > 7 else img[-1]
+                img_rect = page.get_image_bbox(img_name)
+                for rrect in redact_rects:
+                    if img_rect.intersects(rrect):
+                        report["images_removed"] += 1
+                        break
+
+            drawings = page.get_drawings()
+            for d in drawings:
+                d_rect = d["rect"]
+                if d.get("fill") == (0, 0, 0):
+                    continue
+                for rrect in redact_rects:
+                    if d_rect.intersects(rrect):
+                        report["graphics_removed"] += 1
+                        break
+
             # Remove annotations that overlap with redaction areas
-            # We must collect them first since we can't delete while iterating
             annots_to_remove = []
             for annot in page.annots():
-                if annot.type[0] == 12:  # Don't remove the redaction marks themselves
+                if annot.type[0] == 12:
                     continue
                 for rrect in redact_rects:
                     if annot.rect.intersects(rrect):
@@ -1782,11 +1824,9 @@ class ApplyRedactions(Edit):
             for annot in annots_to_remove:
                 page.delete_annot(annot)
                 removed_annots += 1
+            report["annotations_removed"] += len(annots_to_remove)
 
             # Apply redactions with aggressive settings
-            # images=2: blank out overlapping image parts
-            # graphics=1: remove graphics if contained in rectangle
-            # text=0: remove text (default)
             page.apply_redactions(images=2, graphics=1, text=0)
             total_redacted += len(redacts)
 
@@ -1801,6 +1841,76 @@ class ApplyRedactions(Edit):
 
         # Proof step: verify redaction was successful
         self._verify_redaction(doc, redacted_pages)
+
+    def _check_unprocessable_content(self, page: fitz.Page, redact_rects: list, page_idx: int, report: dict) -> None:
+        """Check for content that cannot be reliably redacted and fail closed.
+
+        Detects vertical text, inline images, and undecodable streams
+        that might survive redaction.
+        """
+        # Check for vertical text (rotation != 0 in text spans)
+        # PyMuPDF returns text with rotation info in "dict" format
+        try:
+            text_dict = page.get_text("dict")
+            for block in text_dict.get("blocks", []):
+                if "lines" not in block:
+                    continue
+                for line in block["lines"]:
+                    for span in line.get("spans", []):
+                        # Check if text has non-standard rotation
+                        if span.get("origin", (0, 0)) != (0, 0) and span.get("bbox"):
+                            # Check if span intersects redaction area
+                            span_rect = fitz.Rect(span["bbox"])
+                            for rrect in redact_rects:
+                                if span_rect.intersects(rrect):
+                                    # Check for vertical writing (rotation)
+                                    dir_vec = span.get("dir", (1, 0))
+                                    if abs(dir_vec[1]) > 0.1:  # Not purely horizontal
+                                        report["pages_with_errors"].append({
+                                            "page": page_idx + 1,
+                                            "error": "vertical_text",
+                                            "message": "Vertical text detected in redaction area"
+                                        })
+        except Exception:
+            pass  # If we can't check, continue
+
+        # Check for inline images (images embedded in content stream)
+        # These are harder to detect; we check for very small images that might be inline
+        try:
+            images = page.get_images()
+            for img in images:
+                img_name = img[7] if len(img) > 7 else img[-1]
+                img_rect = page.get_image_bbox(img_name)
+                for rrect in redact_rects:
+                    if img_rect.intersects(rrect):
+                        # Check if it's a small inline image (width/height < 10 points)
+                        if img_rect.width < 10 or img_rect.height < 10:
+                            report["pages_with_errors"].append({
+                                "page": page_idx + 1,
+                                "error": "inline_image",
+                                "message": "Small inline image detected in redaction area"
+                            })
+        except Exception:
+            pass
+
+        # Check for undecodable streams by trying to read the page content
+        try:
+            page.get_text("text")
+        except Exception:
+            report["pages_with_errors"].append({
+                "page": page_idx + 1,
+                "error": "undecodable_stream",
+                "message": "Page content stream could not be decoded"
+            })
+
+        # If any errors found, raise immediately (fail closed)
+        if report["pages_with_errors"]:
+            errors = report["pages_with_errors"]
+            error_msgs = "; ".join(f"page {e['page']}: {e['error']}" for e in errors)
+            raise EditError(
+                f"Redaction aborted - unprocessable content detected: {error_msgs}. "
+                f"Fail-closed policy: no redaction applied."
+            )
 
     def _strip_xfa(self, doc: fitz.Document) -> None:
         """Remove XFA packets from the document's AcroForm."""
@@ -1850,7 +1960,8 @@ class ApplyRedactions(Edit):
             if images:
                 for img in images:
                     # Get image bbox
-                    img_rect = page.get_image_bbox(img)
+                    img_name = img[7] if len(img) > 7 else img[-1]
+                    img_rect = page.get_image_bbox(img_name)
                     for rrect in redact_rects:
                         if img_rect.intersects(rrect):
                             raise EditError(

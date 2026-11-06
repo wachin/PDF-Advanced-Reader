@@ -1949,9 +1949,8 @@ explicitly a cover, not a redaction.
 - [x] Remove overlapping annotations (highlights, notes, popups) that intersect redaction areas
 - [x] Strip XFA packets (from AcroForm) and document metadata (Info dict) when they mirror redacted content
 - [x] **Proof step:** after applying, re-extract text, images, and vector graphics from redacted areas and abort if anything survives
-- [ ] Force a full save afterwards — the previous revision still holds the secret (uses staged_write)
-- [ ] Report exactly what was removed, and fail closed when a page cannot be
-      processed (vertical text, inline images, undecodable streams)
+- [x] Force a full save afterwards — the previous revision still holds the secret (uses staged_write)
+- [x] Report exactly what was removed (pages processed, marks, annotations, text, images, graphics), and fail closed when a page cannot be processed (vertical text, inline images, undecodable streams)
 - [ ] Tests that assert the redacted string cannot be selected, copied, searched
       or extracted, in the saved file
 

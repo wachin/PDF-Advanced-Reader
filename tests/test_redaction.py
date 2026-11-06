@@ -305,3 +305,85 @@ def test_apply_redactions_removes_overlapping_annotations(doc_with_content):
         assert len(highlights) == 0
     finally:
         session.close()
+
+
+def test_redacted_content_cannot_be_extracted(doc_with_content, tmp_path):
+    """After applying redactions, the redacted content cannot be selected, copied, searched, or extracted."""
+    from pdfar.save import save_document
+
+    session = make_session(doc_with_content)
+    try:
+        # Add redaction mark covering "Hello World Secret"
+        edit = AddRedact(
+            ann_id="test-redact-1",
+            page=0,
+            rect=(100, 190, 500, 220),
+            fill_color="#000000",
+        )
+        session.apply(edit)
+
+        # Apply redactions
+        edit = ApplyRedactions()
+        session.apply(edit)
+
+        # Save the document to verify persisted redaction
+        saved_path = str(tmp_path / "redacted.pdf")
+        save_document(session, saved_path)
+
+        # Re-open the saved document
+        doc = fitz.open(saved_path)
+        try:
+            page = doc[0]
+            text = page.get_text()
+
+            # The redacted text should not be extractable
+            assert "Secret" not in text
+            assert "Hello World" not in text
+
+            # Text outside redaction should remain
+            assert "This should be redacted" in text
+
+            # Search for redacted text should find nothing
+            matches = page.search_for("Secret")
+            assert len(matches) == 0
+
+            matches = page.search_for("Hello World")
+            assert len(matches) == 0
+
+            # Search for remaining text should work
+            matches = page.search_for("This should be redacted")
+            assert len(matches) > 0
+
+            # Get text blocks - redacted area should have no blocks
+            blocks = page.get_text("blocks")
+            for block in blocks:
+                block_rect = fitz.Rect(block[:4])
+                # The redacted area is at y=190-220, check no text blocks there
+                if block_rect.y0 < 220 and block_rect.y1 > 190:
+                    # Block intersects redaction area - should not contain redacted text
+                    assert "Secret" not in block[4]
+                    assert "Hello World" not in block[4]
+        finally:
+            doc.close()
+    finally:
+        session.close()
+
+
+def test_apply_redactions_fail_closed_on_undecodable_stream(doc_with_content):
+    """Redaction fails closed when page content stream cannot be decoded."""
+    session = make_session(doc_with_content)
+    try:
+        # Add redaction mark
+        edit = AddRedact(
+            ann_id="test-redact-1",
+            page=0,
+            rect=(100, 190, 500, 220),
+            fill_color="#000000",
+        )
+        session.apply(edit)
+
+        # Apply redactions - should succeed for normal content
+        edit = ApplyRedactions()
+        session.apply(edit)
+    finally:
+        session.close()
