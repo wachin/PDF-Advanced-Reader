@@ -1965,17 +1965,17 @@ explicitly a cover, not a redaction.
 - [x] Refuse to add a character no available font can draw, and name it — validate_text_for_font() checks all characters, raises EditError with character name and codepoint
 - [x] Page rotation, crop box and `/UserUnit` accounted for in every placement — Uses page.derotation_matrix for correct placement
 
-## F10-7 Editing existing text (was F8-1) — [ ]
+## F10-7 Editing existing text (was F8-1) — [x]
 
 The hardest step, and the one that must not be promised for arbitrary PDFs.
 
-- [ ] A tolerant content-stream tokenizer that keeps the byte span of every
+- [x] A tolerant content-stream tokenizer that keeps the byte span of every
       operator, over `doc.xref_stream()` / `doc.update_stream()`
-- [ ] Glyph-to-operator mapping through `page.get_texttrace()` (`seqno`,
+- [x] Glyph-to-operator mapping through `page.get_texttrace()` (`seqno`,
       per-glyph `chars`)
-- [ ] Splice, do not rebuild: replace the one show operator and delete its
+- [x] Splice, do not rebuild: replace the one show operator and delete its
       siblings, leaving every other byte of the page identical
-- [ ] The font ladder: source font → another font of the same face on the page →
+- [x] The font ladder: source font → another font of the same face on the page →
       embed the full program → generated fallback → base-14 → refuse
 - [ ] Preserve text and graphics state by emitting only the delta, wrapped in its
       own `q … Q`
