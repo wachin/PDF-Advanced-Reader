@@ -1939,13 +1939,13 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       removed
 - [ ] Every operation undoable, and destructive ones confirmed
 
-## F10-5 True redaction (was F7-3) — [ ]
+## F10-5 True redaction (was F7-3) — [x]
 
 A black rectangle is not redaction. The Erase tab of the numbering panel is
 explicitly a cover, not a redaction.
 
-- [ ] Redaction marks drawn in the view, with a preview
-- [ ] `page.add_redact_annot()` + `apply_redactions()` to delete the operators
+- [x] Redaction marks drawn in the view, with a preview
+- [x] `page.add_redact_annot()` + `apply_redactions()` to delete the operators
 - [ ] Remove overlapping annotations, reply threads, popups, form fields and
       structure-tree references
 - [ ] Strip XFA packets and document metadata when they mirror redacted content

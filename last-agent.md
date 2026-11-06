@@ -1,6 +1,8 @@
 
 
 
+20261106 OpenCode Desktop with FreeLLMAPI: Implemented true redaction (AddRedact, ApplyRedactions, redaction tool) in annotations.py, main.py, viewer.py with unit tests in test_redaction.py.
+
 20261106 OpenCode Desktop with FreeLLMAPI: Implemented page cropping (CropPages edit, get_page_content_bbox, CropDialog) in pages.py, crop_dialog.py, main.py, sidebar.py with unit tests in test_page_crop.py.
 
 20261106 OpenCode Desktop with FreeLLMAPI: Implemented insert document pages (InsertDocumentPages), merge_documents(), and split_document() in pages.py, sidebar.py, main.py with unit tests in test_page_split_merge.py.
