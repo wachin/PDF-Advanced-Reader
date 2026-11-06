@@ -465,3 +465,110 @@ def test_add_image_edit_undo(doc_blank):
         assert len(session.doc[0].get_images()) == 0
     finally:
         session.close()
+
+
+def test_text_box_font_validation_rejects_unsupported_char(doc_blank):
+    """Text box rejects text with unsupported characters."""
+    from pdfar.edits import EditError
+    
+    session = make_session(doc_blank)
+    try:
+        settings = TextBoxSettings(
+            text="Test with emoji 🎉",
+            font_family="Helvetica",
+            font_size=14.0,
+        )
+        edit = AddTextBox(settings=settings, page_range=(0, 0))
+        with pytest.raises(EditError, match="not available in font"):
+            session.apply(edit)
+    finally:
+        session.close()
+
+
+def test_header_footer_font_validation_rejects_unsupported_char(doc_blank):
+    """Header/footer rejects text with unsupported characters."""
+    from pdfar.edits import EditError
+    
+    session = make_session(doc_blank)
+    try:
+        settings = HeaderFooterSettings(
+            header_text="Header with emoji 🎉",
+            font_family="Helvetica",
+            font_size=12.0,
+        )
+        from pdfar.text_editing import apply_header_footer
+        with pytest.raises(EditError, match="not available in font"):
+            apply_header_footer(session.doc, settings, page_range=(0, 0))
+    finally:
+        session.close()
+
+
+def test_watermark_font_validation_rejects_unsupported_char(doc_blank):
+    """Watermark rejects text with unsupported characters."""
+    from pdfar.edits import EditError
+    
+    session = make_session(doc_blank)
+    try:
+        settings = WatermarkSettings(
+            text="Watermark with emoji 🎉",
+            font_family="Helvetica",
+            font_size=12.0,
+        )
+        from pdfar.text_editing import apply_watermark
+        with pytest.raises(EditError, match="not available in font"):
+            apply_watermark(session.doc, settings, page_range=(0, 0))
+    finally:
+        session.close()
+
+
+def test_bates_numbering_font_validation_rejects_unsupported_char(doc_blank):
+    """Bates numbering rejects unsupported characters in prefix/suffix."""
+    from pdfar.edits import EditError
+    
+    session = make_session(doc_blank)
+    try:
+        settings = BatesNumberSettings(
+            prefix="DOC-🎉-",
+            font_family="Helvetica",
+            font_size=12.0,
+        )
+        from pdfar.text_editing import apply_bates_numbering
+        with pytest.raises(EditError, match="not available in font"):
+            apply_bates_numbering(session.doc, settings, page_range=(0, 0))
+    finally:
+        session.close()
+
+
+def test_text_box_with_chinese_characters_in_supported_font(doc_blank):
+    """Text box accepts Chinese characters when font supports them."""
+    from pdfar.text_editing import apply_text_boxes
+    
+    # WenQuanYi Micro Hei supports Chinese characters
+    doc = fitz.open(doc_blank)
+    try:
+        settings = TextBoxSettings(
+            text="测试中文",
+            font_family="WenQuanYi Micro Hei",
+            font_size=14.0,
+        )
+        count = apply_text_boxes(doc, settings, page_range=(0, 0))
+        assert count == 1
+        assert "测试中文" in doc[0].get_text()
+    finally:
+        doc.close()
+
+
+def test_text_box_with_greek_characters_in_supported_font(doc_blank):
+    """Text box accepts Greek characters when font supports them."""
+    doc = fitz.open(doc_blank)
+    try:
+        settings = TextBoxSettings(
+            text="αβγδε",
+            font_family="DejaVu Sans",
+            font_size=14.0,
+        )
+        count = apply_text_boxes(doc, settings, page_range=(0, 0))
+        assert count == 1
+        assert "αβγδε" in doc[0].get_text()
+    finally:
+        doc.close()

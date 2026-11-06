@@ -54,6 +54,11 @@ class TextBoxSettings:
     line_spacing: float = 1.2
 
 
+def _sanitize_fontname(name: str) -> str:
+    """Sanitize font name for PyMuPDF (remove spaces, special chars)."""
+    return name.replace(" ", "").replace("-", "").replace("_", "")
+
+
 def resolve_font(font_family: str, font_style: str) -> Tuple[str, Optional[str]]:
     """Resolve font family/style to (fontname, fontfile_path).
     
@@ -75,10 +80,52 @@ def resolve_font(font_family: str, font_style: str) -> Tuple[str, Optional[str]]
             base_style = style_map.get(font_style, "regular")
             return _BASE14_ALIASES[key][base_style], None
     
-    # For system fonts, we need to be careful about calling Qt functions
-    # in test environments. Try to use the font if it's a known system font.
+    # Try system font
+    path = font_file(font_family, font_style)
+    if path:
+        # Return sanitized fontname for PyMuPDF, and the font file path
+        return _sanitize_fontname(font_family), path
+    
     # Fallback to Helvetica
     return "helv", None
+
+
+def _get_font_object(fontname: str, fontfile: Optional[str] = None) -> fitz.Font:
+    """Get a fitz.Font object for the given font."""
+    if fontfile:
+        return fitz.Font(fontfile=fontfile)
+    # For Base14 fonts, create a Font object
+    return fitz.Font(fontname)
+
+
+def validate_text_for_font(text: str, fontname: str, fontfile: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+    """Validate that all characters in text are supported by the font.
+    
+    Returns (is_valid, error_message). If invalid, error_message describes
+    the first unsupported character found.
+    """
+    font_obj = _get_font_object(fontname, fontfile)
+    
+    for char in text:
+        codepoint = ord(char)
+        if not font_obj.has_glyph(codepoint):
+            return False, (
+                f"Character {char!r} (U+{codepoint:04X}) is not available in font '{fontname}'. "
+                f"Please choose a font that supports this character."
+            )
+    return True, None
+
+
+def _get_text_length(text: str, fontname: str, fontsize: float, fontfile: Optional[str] = None) -> float:
+    """Get text length for a font.
+    
+    Uses font object's text_length for custom fonts, fitz.get_text_length for Base14.
+    """
+    if fontfile:
+        font_obj = fitz.Font(fontfile=fontfile)
+        return font_obj.text_length(text, fontsize)
+    else:
+        return fitz.get_text_length(text, fontname=fontname, fontsize=fontsize)
 
 
 def _wrap_text(
@@ -92,16 +139,13 @@ def _wrap_text(
     
     Returns list of lines that fit within the width.
     """
-    # Create a temporary page to measure text
-    doc = fitz.open()
-    page = doc.new_page(width=max_width + 100, height=100)
-    
-    if fontfile:
-        page.insert_font(fontname=fontname, fontfile=fontfile)
+    # Validate text before wrapping
+    valid, error = validate_text_for_font(text, fontname, fontfile)
+    if not valid:
+        raise EditError(f"Cannot wrap text: {error}")
     
     words = text.split()
     if not words:
-        doc.close()
         return [""]
     
     lines = []
@@ -109,10 +153,7 @@ def _wrap_text(
     
     for word in words[1:]:
         test_line = current_line + " " + word
-        # Measure text width
-        if fontfile:
-            page.insert_font(fontname=fontname, fontfile=fontfile)
-        tw = fitz.get_text_length(test_line, fontname=fontname, fontsize=fontsize)
+        tw = _get_text_length(test_line, fontname, fontsize, fontfile)
         if tw <= max_width:
             current_line = test_line
         else:
@@ -120,7 +161,6 @@ def _wrap_text(
             current_line = word
     
     lines.append(current_line)
-    doc.close()
     return lines
 
 
@@ -133,6 +173,14 @@ def _apply_text_box(
     """Apply text box to a page at the specified position."""
     
     fontname, fontfile = resolve_font(settings.font_family, settings.font_style)
+    
+    # Validate all text before insertion
+    full_text = settings.text
+    if not settings.word_wrap:
+        full_text = full_text.replace('\n', ' ')
+    valid, error = validate_text_for_font(full_text, fontname, fontfile)
+    if not valid:
+        raise EditError(error)
     
     # Calculate box position based on position setting
     positions = {
@@ -171,7 +219,8 @@ def _apply_text_box(
         # Calculate x based on alignment
         if fontfile:
             page.insert_font(fontname=fontname, fontfile=fontfile)
-        line_width = fitz.get_text_length(line, fontname=fontname, fontsize=settings.font_size)
+        # Use font object's text_length for custom fonts, fitz.get_text_length for Base14
+        line_width = _get_text_length(line, fontname, settings.font_size, fontfile)
         
         if settings.alignment == "center":
             line_x = x + (settings.box_width - line_width) / 2
@@ -292,6 +341,27 @@ def apply_header_footer(
     fontname, fontfile = resolve_font(settings.font_family, settings.font_style)
     total_pages = doc.page_count
     
+    # Validate header and footer text
+    if settings.header_text:
+        valid, error = validate_text_for_font(settings.header_text, fontname, fontfile)
+        if not valid:
+            raise EditError(f"Header text validation failed: {error}")
+    
+    if settings.footer_text:
+        valid, error = validate_text_for_font(settings.footer_text, fontname, fontfile)
+        if not valid:
+            raise EditError(f"Footer text validation failed: {error}")
+    
+    if settings.first_page_header:
+        valid, error = validate_text_for_font(settings.first_page_header, fontname, fontfile)
+        if not valid:
+            raise EditError(f"First page header validation failed: {error}")
+    
+    if settings.first_page_footer:
+        valid, error = validate_text_for_font(settings.first_page_footer, fontname, fontfile)
+        if not valid:
+            raise EditError(f"First page footer validation failed: {error}")
+    
     color = _parse_color(settings.font_color)
     
     for i in range(first, last + 1):
@@ -391,6 +461,13 @@ def apply_watermark(
         return 0
     
     fontname, fontfile = resolve_font(settings.font_family, settings.font_style)
+    
+    # Validate watermark text
+    if settings.text:
+        valid, error = validate_text_for_font(settings.text, fontname, fontfile)
+        if not valid:
+            raise EditError(f"Watermark text validation failed: {error}")
+    
     color = _parse_color(settings.font_color)
     
     # Normalize rotation to 90-degree increments (PyMuPDF only supports 0, 90, 180, 270)
@@ -571,7 +648,6 @@ def apply_bates_numbering(
         return 0
     
     fontname, fontfile = resolve_font(settings.font_family, settings.font_style)
-    color = _parse_color(settings.font_color)
     
     bates_num = settings.start_number
     for i in range(first, last + 1):
@@ -584,6 +660,11 @@ def apply_bates_numbering(
         
         bates_text = f"{settings.prefix}{settings.number_format.format(number=bates_num)}{settings.suffix}"
         bates_num += 1
+        
+        # Validate Bates text
+        valid, error = validate_text_for_font(bates_text, fontname, fontfile)
+        if not valid:
+            raise EditError(f"Bates numbering text validation failed: {error}")
         
         bn_settings = TextBoxSettings(
             text=bates_text,
