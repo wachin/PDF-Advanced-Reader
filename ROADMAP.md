@@ -1933,7 +1933,7 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       document already states everything, which is the ordinary case.  Nothing
       reordered pages when it landed, so it was written first; every reorder calls it
       now (F10-4p); see `### F10-4o`.
-- [ ] Cross-document copy that rewires parents, destinations and fields, and
+- [x] Cross-document copy that rewires parents, destinations and fields, and
       drops links whose target was not copied
 - [ ] Metadata and outline preserved; outline entries pointing at deleted pages
       removed
