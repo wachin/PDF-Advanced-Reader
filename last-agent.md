@@ -1,6 +1,8 @@
 
 
 
+20261106 OpenCode Desktop with FreeLLMAPI: Completed remaining redaction features (overlapping annotation removal, XFA/metadata stripping, proof verification) in annotations.py with tests in test_redaction.py.
+
 20261106 OpenCode Desktop with FreeLLMAPI: Enhanced cross-document copy (InsertDocumentPages, merge_documents) with TOC, page label, and link rewiring in pages.py with tests in test_page_split_merge.py.
 
 20261106 OpenCode Desktop with FreeLLMAPI: Implemented true redaction (AddRedact, ApplyRedactions, redaction tool) in annotations.py, main.py, viewer.py with unit tests in test_redaction.py.

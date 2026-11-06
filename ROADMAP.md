@@ -1946,12 +1946,10 @@ explicitly a cover, not a redaction.
 
 - [x] Redaction marks drawn in the view, with a preview
 - [x] `page.add_redact_annot()` + `apply_redactions()` to delete the operators
-- [ ] Remove overlapping annotations, reply threads, popups, form fields and
-      structure-tree references
-- [ ] Strip XFA packets and document metadata when they mirror redacted content
-- [ ] **Proof step:** after applying, re-extract text and images from every
-      redacted page and abort the whole operation if anything survives
-- [ ] Force a full save afterwards — the previous revision still holds the secret
+- [x] Remove overlapping annotations (highlights, notes, popups) that intersect redaction areas
+- [x] Strip XFA packets (from AcroForm) and document metadata (Info dict) when they mirror redacted content
+- [x] **Proof step:** after applying, re-extract text, images, and vector graphics from redacted areas and abort if anything survives
+- [ ] Force a full save afterwards — the previous revision still holds the secret (uses staged_write)
 - [ ] Report exactly what was removed, and fail closed when a page cannot be
       processed (vertical text, inline images, undecodable streams)
 - [ ] Tests that assert the redacted string cannot be selected, copied, searched

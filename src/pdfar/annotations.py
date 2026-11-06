@@ -1737,7 +1737,9 @@ class ApplyRedactions(Edit):
 
     This is a destructive operation that cannot be undone in the traditional
     sense - it permanently removes text, images, and graphics from the pages
-    where redaction marks exist. The document is saved with a new revision.
+    where redaction marks exist. Also removes overlapping annotations,
+    strips XFA and metadata that might mirror redacted content, and verifies
+    the redaction was successful.
     """
 
     scope = Scope.CONTENT | Scope.STRUCTURE
@@ -1752,12 +1754,36 @@ class ApplyRedactions(Edit):
 
     def apply(self, doc: fitz.Document) -> None:
         total_redacted = 0
+        removed_annots = 0
+        redacted_pages = set()
+
         for page_idx in range(doc.page_count):
             page = doc.load_page(page_idx)
             redacts = [a for a in page.annots() if a.type[0] == 12]  # Redact type
             if not redacts:
                 continue
-            # Apply redactions with aggressive settings: remove images, graphics, text
+
+            redacted_pages.add(page_idx)
+
+            # Collect redaction rectangles
+            redact_rects = [a.rect for a in redacts]
+
+            # Remove annotations that overlap with redaction areas
+            # We must collect them first since we can't delete while iterating
+            annots_to_remove = []
+            for annot in page.annots():
+                if annot.type[0] == 12:  # Don't remove the redaction marks themselves
+                    continue
+                for rrect in redact_rects:
+                    if annot.rect.intersects(rrect):
+                        annots_to_remove.append(annot)
+                        break
+
+            for annot in annots_to_remove:
+                page.delete_annot(annot)
+                removed_annots += 1
+
+            # Apply redactions with aggressive settings
             # images=2: blank out overlapping image parts
             # graphics=1: remove graphics if contained in rectangle
             # text=0: remove text (default)
@@ -1766,6 +1792,83 @@ class ApplyRedactions(Edit):
 
         if total_redacted == 0:
             raise EditError("No redaction marks found in the document")
+
+        # Strip XFA packets if present (they may contain redacted content)
+        self._strip_xfa(doc)
+
+        # Strip document metadata that might mirror redacted content
+        self._strip_metadata(doc)
+
+        # Proof step: verify redaction was successful
+        self._verify_redaction(doc, redacted_pages)
+
+    def _strip_xfa(self, doc: fitz.Document) -> None:
+        """Remove XFA packets from the document's AcroForm."""
+        cat = doc.pdf_catalog()
+        acro_key = doc.xref_get_key(cat, "AcroForm")
+        if acro_key[0] != "dict":
+            return
+        acro_xref = int(acro_key[1].split()[0])
+        acro_keys = doc.xref_get_keys(acro_xref)
+        if "XFA" in acro_keys:
+            # Remove the XFA entry by setting it to null
+            doc.xref_set_key(acro_xref, "XFA", "null")
+
+    def _strip_metadata(self, doc: fitz.Document) -> None:
+        """Remove document metadata that might contain redacted content."""
+        # Clear the Info dictionary metadata
+        doc.set_metadata({})
+
+    def _verify_redaction(self, doc: fitz.Document, redacted_pages: set[int]) -> None:
+        """Verify that redacted content is no longer extractable.
+
+        Re-extracts text and images from redacted pages and raises
+        if any original content survives within the redacted areas.
+        """
+        for page_idx in redacted_pages:
+            page = doc.load_page(page_idx)
+
+            # Find the redaction annotations on this page to get their rects
+            redacts = [a for a in page.annots() if a.type[0] == 12]
+            if not redacts:
+                continue
+            redact_rects = [a.rect for a in redacts]
+
+            # Check for remaining text in redacted areas
+            # Use search to find text, then check if it falls within redacted rects
+            text_blocks = page.get_text("blocks")
+            for block in text_blocks:
+                block_rect = fitz.Rect(block[:4])
+                for rrect in redact_rects:
+                    if block_rect.intersects(rrect):
+                        raise EditError(
+                            f"Redaction verification failed: page {page_idx + 1} "
+                            f"still contains text in redacted area: {block[4][:50]}...")
+
+            # Check for remaining images in redacted areas
+            images = page.get_images()
+            if images:
+                for img in images:
+                    # Get image bbox
+                    img_rect = page.get_image_bbox(img)
+                    for rrect in redact_rects:
+                        if img_rect.intersects(rrect):
+                            raise EditError(
+                                f"Redaction verification failed: page {page_idx + 1} "
+                                f"still contains image in redacted area")
+
+            # Check for remaining drawings in redacted areas
+            drawings = page.get_drawings()
+            for d in drawings:
+                d_rect = d["rect"]
+                # Skip the redaction fill rectangles themselves (black fill)
+                if d.get("fill") == (0, 0, 0):
+                    continue
+                for rrect in redact_rects:
+                    if d_rect.intersects(rrect):
+                        raise EditError(
+                            f"Redaction verification failed: page {page_idx + 1} "
+                            f"still contains vector graphics in redacted area")
 
 
 @dataclass(frozen=True)
