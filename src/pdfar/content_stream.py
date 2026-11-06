@@ -373,6 +373,30 @@ class ContentStreamParser:
                 i = j
                 continue
             
+            # Hex string
+            elif c == b'<':
+                if i + 1 < end and data[i+1:i+2] == b'<':
+                    # Dictionary << ... >>
+                    end_dict = data.find(b'>>', i)
+                    if end_dict > i and end_dict < end:
+                        items.append(data[i:end_dict+2])
+                        i = end_dict + 2
+                        continue
+                else:
+                    # Hex string
+                    end_hex = data.find(b'>', i)
+                    if end_hex > i and end_hex < end:
+                        hex_str = data[i+1:end_hex].decode('ascii', errors='ignore')
+                        try:
+                            items.append(bytes.fromhex(hex_str))
+                        except ValueError:
+                            items.append(data[i:end_hex+1])
+                        i = end_hex + 1
+                        continue
+                    else:
+                        i += 1
+                        continue
+            
             # Name
             elif data[i:i+1] == b'/':
                 j = i + 1
@@ -454,12 +478,23 @@ class ContentStreamSerializer:
     """Serialize operators back to content stream bytes."""
     
     @staticmethod
-    def serialize_operand(operand: Any) -> bytes:
-        """Serialize a single operand to bytes."""
+    def serialize_operand(operand: Any, operator: str = "") -> bytes:
+        """Serialize a single operand to bytes.
+        
+        For Tf operator, the first operand (font name) should be a name object (prefixed with /).
+        For text-showing operators (Tj, TJ, ', "), string operands should be literal strings (in parentheses).
+        """
         if isinstance(operand, str):
-            # Escape special characters in string
-            escaped = operand.replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
-            return b'(' + escaped.encode('utf-8') + b')'
+            # Check if this is a font name for Tf operator
+            if operator == "Tf":
+                # Font names are name objects (prefixed with /)
+                # Escape special characters in name
+                escaped = operand.replace('#', '#20').replace('/', '#2F')
+                return b'/' + escaped.encode('ascii')
+            else:
+                # String literal (for Tj, TJ, ', ")
+                escaped = operand.replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
+                return b'(' + escaped.encode('utf-8') + b')'
         elif isinstance(operand, bytes):
             return b'<' + operand.hex().upper().encode('ascii') + b'>'
         elif isinstance(operand, (int, float)):
@@ -470,7 +505,7 @@ class ContentStreamSerializer:
             return b'null'
         elif isinstance(operand, list):
             # Array
-            inner = b' '.join(ContentStreamSerializer.serialize_operand(x) for x in operand)
+            inner = b' '.join(ContentStreamSerializer.serialize_operand(x, operator) for x in operand)
             return b'[' + inner + b']'
         elif isinstance(operand, dict):
             # Dictionary - simplified
@@ -483,9 +518,9 @@ class ContentStreamSerializer:
         """Serialize operators back to content stream bytes."""
         parts = []
         for op in ops:
-            # Serialize operands
+            # Serialize operands with operator context
             for operand in op.operands:
-                parts.append(cls.serialize_operand(operand))
+                parts.append(cls.serialize_operand(operand, op.operator))
             # Operator
             parts.append(op.operator.encode('ascii'))
         return b' '.join(parts) + b'\n'
@@ -496,15 +531,32 @@ def _extract_text_from_op(op: PDFOperator) -> str:
     if op.operator == "Tj":
         if op.operands and isinstance(op.operands[0], str):
             return op.operands[0]
+        elif op.operands and isinstance(op.operands[0], bytes):
+            # Handle hex string - try latin-1 first (common for PDF)
+            try:
+                return op.operands[0].decode('latin-1', errors='ignore')
+            except Exception:
+                return op.operands[0].decode('utf-8', errors='ignore')
     elif op.operator == "TJ":
         text = ""
         for operand in op.operands:
             if isinstance(operand, str):
                 text += operand
+            elif isinstance(operand, bytes):
+                # Hex string - try latin-1 first (common for PDF)
+                try:
+                    text += operand.decode('latin-1', errors='ignore')
+                except Exception:
+                    text += operand.decode('utf-8', errors='ignore')
             elif isinstance(operand, list):
                 for item in operand:
                     if isinstance(item, str):
                         text += item
+                    elif isinstance(item, bytes):
+                        try:
+                            text += item.decode('latin-1', errors='ignore')
+                        except Exception:
+                            text += item.decode('utf-8', errors='ignore')
             return text
     elif op.operator == "'":
         if op.operands and isinstance(op.operands[0], str):
@@ -521,11 +573,24 @@ def _make_new_operands(old_operands: List[Any], old_text: str, new_text: str) ->
     for operand in old_operands:
         if isinstance(operand, str) and old_text in operand:
             new_operands.append(operand.replace(old_text, new_text))
+        elif isinstance(operand, bytes):
+            # Handle hex string - PDF content streams typically use latin-1
+            decoded = operand.decode('latin-1', errors='ignore')
+            if old_text in decoded:
+                new_operands.append(decoded.replace(old_text, new_text).encode('latin-1'))
+            else:
+                new_operands.append(operand)
         elif isinstance(operand, list):
             new_list = []
             for item in operand:
                 if isinstance(item, str) and old_text in item:
                     new_list.append(item.replace(old_text, new_text))
+                elif isinstance(item, bytes):
+                    decoded = item.decode('latin-1', errors='ignore')
+                    if old_text in decoded:
+                        new_list.append(decoded.replace(old_text, new_text).encode('latin-1'))
+                    else:
+                        new_list.append(item)
                 else:
                     new_list.append(item)
             new_operands.append(new_list)

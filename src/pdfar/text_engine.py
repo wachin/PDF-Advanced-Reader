@@ -470,23 +470,52 @@ class ReplaceTextRun(Edit):
     def apply(self, doc: fitz.Document) -> None:
         page = doc[self.page_num]
         
-        # Use PyMuPDF's built-in replacement as fallback
-        # (This is a placeholder - real implementation would splice content stream)
-        instances = page.search_for(self.old_text)
-        if not instances:
-            raise EditError(f"Text '{self.old_text}' not found on page {self.page_num + 1}")
-        
-        for inst in instances:
-            page.add_redact_annot(inst, fill=(1, 1, 1))
-        page.apply_redactions()
-        
-        if instances:
-            pos = instances[0]
-            page.insert_text(
-                (pos.x0, pos.y1), self.new_text,
-                fontname=self.font_name, fontsize=self.font_size,
-                color=self.color
-            )
+        # Real content stream splicing implementation
+        # 1. Get the page's content streams
+        contents = page.get_contents()
+        if isinstance(contents, list):
+            # Multiple content streams - we'll need to find which one has our text
+            # For simplicity, we'll process all streams and update them
+            for stream_obj in contents:
+                stream_data = doc.xref_stream(stream_obj)
+                if not stream_data:
+                    continue
+                ops = ContentStreamParser.parse(stream_data)
+                
+                # Find text-showing operators with our old_text
+                modified = False
+                for i, op in enumerate(ops):
+                    if op.operator in {"Tj", "TJ", "'", '"'}:
+                        text = _extract_text_from_op(op)
+                        if self.old_text in text:
+                            # Replace text in operands
+                            new_operands = _make_new_operands(op.operands, self.old_text, self.new_text)
+                            ops[i].operands = new_operands
+                            modified = True
+                
+                if modified:
+                    new_stream = ContentStreamSerializer.serialize_ops(ops)
+                    doc.update_stream(stream_obj, new_stream)
+        else:
+            # Single content stream
+            stream_obj = contents
+            stream_data = doc.xref_stream(stream_obj)
+            if not stream_data:
+                raise EditError("Could not read content stream")
+            
+            ops = ContentStreamParser.parse(stream_data)
+            modified = False
+            for i, op in enumerate(ops):
+                if op.operator in {"Tj", "TJ", "'", '"'}:
+                    text = _extract_text_from_op(op)
+                    if self.old_text in text:
+                        new_operands = _make_new_operands(op.operands, self.old_text, self.new_text)
+                        ops[i].operands = new_operands
+                        modified = True
+            
+            if modified:
+                new_stream = ContentStreamSerializer.serialize_ops(ops)
+                doc.update_stream(stream_obj, new_stream)
 
 
 # Convenience function for high-level text replacement
