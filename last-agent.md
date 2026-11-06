@@ -1,6 +1,8 @@
 
 
 
+20261106 OpenCode Desktop with FreeLLMAPI: Implemented image insertion (F10-6) - JPEG without recompression in text_editing.py, text_box_dialog.py, main.py with tests in test_text_editing.py.
+
 20261106 OpenCode Desktop with FreeLLMAPI: Implemented content editing (F10-6) - text boxes, header/footer, watermark, Bates numbering in text_editing.py, text_box_dialog.py, main.py with tests in test_text_editing.py.
 
 20261106 OpenCode Desktop with FreeLLMAPI: Completed remaining redaction features (overlapping annotation removal, XFA/metadata stripping, proof verification) in annotations.py with tests in test_redaction.py.

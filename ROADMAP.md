@@ -1957,7 +1957,7 @@ explicitly a cover, not a redaction.
 ## F10-6 Adding content — [ ]
 
 - [x] Add text (box with wrapping, font, size, colour) — TextBoxSettings with word wrap, font selection, color, alignment, positioning
-- [ ] Add images, inserting JPEG bytes without recompression
+- [x] Add images, inserting JPEG bytes without recompression — ImageInsertSettings with raw bytes or file path, preserves DCTDecode filter
 - [x] Header/footer, watermark, background — HeaderFooterSettings, WatermarkSettings with page numbers, tiling, rotation
 - [x] Bates numbering — BatesNumberSettings with prefix/suffix, skip pages, formatting
 - [ ] Font embedding by full program, never a subset, with ToUnicode so the text
