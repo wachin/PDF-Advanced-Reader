@@ -48,6 +48,11 @@ from .page_numbers import (
     erased_copy_path, numbered_copy_path, stamp_copy,
 )
 from .crop_dialog import CropDialog
+from .text_box_dialog import TextBoxDialog
+from .text_editing import (
+    AddTextBox, TextBoxSettings, HeaderFooterSettings, WatermarkSettings, BatesNumberSettings,
+    apply_text_boxes, apply_header_footer, apply_watermark, apply_bates_numbering,
+)
 from .pages import (
     CropPages, DeletePages, DuplicatePages, InsertBlankPage, InsertDocumentPages, MovePages, ReversePages,
     RotatePages, contiguous_runs, extract_pages,
@@ -640,9 +645,16 @@ class MainWindow(QMainWindow):
             "Draw a line of known length to set the scale from it")
         self.act_measure_calibrate.triggered.connect(self._start_calibration)
 
+        # Text Box: add text with formatting options
+        self.act_text_box = QAction("Text Box", self)
+        self.act_text_box.setCheckable(True)
+        self.act_text_box.setToolTip("Add a formatted text box to the page")
+        self.act_text_box.triggered.connect(self._text_box)
+
         for action in (self.act_explore, self.act_sel_text,
                        self.act_sel_area, self.act_sel_table, self.act_draw,
                        self.act_redact,
+                       self.act_text_box,
                        *self._shape_actions.values(),
                        *self._stamp_actions.values(),
                        *self._custom_stamp_actions.values(),
@@ -1708,6 +1720,119 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Crop Pages", f"{action.capitalize()} {len(target_pages)} page(s).")
             except Exception as exc:
                 QMessageBox.critical(self, "Crop Pages", f"Could not crop pages: {exc}")
+
+    def _text_box(self) -> None:
+        """Open the text box dialog for adding formatted text."""
+        if not self.view:
+            return
+        view = self.view
+        session = view.session
+
+        dlg = TextBoxDialog(session.doc, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        tab_index = dlg.tabs.currentIndex()
+        
+        if tab_index == 0:  # Text Box
+            settings = dlg.get_text_box_settings()
+            page_range = dlg.get_page_range(dlg.findChild(QGroupBox, "Page Range"), session.doc.page_count)
+            if page_range is None:
+                page_range = (0, session.doc.page_count - 1)
+            
+            try:
+                view.apply_edit(AddTextBox(settings=settings, page_range=page_range))
+                QMessageBox.information(self, "Text Box", f"Text box added to {page_range[1] - page_range[0] + 1} page(s).")
+            except Exception as exc:
+                QMessageBox.critical(self, "Text Box", f"Could not add text box: {exc}")
+
+        elif tab_index == 1:  # Header / Footer
+            settings = dlg.get_header_footer_settings()
+            page_range = dlg.get_page_range(dlg.header_footer_tab.findChild(QGroupBox, "Page Range"), session.doc.page_count)
+            if page_range is None:
+                page_range = (0, session.doc.page_count - 1)
+            
+            try:
+                # Create a custom edit for header/footer
+                from .text_editing import apply_header_footer
+                class AddHeaderFooter(Edit):
+                    settings: HeaderFooterSettings
+                    page_range: Optional[Tuple[int, int]] = None
+                    scope = Scope.CONTENT
+                    requires_assembly = True
+                    
+                    @property
+                    def label(self) -> str:
+                        return "Add header/footer"
+                    
+                    def page_order(self, before_count: int) -> Tuple[int, ...]:
+                        return tuple(range(before_count))
+                    
+                    def apply(self, doc: fitz.Document) -> None:
+                        apply_header_footer(doc, self.settings, self.page_range)
+                
+                view.apply_edit(AddHeaderFooter(settings=settings, page_range=page_range))
+                QMessageBox.information(self, "Header / Footer", f"Header/footer added to {page_range[1] - page_range[0] + 1} page(s).")
+            except Exception as exc:
+                QMessageBox.critical(self, "Header / Footer", f"Could not add header/footer: {exc}")
+
+        elif tab_index == 2:  # Watermark
+            settings = dlg.get_watermark_settings()
+            page_range = dlg.get_page_range(dlg.watermark_tab.findChild(QGroupBox, "Page Range"), session.doc.page_count)
+            if page_range is None:
+                page_range = (0, session.doc.page_count - 1)
+            
+            try:
+                from .text_editing import apply_watermark
+                class AddWatermark(Edit):
+                    settings: WatermarkSettings
+                    page_range: Optional[Tuple[int, int]] = None
+                    scope = Scope.CONTENT
+                    requires_assembly = True
+                    
+                    @property
+                    def label(self) -> str:
+                        return "Add watermark"
+                    
+                    def page_order(self, before_count: int) -> Tuple[int, ...]:
+                        return tuple(range(before_count))
+                    
+                    def apply(self, doc: fitz.Document) -> None:
+                        apply_watermark(doc, self.settings, self.page_range)
+                
+                view.apply_edit(AddWatermark(settings=settings, page_range=page_range))
+                QMessageBox.information(self, "Watermark", f"Watermark added to {page_range[1] - page_range[0] + 1} page(s).")
+            except Exception as exc:
+                QMessageBox.critical(self, "Watermark", f"Could not add watermark: {exc}")
+
+        elif tab_index == 3:  # Bates Numbering
+            settings = dlg.get_bates_settings()
+            page_range = dlg.get_page_range(dlg.bates_tab.findChild(QGroupBox, "Page Range"), session.doc.page_count)
+            if page_range is None:
+                page_range = (0, session.doc.page_count - 1)
+            
+            try:
+                from .text_editing import apply_bates_numbering
+                class AddBatesNumbering(Edit):
+                    settings: BatesNumberSettings
+                    page_range: Optional[Tuple[int, int]] = None
+                    scope = Scope.CONTENT
+                    requires_assembly = True
+                    
+                    @property
+                    def label(self) -> str:
+                        return "Add Bates numbering"
+                    
+                    def page_order(self, before_count: int) -> Tuple[int, ...]:
+                        return tuple(range(before_count))
+                    
+                    def apply(self, doc: fitz.Document) -> None:
+                        apply_bates_numbering(doc, self.settings, self.page_range)
+                
+                view.apply_edit(AddBatesNumbering(settings=settings, page_range=page_range))
+                QMessageBox.information(self, "Bates Numbering", f"Bates numbering added to {page_range[1] - page_range[0] + 1} page(s).")
+            except Exception as exc:
+                QMessageBox.critical(self, "Bates Numbering", f"Could not add Bates numbering: {exc}")
 
     def _apply_redactions(self) -> None:
         """Apply all redaction marks in the document, permanently removing content."""
