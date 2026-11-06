@@ -48,8 +48,9 @@ from .page_numbers import (
     erased_copy_path, numbered_copy_path, stamp_copy,
 )
 from .pages import (
-    DeletePages, DuplicatePages, InsertBlankPage, MovePages, ReversePages,
-    RotatePages, contiguous_runs, extract_pages, shifted_index,
+    DeletePages, DuplicatePages, InsertBlankPage, InsertDocumentPages, MovePages, ReversePages,
+    RotatePages, contiguous_runs, extract_pages,
+    merge_documents, split_document, shifted_index,
 )
 from .save import ProtectionError, SaveError, SaveReport, save_document
 from .search import (
@@ -751,12 +752,19 @@ class MainWindow(QMainWindow):
             "Extract the page you are reading or selected pages into a new PDF file")
         self.act_page_extract.triggered.connect(self._page_extract)
 
-        # The permission gate writes its reason into these six tooltips and takes it
+        self.act_insert_pdf = QAction("Insert PDF File…", self)
+        self.act_insert_pdf.setToolTip(
+            "Insert pages from another PDF document into the current document at the "
+            "page under the cursor or selected pages")
+        self.act_insert_pdf.triggered.connect(self._insert_pdf_file)
+
+        # The permission gate writes its reason into these seven tooltips and takes it
         # out again for the next document, so the sentence each action was built with is
         # kept on the action rather than restated where it is restored (F10-4z).
         for _page_action in (self.act_page_rotl, self.act_page_rotr,
                              self.act_page_delete, self.act_page_insert,
-                             self.act_page_duplicate, self.act_page_extract):
+                             self.act_page_duplicate, self.act_page_extract,
+                             self.act_insert_pdf):
             _page_action.setProperty("plainToolTip", _page_action.toolTip())
 
         # The permissions password lifts the refusal those five items answer to, in
@@ -796,6 +804,16 @@ class MainWindow(QMainWindow):
         self.act_attachments.setShortcut("Ctrl+Shift+A")
         self.act_attachments.setToolTip("Show Attachments (Ctrl+Shift+A)")
         self.act_attachments.triggered.connect(self._show_attachments)
+
+        self.act_merge_pdfs = QAction("Merge PDFs…", self)
+        self.act_merge_pdfs.setToolTip(
+            "Combine several PDF documents into one file, in the order they are chosen")
+        self.act_merge_pdfs.triggered.connect(self._merge_pdfs)
+
+        self.act_split_pdf = QAction("Split PDF…", self)
+        self.act_split_pdf.setToolTip(
+            "Split this document into one PDF per chunk of pages, saved beside it")
+        self.act_split_pdf.triggered.connect(self._split_pdf)
 
         self.act_page_numbers = QAction("Page &Numbers…", self)
         self.act_page_numbers.setToolTip(
@@ -840,6 +858,9 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.act_import_xfdf)
         file_menu.addSeparator()
         file_menu.addAction(self.act_print)
+        file_menu.addSeparator()
+        file_menu.addAction(self.act_merge_pdfs)
+        file_menu.addAction(self.act_split_pdf)
         file_menu.addSeparator()
         file_menu.addAction(self.act_quit)
 
@@ -898,6 +919,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.act_page_insert)
         tools_menu.addAction(self.act_page_duplicate)
         tools_menu.addAction(self.act_page_extract)
+        tools_menu.addAction(self.act_insert_pdf)
         tools_menu.addAction(self.act_page_delete)
         # Directly under the six items the sealed book greys: the command that turns
         # them back on, for the reader who wonders why they are pale (F10-4aa).
@@ -1599,6 +1621,77 @@ class MainWindow(QMainWindow):
                                     f"Extracted {len(pages)} page(s) to:\n{target_path}")
         except Exception as exc:
             QMessageBox.critical(self, "Extract Pages", f"Could not extract pages: {exc}")
+
+    def _insert_pdf_file(self) -> None:
+        """Insert pages from another PDF file at the current page."""
+        if not self.view:
+            return
+        view = self.view
+        session = view.session
+
+        source_path, _ = QFileDialog.getOpenFileName(
+            self, "Select PDF File to Insert", "", "PDF Files (*.pdf)")
+        if not source_path:
+            return
+
+        at = view.current_page + 1
+        try:
+            view.apply_edit(InsertDocumentPages(source_path=source_path, at=at))
+            QMessageBox.information(self, "Insert PDF File",
+                                    f"Inserted pages from:\n{source_path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Insert PDF File", f"Could not insert document: {exc}")
+
+    def _merge_pdfs(self) -> None:
+        """Combine multiple PDF files chosen by the user into a single PDF document."""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select PDF Files to Merge", "", "PDF Files (*.pdf)")
+        if not paths:
+            return
+        if len(paths) < 2:
+            QMessageBox.warning(self, "Merge PDFs",
+                                "Please select at least two PDF files to merge.")
+            return
+
+        target_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Merged PDF As", "merged.pdf", "PDF Files (*.pdf)")
+        if not target_path:
+            return
+
+        try:
+            merge_documents(paths, target_path)
+            QMessageBox.information(self, "Merge PDFs",
+                                    f"Successfully merged {len(paths)} files into:\n{target_path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Merge PDFs", f"Could not merge documents: {exc}")
+
+    def _split_pdf(self) -> None:
+        """Split the current document into separate PDF files by page count."""
+        if not self.view:
+            return
+        view = self.view
+        session = view.session
+
+        chunk_size, ok = QInputDialog.getInt(
+            self, "Split PDF",
+            "Pages per output file:",
+            value=1, min=1, max=session.doc.page_count, step=1)
+        if not ok:
+            return
+
+        default_dir = os.path.dirname(session.path) if session.path else ""
+        output_dir = QFileDialog.getExistingDirectory(
+            self, "Select Output Directory", default_dir)
+        if not output_dir:
+            return
+
+        try:
+            created = split_document(session.doc, output_dir, chunk_size=chunk_size)
+            QMessageBox.information(
+                self, "Split PDF",
+                f"Split document into {len(created)} file(s) in:\n{output_dir}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Split PDF", f"Could not split document: {exc}")
 
     @staticmethod
     def _page_words(pages: Tuple[int, ...]) -> str:
@@ -2862,6 +2955,7 @@ class MainWindow(QMainWindow):
         tab.sidebar.page_insert_requested.connect(self._insert_blank_pages)
         tab.sidebar.page_duplication_requested.connect(self._duplicate_pages)
         tab.sidebar.page_extract_requested.connect(self._extract_pages)
+        tab.sidebar.page_insert_doc_requested.connect(self._insert_pdf_file)
         # Connect annotation manager to sidebar
         tab.sidebar.set_annotation_manager(tab.view.annotation_manager)
         self._connected_tab = tab
@@ -2893,6 +2987,7 @@ class MainWindow(QMainWindow):
             tab.sidebar.page_insert_requested.disconnect(self._insert_blank_pages)
             tab.sidebar.page_duplication_requested.disconnect(self._duplicate_pages)
             tab.sidebar.page_extract_requested.disconnect(self._extract_pages)
+            tab.sidebar.page_insert_doc_requested.disconnect(self._insert_pdf_file)
         except TypeError:
             pass
         tab.view.clear_numbering_preview()
@@ -3590,7 +3685,8 @@ class MainWindow(QMainWindow):
         pages_ok = view is not None and view.session.allows_assembly
         for action in (self.act_page_rotl, self.act_page_rotr,
                        self.act_page_delete, self.act_page_insert,
-                       self.act_page_duplicate, self.act_page_extract):
+                       self.act_page_duplicate, self.act_page_extract,
+                       self.act_insert_pdf):
             action.setEnabled(pages_ok)
             action.setToolTip(ASSEMBLY_NOTE if has_doc and not pages_ok
                               else action.property("plainToolTip") or "")

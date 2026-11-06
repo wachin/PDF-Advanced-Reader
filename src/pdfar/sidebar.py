@@ -361,6 +361,8 @@ class Sidebar(QWidget):
     # of the pick, which is the only position a selection that was never dragged can
     # name.  An insert invents a sheet rather than rearranging the ones there are.
     page_insert_requested = pyqtSignal(object)
+    # The sheets a new PDF file is inserted under.
+    page_insert_doc_requested = pyqtSignal(object)
     # The sheets to be made again below the last of them.  The same pick the insert reads
     # as a gap, only this time it also says what goes in it, so the copies arrive as a
     # block rather than scattered one after each source.
@@ -851,6 +853,10 @@ class Sidebar(QWidget):
         blank.triggered.connect(
             lambda _checked=False, pages=pages:
             self.page_insert_requested.emit(pages))
+        insert_doc = menu.addAction("Insert PDF File…")
+        insert_doc.triggered.connect(
+            lambda _checked=False, pages=pages:
+            self.page_insert_doc_requested.emit(pages))
         # Beside the blank, on the same rule: the gap below the last sheet of the pick is
         # where the copies go, so the two asks cannot scatter the book differently.
         copied = menu.addAction("Duplicate Page" if single

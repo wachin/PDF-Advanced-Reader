@@ -20,6 +20,7 @@ was not asked about wearing the numbers they had.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -1233,4 +1234,163 @@ def extract_pages(doc: fitz.Document, pages: Sequence[int], target_path: str) ->
             target_doc.close()
     finally:
         work_doc.close()
+
+
+@dataclass(frozen=True)
+class InsertDocumentPages(Edit):
+    """Insert pages from another PDF document into *doc* at gap *at*.
+
+    Settles the page tree of both the working copy of *doc* and the source document
+    before inserting, so inherited attributes (/MediaBox, /CropBox, /Rotate) are kept.
+    """
+
+    source_path: str
+    at: int
+    pages: Optional[Tuple[int, ...]] = None
+
+    scope = Scope.STRUCTURE
+    requires_assembly = True
+
+    def _count_inserted(self) -> int:
+        if self.pages is not None:
+            return len(set(self.pages))
+        try:
+            with fitz.open(self.source_path) as src:
+                return src.page_count
+        except Exception as exc:
+            raise EditError(f"Could not open source PDF “{self.source_path}”: {exc}") from exc
+
+    def page_order(self, before_count: int) -> Tuple[int, ...]:
+        inserted = self._count_inserted()
+        at = max(0, min(self.at, before_count))
+        return tuple(range(at)) + (-1,) * inserted + tuple(range(at, before_count))
+
+    @property
+    def label(self) -> str:
+        return "Insert PDF document"
+
+    def apply(self, doc: fitz.Document) -> None:
+        count = doc.page_count
+        if not 0 <= self.at <= count:
+            word = "page" if count == 1 else "pages"
+            raise EditError(
+                f"Insertion names gap {self.at}, and this book has {count} "
+                f"{word}: the gaps run from 0 to {count}")
+
+        try:
+            src_doc = fitz.open(self.source_path)
+        except Exception as exc:
+            raise EditError(f"Could not open source PDF “{self.source_path}”: {exc}") from exc
+
+        try:
+            src_count = src_doc.page_count
+            if src_count == 0:
+                raise EditError("Source PDF has no pages to insert")
+
+            if self.pages is None:
+                src_pages = tuple(range(src_count))
+            else:
+                src_pages = tuple(sorted(set(self.pages)))
+                for p in src_pages:
+                    if not 0 <= p < src_count:
+                        raise EditError(
+                            f"Page {p + 1} is not in source document, which has {src_count} pages")
+
+            SettlePageTree().apply(doc)
+            SettlePageTree().apply(src_doc)
+
+            for start, end in contiguous_runs(src_pages):
+                doc.insert_pdf(src_doc, from_page=start, to_page=end, start_at=self.at)
+        finally:
+            src_doc.close()
+
+
+def merge_documents(source_paths: Sequence[str], target_path: str) -> None:
+    """Combine multiple PDF files in order into a new PDF document at *target_path*.
+
+    Does not modify source files. Settles page tree of working copies so inherited
+    geometry (/MediaBox, /CropBox, /Rotate) is preserved, copies pages, outlines,
+    page labels, and metadata, and writes *target_path* atomically.
+    """
+    if not source_paths:
+        raise EditError("No source documents provided to merge")
+
+    target_doc = fitz.open()
+    try:
+        for path in source_paths:
+            if not os.path.exists(path):
+                raise EditError(f"Source file does not exist: {path}")
+            src_doc = fitz.open(path)
+            try:
+                if src_doc.page_count == 0:
+                    continue
+                SettlePageTree().apply(src_doc)
+                start_at_page = target_doc.page_count
+                target_doc.insert_pdf(src_doc)
+
+                src_labels = src_doc.get_page_labels()
+                if src_labels:
+                    existing_labels = target_doc.get_page_labels() or []
+                    for lbl in src_labels:
+                        new_lbl = dict(lbl)
+                        new_lbl["startpage"] = lbl["startpage"] + start_at_page
+                        existing_labels.append(new_lbl)
+                    target_doc.set_page_labels(existing_labels)
+
+                src_toc = src_doc.get_toc(simple=False)
+                if src_toc:
+                    existing_toc = target_doc.get_toc(simple=False) or []
+                    for entry in src_toc:
+                        new_entry = list(entry)
+                        new_entry[2] = entry[2] + start_at_page
+                        existing_toc.append(new_entry)
+                    target_doc.set_toc(existing_toc)
+            finally:
+                src_doc.close()
+
+        if target_doc.page_count == 0:
+            raise EditError("No pages to merge from the source documents")
+
+        data = target_doc.tobytes(garbage=2, deflate=True)
+        staged_write(data, target_path)
+        verify_file(target_path, expected_pages=target_doc.page_count)
+    finally:
+        target_doc.close()
+
+
+def split_document(doc: fitz.Document, output_dir: str, chunk_size: int = 1,
+                   pattern: str = "{stem}_page_{start}_{end}.pdf") -> List[str]:
+    """Split *doc* into multiple PDF files in *output_dir*.
+
+    Each file will contain up to *chunk_size* pages. Returns list of created file paths.
+    """
+    if chunk_size < 1:
+        raise EditError(f"Chunk size must be at least 1, got {chunk_size}")
+
+    count = doc.page_count
+    if count == 0:
+        raise EditError("Document has no pages to split")
+
+    if not os.access(output_dir, os.W_OK | os.X_OK):
+        raise EditError(f"Directory is not writable: {output_dir}")
+
+    doc_name = os.path.basename(doc.name) if doc.name else "document.pdf"
+    stem = os.path.splitext(doc_name)[0]
+
+    created_paths = []
+    for start_idx in range(0, count, chunk_size):
+        end_idx = min(start_idx + chunk_size, count)
+        chunk_pages = list(range(start_idx, end_idx))
+
+        p_start = start_idx + 1
+        p_end = end_idx
+
+        filename = pattern.format(stem=stem, start=p_start, end=p_end)
+        target_path = os.path.join(output_dir, filename)
+
+        extract_pages(doc, chunk_pages, target_path)
+        created_paths.append(target_path)
+
+    return created_paths
+
 
