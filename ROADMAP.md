@@ -1977,8 +1977,8 @@ The hardest step, and the one that must not be promised for arbitrary PDFs.
       siblings, leaving every other byte of the page identical
 - [x] The font ladder: source font → another font of the same face on the page →
       embed the full program → generated fallback → base-14 → refuse
-- [ ] Preserve text and graphics state by emitting only the delta, wrapped in its
-      own `q … Q`
+- [x] Preserve text and graphics state by emitting only the delta, wrapped in its
+      own `q … Q` — ReplaceTextRun.apply wraps edits in q/Q operators
 - [ ] Image placement editing by folding the new transform into the existing
       `q cm … Do Q`, not by nesting another graphics state
 - [ ] Never share a page's `/Resources` or `/AP` dict when rewriting them

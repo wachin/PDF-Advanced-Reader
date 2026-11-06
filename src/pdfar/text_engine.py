@@ -467,6 +467,26 @@ class ReplaceTextRun(Edit):
     def page_order(self, before_count: int) -> Tuple[int, ...]:
         return tuple(range(before_count))
     
+    def _wrap_with_gstate(self, ops: List[PDFOperator]) -> List[PDFOperator]:
+        """Wrap operators with q/Q to preserve graphics state.
+        
+        Inserts 'q' at the beginning and 'Q' at the end of the operator sequence
+        to save and restore the graphics state, isolating our text changes.
+        """
+        q_save = PDFOperator(
+            operator="q",
+            operands=[],
+            start_pos=0,
+            end_pos=1
+        )
+        q_restore = PDFOperator(
+            operator="Q",
+            operands=[],
+            start_pos=0,
+            end_pos=1
+        )
+        return [q_save] + ops + [q_restore]
+    
     def apply(self, doc: fitz.Document) -> None:
         page = doc[self.page_num]
         
@@ -494,6 +514,8 @@ class ReplaceTextRun(Edit):
                             modified = True
                 
                 if modified:
+                    # Wrap the modified stream with q/Q to preserve graphics state
+                    ops = self._wrap_with_gstate(ops)
                     new_stream = ContentStreamSerializer.serialize_ops(ops)
                     doc.update_stream(stream_obj, new_stream)
         else:
@@ -514,6 +536,8 @@ class ReplaceTextRun(Edit):
                         modified = True
             
             if modified:
+                # Wrap the modified stream with q/Q to preserve graphics state
+                ops = self._wrap_with_gstate(ops)
                 new_stream = ContentStreamSerializer.serialize_ops(ops)
                 doc.update_stream(stream_obj, new_stream)
 
