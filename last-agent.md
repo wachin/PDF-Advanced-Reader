@@ -1,6 +1,8 @@
 
 
 
+20261106 OpenCode Desktop with FreeLLMAPI: Completed page operations polish (F10-4) - metadata/outline preservation confirmed, outline entry cleanup on delete verified, all page edits undoable, destructive operations (delete/redact) have confirmation dialogs.
+
 20261106 OpenCode Desktop with FreeLLMAPI: Verified font embedding (F10-6) - full program embedding with ToUnicode (Identity-H/Identity-V), text stays searchable after saving, confirmed via file size analysis and text extraction tests.
 
 20261106 OpenCode Desktop with FreeLLMAPI: Implemented font validation and character checking (F10-6) - validate_text_for_font() with character coverage checking, refusal of unsupported characters with named error in text_editing.py with tests in test_text_editing.py.

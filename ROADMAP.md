@@ -1935,9 +1935,9 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       now (F10-4p); see `### F10-4o`.
 - [x] Cross-document copy that rewires parents, destinations and fields, and
       drops links whose target was not copied
-- [ ] Metadata and outline preserved; outline entries pointing at deleted pages
-      removed
-- [ ] Every operation undoable, and destructive ones confirmed
+- [x] Metadata and outline preserved; outline entries pointing at deleted pages
+      removed — metadata preserved across all page ops; `_drop_dead_outline_entries` removes dead outline entries
+- [x] Every operation undoable, and destructive ones confirmed — all page edits are Edits with undo; DeletePages and ApplyRedactions have confirmation dialogs
 
 ## F10-5 True redaction (was F7-3) — [x]
 
