@@ -26,7 +26,9 @@ from PyQt6.QtWidgets import (
 
 from .text_editing import (
     TextBoxSettings, HeaderFooterSettings, WatermarkSettings, BatesNumberSettings,
+    ImageInsertSettings, AddImage,
     apply_text_boxes, apply_header_footer, apply_watermark, apply_bates_numbering,
+    apply_image_insert,
     TEXT_POSITIONS,
 )
 
@@ -63,6 +65,10 @@ class TextBoxDialog(QDialog):
         # Bates Numbering tab
         self.bates_tab = self._create_bates_tab()
         self.tabs.addTab(self.bates_tab, "Bates Numbering")
+        
+        # Image tab
+        self.image_tab = self._create_image_tab()
+        self.tabs.addTab(self.image_tab, "Image")
         
         # Buttons
         self.btn_box = QDialogButtonBox(
@@ -545,7 +551,189 @@ class TextBoxDialog(QDialog):
         
         layout.addStretch(1)
         return tab
+
+    def _create_image_tab(self) -> QWidget:
+        """Create image insertion configuration tab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        # Image source
+        source_group = QGroupBox("Image Source", tab)
+        source_layout = QVBoxLayout(source_group)
+        
+        self.img_file_label = QLineEdit(tab)
+        self.img_file_label.setPlaceholderText("No image selected")
+        self.img_file_label.setReadOnly(True)
+        source_layout.addWidget(self.img_file_label)
+        
+        img_btn_layout = QHBoxLayout()
+        self.img_browse_btn = QPushButton("Browse...", tab)
+        self.img_browse_btn.clicked.connect(self._browse_image)
+        img_btn_layout.addWidget(self.img_browse_btn)
+        
+        self.img_clear_btn = QPushButton("Clear", tab)
+        self.img_clear_btn.clicked.connect(self._clear_image)
+        self.img_clear_btn.setEnabled(False)
+        img_btn_layout.addWidget(self.img_clear_btn)
+        img_btn_layout.addStretch(1)
+        source_layout.addLayout(img_btn_layout)
+        
+        layout.addWidget(source_group)
+        
+        # Image preview
+        preview_group = QGroupBox("Preview", tab)
+        preview_layout = QVBoxLayout(preview_group)
+        self.img_preview = QLabel(tab)
+        self.img_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.img_preview.setMinimumHeight(150)
+        self.img_preview.setStyleSheet("border: 1px solid gray; background: #f0f0f0;")
+        self.img_preview.setText("No image selected")
+        preview_layout.addWidget(self.img_preview)
+        layout.addWidget(preview_group)
+        
+        # Placement
+        place_group = QGroupBox("Placement", tab)
+        place_layout = QFormLayout(place_group)
+        
+        self.img_position = QComboBox(tab)
+        for key, label in TEXT_POSITIONS:
+            self.img_position.addItem(label, key)
+        self.img_position.setCurrentIndex(4)  # center
+        place_layout.addRow("Position:", self.img_position)
+        
+        self.img_x = QDoubleSpinBox(tab)
+        self.img_x.setRange(0.0, 2000.0)
+        self.img_x.setValue(100.0)
+        self.img_x.setSuffix(" pt")
+        place_layout.addRow("X:", self.img_x)
+        
+        self.img_y = QDoubleSpinBox(tab)
+        self.img_y.setRange(0.0, 2000.0)
+        self.img_y.setValue(100.0)
+        self.img_y.setSuffix(" pt")
+        place_layout.addRow("Y:", self.img_y)
+        
+        self.img_width = QDoubleSpinBox(tab)
+        self.img_width.setRange(10.0, 2000.0)
+        self.img_width.setValue(200.0)
+        self.img_width.setSuffix(" pt")
+        place_layout.addRow("Width:", self.img_width)
+        
+        self.img_height = QDoubleSpinBox(tab)
+        self.img_height.setRange(10.0, 2000.0)
+        self.img_height.setValue(100.0)
+        self.img_height.setSuffix(" pt")
+        place_layout.addRow("Height:", self.img_height)
+        
+        self.img_keep_proportion = QCheckBox("Keep proportions", tab)
+        self.img_keep_proportion.setChecked(True)
+        place_layout.addRow(self.img_keep_proportion)
+        
+        self.img_rotation = QDoubleSpinBox(tab)
+        self.img_rotation.setRange(-360.0, 360.0)
+        self.img_rotation.setValue(0.0)
+        self.img_rotation.setSuffix(" °")
+        place_layout.addRow("Rotation:", self.img_rotation)
+        
+        self.img_opacity = QDoubleSpinBox(tab)
+        self.img_opacity.setRange(0.0, 1.0)
+        self.img_opacity.setValue(1.0)
+        self.img_opacity.setSingleStep(0.05)
+        place_layout.addRow("Opacity:", self.img_opacity)
+        
+        layout.addWidget(place_group)
+        
+        # Options
+        opt_group = QGroupBox("Options", tab)
+        opt_layout = QFormLayout(opt_group)
+        
+        self.img_overlay = QCheckBox("Overlay (on top of content)", tab)
+        self.img_overlay.setChecked(True)
+        opt_layout.addRow(self.img_overlay)
+        
+        layout.addWidget(opt_group)
+        
+        # Page range
+        range_group = self._create_page_range_group(tab)
+        layout.addWidget(range_group)
+        
+        layout.addStretch(1)
+        return tab
+
+    def _browse_image(self):
+        """Open file dialog to select an image."""
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Image", "",
+            "Images (*.jpg *.jpeg *.png *.bmp *.tiff *.gif);;All Files (*)"
+        )
+        if path:
+            self._load_image(path)
     
+    def _load_image(self, path: str):
+        """Load image from path and update preview."""
+        try:
+            pixmap = QPixmap(path)
+            if pixmap.isNull():
+                QMessageBox.warning(self, "Image Error", "Could not load image")
+                return
+            
+            # Scale preview to fit
+            preview_size = self.img_preview.size()
+            if preview_size.width() > 0 and preview_size.height() > 0:
+                scaled = pixmap.scaled(
+                    preview_size.width() - 10,
+                    preview_size.height() - 10,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                self.img_preview.setPixmap(scaled)
+            else:
+                self.img_preview.setPixmap(pixmap)
+            
+            self.img_file_label.setText(path)
+            self.img_clear_btn.setEnabled(True)
+            self._image_path = path
+            self._image_bytes = None
+            
+        except Exception as e:
+            QMessageBox.warning(self, "Image Error", f"Could not load image: {e}")
+    
+    def _clear_image(self):
+        """Clear the selected image."""
+        self.img_file_label.clear()
+        self.img_preview.clear()
+        self.img_preview.setText("No image selected")
+        self.img_clear_btn.setEnabled(False)
+        self._image_path = None
+        self._image_bytes = None
+    
+    def get_image_settings(self) -> ImageInsertSettings:
+        """Get ImageInsertSettings from UI."""
+        # Read image bytes if file selected (for JPEG without recompression)
+        image_bytes = None
+        if hasattr(self, '_image_path') and self._image_path:
+            try:
+                with open(self._image_path, 'rb') as f:
+                    image_bytes = f.read()
+            except Exception:
+                pass
+        
+        return ImageInsertSettings(
+            image_path=self._image_path if hasattr(self, '_image_path') else "",
+            image_bytes=image_bytes,
+            rect=(
+                self.img_x.value(),
+                self.img_y.value(),
+                self.img_x.value() + self.img_width.value(),
+                self.img_y.value() + self.img_height.value(),
+            ),
+            rotation=self.img_rotation.value(),
+            keep_proportion=self.img_keep_proportion.isChecked(),
+            overlay=self.img_overlay.isChecked(),
+            opacity=self.img_opacity.value(),
+        )
+
     def _create_page_range_group(self, parent: QWidget) -> QGroupBox:
         """Create a page range selection group."""
         group = QGroupBox("Page Range", parent)

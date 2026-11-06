@@ -50,8 +50,10 @@ from .page_numbers import (
 from .crop_dialog import CropDialog
 from .text_box_dialog import TextBoxDialog
 from .text_editing import (
-    AddTextBox, TextBoxSettings, HeaderFooterSettings, WatermarkSettings, BatesNumberSettings,
+    AddTextBox, AddImage, TextBoxSettings, HeaderFooterSettings, WatermarkSettings, BatesNumberSettings,
+    ImageInsertSettings,
     apply_text_boxes, apply_header_footer, apply_watermark, apply_bates_numbering,
+    apply_image_insert,
 )
 from .pages import (
     CropPages, DeletePages, DuplicatePages, InsertBlankPage, InsertDocumentPages, MovePages, ReversePages,
@@ -1833,6 +1835,23 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Bates Numbering", f"Bates numbering added to {page_range[1] - page_range[0] + 1} page(s).")
             except Exception as exc:
                 QMessageBox.critical(self, "Bates Numbering", f"Could not add Bates numbering: {exc}")
+
+        elif tab_index == 4:  # Image
+            settings = dlg.get_image_settings()
+            page_range = dlg.get_page_range(dlg.image_tab.findChild(QGroupBox, "Page Range"), session.doc.page_count)
+            if page_range is None:
+                page_range = (0, session.doc.page_count - 1)
+            
+            # Validate image was selected
+            if not settings.image_path and not settings.image_bytes:
+                QMessageBox.warning(self, "Image", "Please select an image file first.")
+                return
+            
+            try:
+                view.apply_edit(AddImage(settings=settings, page_range=page_range))
+                QMessageBox.information(self, "Image", f"Image inserted on {page_range[1] - page_range[0] + 1} page(s).")
+            except Exception as exc:
+                QMessageBox.critical(self, "Image", f"Could not insert image: {exc}")
 
     def _apply_redactions(self) -> None:
         """Apply all redaction marks in the document, permanently removing content."""

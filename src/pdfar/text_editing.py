@@ -465,6 +465,95 @@ class BatesNumberSettings:
     pages_to_skip: int = 0  # skip first N pages
 
 
+@dataclass
+class ImageInsertSettings:
+    """Settings for inserting an image."""
+    image_path: str = ""          # Path to image file
+    image_bytes: Optional[bytes] = None  # Raw image bytes (for JPEG without recompression)
+    rect: Tuple[float, float, float, float] = (100, 100, 300, 200)  # x0, y0, x1, y1
+    rotation: float = 0.0
+    keep_proportion: bool = True
+    overlay: bool = True
+    opacity: float = 1.0  # 0.0 - 1.0
+
+
+def apply_image_insert(
+    doc: fitz.Document,
+    settings: ImageInsertSettings,
+    page_range: Optional[Tuple[int, int]] = None,
+) -> int:
+    """Insert an image on pages in range.
+    
+    If image_bytes is provided (JPEG), inserts without recompression.
+    Otherwise loads from image_path.
+    
+    Returns number of pages modified.
+    """
+    if page_range is None:
+        first, last = 0, doc.page_count - 1
+    else:
+        first, last = page_range
+        first = max(0, min(first, doc.page_count - 1))
+        last = max(0, min(last, doc.page_count - 1))
+    
+    if first > last:
+        return 0
+    
+    if not settings.image_bytes and not settings.image_path:
+        raise ValueError("Either image_path or image_bytes must be provided")
+    
+    x0, y0, x1, y1 = settings.rect
+    rect = fitz.Rect(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+    
+    # Normalize rotation to 90-degree increments
+    rotation = int(round(settings.rotation / 90.0)) * 90 % 360
+    
+    for i in range(first, last + 1):
+        page = doc.load_page(i)
+        
+        if settings.image_bytes:
+            # Insert from raw bytes (preserves JPEG without recompression)
+            page.insert_image(
+                rect,
+                stream=settings.image_bytes,
+                rotate=rotation,
+                overlay=settings.overlay,
+                keep_proportion=settings.keep_proportion,
+            )
+        else:
+            # Insert from file
+            page.insert_image(
+                rect,
+                filename=settings.image_path,
+                rotate=rotation,
+                overlay=settings.overlay,
+                keep_proportion=settings.keep_proportion,
+            )
+    
+    return last - first + 1
+
+
+@dataclass(frozen=True)
+class AddImage(Edit):
+    """Insert an image on pages."""
+    
+    settings: ImageInsertSettings
+    page_range: Optional[Tuple[int, int]] = None
+    
+    scope = Scope.CONTENT
+    requires_assembly = True
+    
+    @property
+    def label(self) -> str:
+        return "Add image"
+    
+    def page_order(self, before_count: int) -> Tuple[int, ...]:
+        return tuple(range(before_count))
+    
+    def apply(self, doc: fitz.Document) -> None:
+        apply_image_insert(doc, self.settings, self.page_range)
+
+
 def apply_bates_numbering(
     doc: fitz.Document,
     settings: BatesNumberSettings,

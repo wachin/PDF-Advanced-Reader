@@ -13,8 +13,9 @@ from conftest import make_session
 from pdfar.edits import EditError
 from pdfar.text_editing import (
     TextBoxSettings, HeaderFooterSettings, WatermarkSettings, BatesNumberSettings,
+    ImageInsertSettings, AddImage, AddTextBox,
     apply_text_boxes, apply_header_footer, apply_watermark, apply_bates_numbering,
-    AddTextBox,
+    apply_image_insert,
 )
 
 
@@ -291,3 +292,176 @@ def test_text_box_positions(doc_blank):
             assert f"Pos: {pos}" in text
     finally:
         doc.close()
+
+
+def test_apply_image_insert_jpeg(doc_blank, tmp_path):
+    """Insert a JPEG image without recompression."""
+    # Create a test JPEG
+    from PIL import Image
+    import io
+    
+    img = Image.new('RGB', (200, 100), color='blue')
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG', quality=85)
+    jpeg_bytes = buf.getvalue()
+    
+    # Save JPEG to file
+    img_path = str(tmp_path / "test.jpg")
+    with open(img_path, 'wb') as f:
+        f.write(jpeg_bytes)
+    
+    doc = fitz.open(doc_blank)
+    try:
+        settings = ImageInsertSettings(
+            image_path=img_path,
+            rect=(100, 100, 300, 200),
+        )
+        count = apply_image_insert(doc, settings, page_range=(0, 0))
+        assert count == 1
+        
+        # Verify image was inserted
+        page = doc[0]
+        images = page.get_images()
+        assert len(images) == 1
+        
+        # Verify JPEG was not recompressed (check filter)
+        img_info = images[0]
+        assert img_info[8] == 'DCTDecode'  # JPEG filter
+    finally:
+        doc.close()
+
+
+def test_apply_image_insert_from_bytes(doc_blank):
+    """Insert image from raw bytes (JPEG without recompression)."""
+    from PIL import Image
+    import io
+    
+    img = Image.new('RGB', (150, 75), color='red')
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG', quality=90)
+    jpeg_bytes = buf.getvalue()
+    
+    doc = fitz.open(doc_blank)
+    try:
+        settings = ImageInsertSettings(
+            image_bytes=jpeg_bytes,
+            rect=(50, 50, 200, 125),
+        )
+        count = apply_image_insert(doc, settings, page_range=(0, 0))
+        assert count == 1
+        
+        # Verify image was inserted
+        page = doc[0]
+        images = page.get_images()
+        assert len(images) == 1
+        assert images[0][8] == 'DCTDecode'
+    finally:
+        doc.close()
+
+
+def test_apply_image_insert_multiple_pages(doc_blank):
+    """Insert image on multiple pages."""
+    from PIL import Image
+    import io
+    
+    img = Image.new('RGB', (100, 100), color='green')
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG')
+    jpeg_bytes = buf.getvalue()
+    
+    doc = fitz.open(doc_blank)
+    try:
+        settings = ImageInsertSettings(
+            image_bytes=jpeg_bytes,
+            rect=(100, 100, 200, 200),
+        )
+        count = apply_image_insert(doc, settings, page_range=(0, 2))
+        assert count == 3
+        
+        for i in range(3):
+            images = doc[i].get_images()
+            assert len(images) == 1
+    finally:
+        doc.close()
+
+
+def test_apply_image_insert_with_rotation(doc_blank):
+    """Insert image with rotation."""
+    from PIL import Image
+    import io
+    
+    img = Image.new('RGB', (100, 100), color='yellow')
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG')
+    jpeg_bytes = buf.getvalue()
+    
+    doc = fitz.open(doc_blank)
+    try:
+        settings = ImageInsertSettings(
+            image_bytes=jpeg_bytes,
+            rect=(100, 100, 200, 200),
+            rotation=90.0,
+        )
+        count = apply_image_insert(doc, settings, page_range=(0, 0))
+        assert count == 1
+    finally:
+        doc.close()
+
+
+def test_add_image_edit(doc_blank):
+    """Test AddImage edit through session."""
+    from PIL import Image
+    import io
+    
+    img = Image.new('RGB', (100, 100), color='purple')
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG')
+    jpeg_bytes = buf.getvalue()
+    
+    session = make_session(doc_blank)
+    try:
+        settings = ImageInsertSettings(
+            image_bytes=jpeg_bytes,
+            rect=(100, 100, 200, 200),
+        )
+        edit = AddImage(settings=settings, page_range=(0, 1))
+        session.apply(edit)
+        
+        # Verify image on pages 0 and 1
+        for i in range(2):
+            images = session.doc[i].get_images()
+            assert len(images) == 1
+        
+        # Page 2 should not have image
+        images = session.doc[2].get_images()
+        assert len(images) == 0
+    finally:
+        session.close()
+
+
+def test_add_image_edit_undo(doc_blank):
+    """Test AddImage edit undo."""
+    from PIL import Image
+    import io
+    
+    img = Image.new('RGB', (100, 100), color='orange')
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG')
+    jpeg_bytes = buf.getvalue()
+    
+    session = make_session(doc_blank)
+    try:
+        settings = ImageInsertSettings(
+            image_bytes=jpeg_bytes,
+            rect=(100, 100, 200, 200),
+        )
+        edit = AddImage(settings=settings, page_range=(0, 0))
+        session.apply(edit)
+        
+        assert len(session.doc[0].get_images()) == 1
+        
+        session.undo()
+        
+        assert len(session.doc[0].get_images()) == 0
+    finally:
+        session.close()
