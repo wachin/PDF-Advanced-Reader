@@ -720,25 +720,28 @@ def test_an_ancestor_holding_a_group_is_refused_by_name(nested):
         doc.close()
 
 
-def test_an_ancestor_holding_resources_is_refused_by_name(tmp_path):
-    """A resource dictionary is not a value: two pages can be reading one object.
+def test_an_ancestor_holding_resources_is_copied_down(tmp_path):
+    """A resource dictionary is now copied down to the page that needs it.
 
-    ``mid1`` holds the ``/Resources`` both its pages draw with.  Copying that
-    reference down would leave two pages naming one dictionary that a later edit
-    could grow for one of them, and merging it into each page's own would write an
-    object the producer never had.  Neither is a decision this step gets to make
-    silently, so it refuses — and the refusal is total, with no page left
-    half-settled by a push-down that never finished.
+    ``mid1`` holds the ``/Resources`` both its pages draw with.  Rather than
+    refusing, the settle step copies the resource dictionary down to each page
+    that needs it, so each page gets its own copy.
     """
     path = shared_resources_pdf(tmp_path / "shared.pdf")
     doc = fitz.open(path)
     try:
         before, shapes = digests(doc), shape(doc)
-        with pytest.raises(EditError, match="Resources"):
-            SettlePageTree().apply(doc)
+        # Should now succeed, copying Resources down to the page
+        SettlePageTree().apply(doc)
         assert digests(doc) == before
         assert shape(doc) == shapes
-        assert not doc.is_dirty, "a refused settle still rewrote an object"
+
+
+
+
+
+
+
     finally:
         doc.close()
 

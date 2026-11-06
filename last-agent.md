@@ -3,6 +3,8 @@
 
 20261106 OpenCode Desktop with FreeLLMAPI: Completed page operations polish (F10-4) - metadata/outline preservation confirmed, outline entry cleanup on delete verified, all page edits undoable, destructive operations (delete/redact) have confirmation dialogs.
 
+20261106 OpenCode Desktop with FreeLLMAPI: Implemented Resource Dict Isolation (F10-7) - SettlePageTree copies Resources and /AP dict down to each page, ensuring no shared resource dictionaries in image_editing.py and pages.py with tests in test_page_settle.py.
+
 20261106 OpenCode Desktop with FreeLLMAPI: Implemented image placement editing (F10-7) - ImageTransform, apply_image_transform, EditImagePlacement with cm/Do operator splicing in image_editing.py with tests in test_image_editing.py.
 
 20261106 OpenCode Desktop with FreeLLMAPI: Implemented graphics state preservation (F10-7) - q/Q wrappers for text editing in text_engine.py with tests in test_text_editing.py.

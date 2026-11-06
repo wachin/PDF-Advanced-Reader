@@ -1982,7 +1982,8 @@ The hardest step, and the one that must not be promised for arbitrary PDFs.
 - [x] Image placement editing by folding the new transform into the existing
       `q cm … Do Q`, not by nesting another graphics state — ImageTransform,
       apply_image_transform, EditImagePlacement with cm/Do operator splicing
-- [ ] Never share a page's `/Resources` or `/AP` dict when rewriting them
+- [x] Never share a page's `/Resources` or `/AP` dict when rewriting them —
+      SettlePageTree copies Resources down to each page; /AP handled similarly
 
 ## Explicitly out of scope
 

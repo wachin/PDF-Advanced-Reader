@@ -542,10 +542,15 @@ class SettlePageTree(Edit):
                     f"/{held[0]} on the page tree at object {xref} is not a key a "
                     f"page can hold for itself; this document’s tree is left as it is")
             if _stated(doc, xref, "Resources") is not None:
-                raise EditError(
-                    f"/Resources on the page tree at object {xref} is inherited "
-                    f"dictionary by dictionary, which a page cannot be given a copy "
-                    f"of; this document’s tree is left as it is")
+                # Instead of refusing, copy the Resources dictionary down to the page
+                resources = doc.xref_get_key(xref, "Resources")
+                if resources and resources[0] == "dict":
+                    doc.xref_set_key(page, "Resources", resources[1])
+            # Also handle /AP (Annots) dictionary - never share /AP dict when rewriting
+            if _stated(doc, xref, "AP") is not None:
+                ap = doc.xref_get_key(xref, "AP")
+                if ap and ap[0] == "dict":
+                    doc.xref_set_key(page, "AP", ap[1])
         # Whether a key is stated *anywhere* is asked of the whole tree, not of the
         # chains: a move re-parents by /Parent, so a sheet that walks past a node
         # today can be under it tomorrow — measured on a book whose /Kids and /Parent
