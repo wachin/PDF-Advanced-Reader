@@ -1,4 +1,18 @@
 
+
+
+20261106 OpenCode Desktop with FreeLLMAPI: Implemented page extraction (extract_pages) in pages.py, sidebar.py, main.py with unit tests in test_page_extract.py.
+
+20261105 09:00 qwen with NVIDIA NIM API (MI) model z-ai/glm-5.3-flash
+
+20261105 09:00 qwen with NVIDIA NIM API (MI) model nvidia/nemotron-3-ultra-550b-a55b 200.0K
+
+20261105 09:00 qoder with Qwen3.8-Flash Model 200K ctx (end free tokens)
+
+20261031 10:00 qoder with Qwen3.8-Flash Model 200K ctx (limit tokens)
+
+20261031 17:37 qoder with Qwen3.8-Flash Model 200K ctx 
+
 20261028 21:30 qoder with Qwen3.8-Flash Model 200K ctx 
 
 20261023 21:30 qoder with Qwen3.8-Flash Model 200K ctx 

@@ -365,6 +365,8 @@ class Sidebar(QWidget):
     # as a gap, only this time it also says what goes in it, so the copies arrive as a
     # block rather than scattered one after each source.
     page_duplication_requested = pyqtSignal(object)
+    # The sheets to be written to a new PDF file.
+    page_extract_requested = pyqtSignal(object)
     # The window owns saving: it is the one place that can explain a refusal, and
     # a second opinion from here would only be able to say "failed".
     save_requested = pyqtSignal()
@@ -856,12 +858,21 @@ class Sidebar(QWidget):
         copied.triggered.connect(
             lambda _checked=False, pages=pages:
             self.page_duplication_requested.emit(pages))
+        extracted = menu.addAction("Extract Page…" if single
+                                   else f"Extract {len(pages)} Pages…")
+        extracted.triggered.connect(
+            lambda _checked=False, pages=pages:
+            self.page_extract_requested.emit(pages))
         menu.addSeparator()
         # The scanned book that arrived sideways end to end: asking a reader to
         # click five hundred thumbnails is work the menu is standing there to do.
         whole = tuple(range(self.doc.page_count))
         self._add_rotation_actions(menu, whole, "Rotate All Pages")
         self._add_reverse_action(menu, whole, "Reverse All Pages")
+        extract_all = menu.addAction("Extract All Pages…")
+        extract_all.triggered.connect(
+            lambda _checked=False, pages=whole:
+            self.page_extract_requested.emit(pages))
         self._gate_page_commands(menu)
         return menu
 

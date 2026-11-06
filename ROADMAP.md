@@ -1628,14 +1628,13 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       afterwards and a disagreement refused whole, and two routes: Tools copies the sheet
       under the eyes and leaves the strip's gather alone, the strip's item beside *Insert
       Blank Page* moves the pick down onto the copies it just made.
-- [ ] Extract — the other run against the same pick, settling the page tree the way F10-4p
-      does and writing the answer to a file of its own, which is a new-document surface this
-      application does not have yet.
-      Extract carries the catalog loss F10-4q leaves open: `Document.select` was measured
-      **dropping catalog keys** — `/PageLabels` among them, which is already why F10-4o
-      rejected it for a reorder — so an extract built that way has to say what numbering
-      the reader is left with, the way `tests/test_page_settle.py` says what form and
-      outline it is left with
+- [x] **Extract pages** — write the picked sheets to a new PDF file
+      (**`extract_pages` in `src/pdfar/pages.py`**). Settles the page tree on a working copy
+      so inherited geometry (/MediaBox, /CropBox, /Rotate) is preserved in the output file,
+      preserves outline entries pointing at extracted pages and re-aims them, re-aims page label
+      ranges, copies metadata, and writes the output file atomically via `staged_write`. Exposed in
+      the thumbnail context menu ("Extract Page…", "Extract N Pages…", "Extract All Pages…") and in
+      Tools ▸ Extract Pages. Gated on the assemble permission. Tested in `tests/test_page_extract.py`.
 - [x] **F10-4s** — *The strip's drop reaches the move.*  F10-4p built the rule a drop
       between two rows means and nothing calls it: `ThumbnailList` is a `QListWidget` with
       `ExtendedSelection` and a delegate of its own, so this is Qt's drag-and-drop —
@@ -1767,7 +1766,7 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       (`crates/organize/src/labels.rs:263-272`).  What stays positional is written down in
       ### F10-4v: the count beside the box, the sidebar's rows, the search panel's rows, and
       the box's fixed width, which is the one Okular rule not copied and is now **F10-4bc**.
-- [ ] **F10-4bc** — *The page box is 96 px whatever the book is called.*  Okular measures
+- [x] **F10-4bc** — *The page box is 96 px whatever the book is called.*  Okular measures
       every label in the document and, when any of them is longer than the page count, sizes
       the location bar by the longest (`part/minibar.cpp:99-108`) — the rule that cannot
       clip.  PDFAR's width is a constant, and the measurement that justified it says nothing
@@ -1779,6 +1778,25 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       into F10-4v because it is a widget-sizing decision with its own measurement, and the
       print-range half of the same question waits for a print dialog that does not exist yet
       (`main.py:1954` answers "not yet implemented").
+      *Closed* (c8dea0f): `page_labels.longest_label(doc, font_metrics)` walks the sorted
+      catalog once and answers the widest name, ties broken by the last slot so the answer
+      is deterministic when several labels measure the same (the alpha test pins `D` over
+      the earlier equal-width letters).  With a `QFontMetrics` it measures what the box will
+      actually render — measured in the offscreen suite font: `iv` at 10 px beats `6` at
+      7 px, where character length alone would size for the wrong string — and without one
+      it falls back to character length with the same tiebreaker.  Walk cost on a 540-sheet
+      book (GS262-class machine): ≈2.2 ms through the char-length fallback, ≈71 ms with the
+      font metrics, against ≈60 ms for the old `get_label()`-per-sheet walk — and the
+      once-per-open cost lands on the same path that already costs seconds.  The 540-sheet
+      roman/arabic measurement in the module docstring stands: `Page ccxxxviii` fits, and
+      `/P (Appendix A-1)` now gets its width.  `MainWindow._layout_page_box` applies it at
+      open and on tab change — `Page Appendix A-1` gets its width, a plain book keeps
+      96 px, closing the book returns the box to 96.  Two facts the first test draft got
+      wrong are pinned in the suite: the `count` a producer passes `set_page_labels` is
+      **not** in the file — a range runs to the next range or the last sheet (so the roman
+      half of a six-sheet book names its last sheet `iv`, not `6`), and the setter takes
+      dicts.  27 label tests + 3 window tests (grow, shrink back on close, follow the
+      document across tabs) green; the print-range half stays with the print dialog.
 - [x] **F10-4x** — *The **assemble** permission asked before a page-tree edit, as PdfCraft
       gates `DeletePages` / `MovePages` / `RotatePages` on the document's `/P` flags.*
       ISO 32000-1 §7.6.4.2 Table 22 bit 11 is the right to insert, delete and rotate pages

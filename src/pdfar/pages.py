@@ -30,6 +30,7 @@ except ImportError:  # pragma: no cover - older PyMuPDF
     import fitz
 
 from .edits import Edit, EditError, Scope
+from .save import staged_write, verify_file
 
 
 def contiguous_runs(pages: Iterable[int]) -> Tuple[Tuple[int, int], ...]:
@@ -1141,3 +1142,95 @@ class DuplicatePages(Edit):
             raise EditError(
                 "The page tree does not read the copies this edit asked for; "
                 "nothing is duplicated")
+
+
+def _extract_page_labels(doc: fitz.Document, sorted_pages: Sequence[int]) -> List[dict]:
+    """Translate page label ranges of *doc* to cover *sorted_pages* in a new document."""
+    ranges = doc.get_page_labels()
+    if not ranges:
+        return []
+
+    old_to_new = {old_idx: new_idx for new_idx, old_idx in enumerate(sorted_pages)}
+    num_pages = doc.page_count
+
+    sorted_ranges = sorted(ranges, key=lambda r: r["startpage"])
+    new_ranges: List[dict] = []
+
+    for idx, r in enumerate(sorted_ranges):
+        start = r["startpage"]
+        end = sorted_ranges[idx + 1]["startpage"] if idx + 1 < len(sorted_ranges) else num_pages
+        matching = [p for p in sorted_pages if start <= p < end]
+        if matching:
+            first_p = matching[0]
+            new_r = dict(r)
+            new_r["startpage"] = old_to_new[first_p]
+            offset = first_p - start
+            new_r["firstpagenum"] = r.get("firstpagenum", 1) + offset
+            new_ranges.append(new_r)
+
+    return new_ranges
+
+
+def extract_pages(doc: fitz.Document, pages: Sequence[int], target_path: str) -> None:
+    """Extract *pages* from *doc* into a new PDF document at *target_path*.
+
+    Does not modify *doc*. Checks boundaries, settles the page tree of a working copy
+    so inherited attributes (/MediaBox, /CropBox, /Rotate) are preserved, copies the
+    pages, outline, page labels, and metadata, and writes the output file atomically.
+
+    What survives the copy is what ``insert_pdf`` carries: the pages themselves, their
+    own annotations and widgets, the outline rows whose destinations name a copied sheet
+    (rows pointing at a sheet that went are dropped rather than re-pointed, which is a
+    lie with a page number on it), the page numbering, and the document's own
+    information.  What does **not** survive is catalog keys that name no page tree:
+    ``/Lang``, ``/ViewerPreferences`` and the rest are lost the same way
+    ``Document.select`` loses them (F10-4o measured it), and this is a known limitation
+    of the surface MuPDF gives an extract, not a decision this function makes.
+    """
+    if not pages:
+        raise EditError("No pages chosen for extraction")
+
+    count = doc.page_count
+    sorted_pages = tuple(sorted(set(pages)))
+    for p in sorted_pages:
+        if not 0 <= p < count:
+            raise EditError(
+                f"Page {p + 1} is not in this document, which has {count} page"
+                f"{'' if count == 1 else 's'}")
+
+    work_doc = fitz.open(stream=doc.tobytes(), filetype="pdf")
+    try:
+        SettlePageTree().apply(work_doc)
+        target_doc = fitz.open()
+        try:
+            for start, end in contiguous_runs(sorted_pages):
+                target_doc.insert_pdf(work_doc, from_page=start, to_page=end)
+
+            new_labels = _extract_page_labels(work_doc, sorted_pages)
+            if new_labels:
+                target_doc.set_page_labels(new_labels)
+
+            toc = work_doc.get_toc(simple=False)
+            if toc:
+                old_to_new = {old_idx + 1: new_idx + 1 for new_idx, old_idx in enumerate(sorted_pages)}
+                new_toc = []
+                for entry in toc:
+                    pno = entry[2]
+                    if pno in old_to_new:
+                        new_entry = list(entry)
+                        new_entry[2] = old_to_new[pno]
+                        new_toc.append(new_entry)
+                if new_toc:
+                    target_doc.set_toc(new_toc)
+
+            if work_doc.metadata:
+                target_doc.set_metadata(work_doc.metadata)
+
+            data = target_doc.tobytes(garbage=2, deflate=True)
+            staged_write(data, target_path)
+            verify_file(target_path, expected_pages=len(sorted_pages))
+        finally:
+            target_doc.close()
+    finally:
+        work_doc.close()
+

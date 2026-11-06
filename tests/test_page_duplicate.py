@@ -581,7 +581,7 @@ def test_duplicate_and_insert_sit_side_by_side_in_the_strip(window, book):
     labels = [action.text() for action in
               window.sidebar._page_commands_menu((1, 3)).actions()
               if not action.isSeparator()]
-    assert labels[:7] == ["Rotate 2 Pages Left", "Rotate 2 Pages Right",
+    assert labels[:8] == ["Rotate 2 Pages Left", "Rotate 2 Pages Right",
                           "Reverse 2 Pages", "Insert Blank Page",
-                          "Duplicate 2 Pages",
+                          "Duplicate 2 Pages", "Extract 2 Pages…",
                           "Rotate All Pages Left", "Rotate All Pages Right"]

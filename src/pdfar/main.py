@@ -49,7 +49,7 @@ from .page_numbers import (
 )
 from .pages import (
     DeletePages, DuplicatePages, InsertBlankPage, MovePages, ReversePages,
-    RotatePages, contiguous_runs, shifted_index,
+    RotatePages, contiguous_runs, extract_pages, shifted_index,
 )
 from .save import ProtectionError, SaveError, SaveReport, save_document
 from .search import (
@@ -746,12 +746,17 @@ class MainWindow(QMainWindow):
             "that shares its fonts and carries its own annotations")
         self.act_page_duplicate.triggered.connect(self._page_duplicate)
 
-        # The permission gate writes its reason into these five tooltips and takes it
+        self.act_page_extract = QAction("Extract Pages…", self)
+        self.act_page_extract.setToolTip(
+            "Extract the page you are reading or selected pages into a new PDF file")
+        self.act_page_extract.triggered.connect(self._page_extract)
+
+        # The permission gate writes its reason into these six tooltips and takes it
         # out again for the next document, so the sentence each action was built with is
         # kept on the action rather than restated where it is restored (F10-4z).
         for _page_action in (self.act_page_rotl, self.act_page_rotr,
                              self.act_page_delete, self.act_page_insert,
-                             self.act_page_duplicate):
+                             self.act_page_duplicate, self.act_page_extract):
             _page_action.setProperty("plainToolTip", _page_action.toolTip())
 
         # The permissions password lifts the refusal those five items answer to, in
@@ -892,8 +897,9 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.act_page_rotr)
         tools_menu.addAction(self.act_page_insert)
         tools_menu.addAction(self.act_page_duplicate)
+        tools_menu.addAction(self.act_page_extract)
         tools_menu.addAction(self.act_page_delete)
-        # Directly under the five items the sealed book greys: the command that turns
+        # Directly under the six items the sealed book greys: the command that turns
         # them back on, for the reader who wonders why they are pale (F10-4aa).
         tools_menu.addAction(self.act_unlock_permissions)
         tools_menu.addAction(self.act_save_annotations)
@@ -1559,6 +1565,40 @@ class MainWindow(QMainWindow):
             return
         if self.sidebar is not None:
             self.sidebar.select_pages(range(gap, gap + len(block)))
+
+    def _page_extract(self) -> None:
+        """The Tools route: extract the page under the eyes."""
+        if self.view:
+            self._extract_pages((self.view.current_page,))
+
+    def _extract_pages(self, pages: Tuple[int, ...]) -> None:
+        """Write *pages* from the current document to a new PDF file.
+
+        Asks for a destination and runs the extract on the session's live copy.
+        """
+        if not (self.view and pages):
+            return
+        view = self.view
+        session = view.session
+
+        default_path = ""
+        if session.path:
+            base = os.path.basename(session.path)
+            stem = os.path.splitext(base)[0]
+            default_path = os.path.join(os.path.dirname(session.path),
+                                        f"{stem}-extracted.pdf")
+
+        target_path, _ = QFileDialog.getSaveFileName(
+            self, "Extract Pages", default_path, "PDF Files (*.pdf)")
+        if not target_path:
+            return
+
+        try:
+            extract_pages(session.doc, pages, target_path)
+            QMessageBox.information(self, "Extract Pages",
+                                    f"Extracted {len(pages)} page(s) to:\n{target_path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Extract Pages", f"Could not extract pages: {exc}")
 
     @staticmethod
     def _page_words(pages: Tuple[int, ...]) -> str:
@@ -2821,6 +2861,7 @@ class MainWindow(QMainWindow):
         tab.sidebar.page_reverse_requested.connect(self._reverse_pages)
         tab.sidebar.page_insert_requested.connect(self._insert_blank_pages)
         tab.sidebar.page_duplication_requested.connect(self._duplicate_pages)
+        tab.sidebar.page_extract_requested.connect(self._extract_pages)
         # Connect annotation manager to sidebar
         tab.sidebar.set_annotation_manager(tab.view.annotation_manager)
         self._connected_tab = tab
@@ -2851,6 +2892,7 @@ class MainWindow(QMainWindow):
             tab.sidebar.page_reverse_requested.disconnect(self._reverse_pages)
             tab.sidebar.page_insert_requested.disconnect(self._insert_blank_pages)
             tab.sidebar.page_duplication_requested.disconnect(self._duplicate_pages)
+            tab.sidebar.page_extract_requested.disconnect(self._extract_pages)
         except TypeError:
             pass
         tab.view.clear_numbering_preview()
@@ -3548,7 +3590,7 @@ class MainWindow(QMainWindow):
         pages_ok = view is not None and view.session.allows_assembly
         for action in (self.act_page_rotl, self.act_page_rotr,
                        self.act_page_delete, self.act_page_insert,
-                       self.act_page_duplicate):
+                       self.act_page_duplicate, self.act_page_extract):
             action.setEnabled(pages_ok)
             action.setToolTip(ASSEMBLY_NOTE if has_doc and not pages_ok
                               else action.property("plainToolTip") or "")

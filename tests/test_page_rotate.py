@@ -830,14 +830,16 @@ def test_the_menu_names_every_page_it_is_about_to_turn(strip):
     """
     assert _labels(strip._page_commands_menu((1,))) == [
         "Rotate Page Left", "Rotate Page Right", "Reverse Page", "Insert Blank Page",
-        "Duplicate Page",
-        "Rotate All Pages Left", "Rotate All Pages Right", "Reverse All Pages"]
+        "Duplicate Page", "Extract Page…",
+        "Rotate All Pages Left", "Rotate All Pages Right", "Reverse All Pages",
+        "Extract All Pages…"]
     assert _labels(strip._page_commands_menu((0, 2))) == [
         "Rotate 2 Pages Left", "Rotate 2 Pages Right", "Reverse 2 Pages",
-        "Insert Blank Page", "Duplicate 2 Pages",
-        "Rotate All Pages Left", "Rotate All Pages Right", "Reverse All Pages"]
+        "Insert Blank Page", "Duplicate 2 Pages", "Extract 2 Pages…",
+        "Rotate All Pages Left", "Rotate All Pages Right", "Reverse All Pages",
+        "Extract All Pages…"]
     assert [a.isSeparator() for a in strip._page_commands_menu((0,)).actions()] == [
-        False, False, False, False, False, True, False, False, False]
+        False, False, False, False, False, False, True, False, False, False, False]
 
 
 def test_the_menu_asks_and_leaves_the_turn_to_the_window(strip):
