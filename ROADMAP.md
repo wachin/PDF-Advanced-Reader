@@ -1979,8 +1979,9 @@ The hardest step, and the one that must not be promised for arbitrary PDFs.
       embed the full program → generated fallback → base-14 → refuse
 - [x] Preserve text and graphics state by emitting only the delta, wrapped in its
       own `q … Q` — ReplaceTextRun.apply wraps edits in q/Q operators
-- [ ] Image placement editing by folding the new transform into the existing
-      `q cm … Do Q`, not by nesting another graphics state
+- [x] Image placement editing by folding the new transform into the existing
+      `q cm … Do Q`, not by nesting another graphics state — ImageTransform,
+      apply_image_transform, EditImagePlacement with cm/Do operator splicing
 - [ ] Never share a page's `/Resources` or `/AP` dict when rewriting them
 
 ## Explicitly out of scope
