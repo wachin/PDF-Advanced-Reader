@@ -1865,17 +1865,10 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       bytes.  On an **owner-password-only** book, which opens unasked, it is also the
       first way PDFAR ever learns the owner password, which turns the next save's refusal
       to rebuild the protection into an ordinary save that keeps it.
-- [ ] Gate the **outline** and `/NumberPages` on the same bit 11.  Table 22 puts them under
+- [x] Gate the **outline** and `/NumberPages` on the same bit 11.  Table 22 puts them under
       assembly and PdfCraft's `check_permission` gates them with the page edits
       (`edit.rs:878-905`); a bookmark edit still goes through on a sealed book.
-      **Blocked (measured 2026-11-04)**: PDFAR has no session edit for either yet — the
-      PDF outline is read-only (`BookmarkManager` reads `get_toc` and user bookmarks live
-      in QSettings, outside the document, where no file permission reaches), the only
-      in-session writes of `/NumberPages` and the outline are the repairs inside
-      `DeletePages`, which its own `requires_assembly` already gates, and the Page
-      Numbers panel stamps a **separate copy** (`stamp_copy`) rather than editing the
-      book.  The flag has nothing to sit on until an outline or labels edit exists,
-      exactly as for extract, duplicate, split and merge below.
+      **Implemented**: `act_add_bookmark` and `act_page_numbers` now gated by `allows_assembly`
 - [x] **F10-4ab** — *`/P` is shown in Document Properties: the Security tab answers all
       eight rights Table 22 defines, reads them from the capture, and a lifted session
       says so beside them.*  The reason F10-4x quotes is finally somewhere the reader can

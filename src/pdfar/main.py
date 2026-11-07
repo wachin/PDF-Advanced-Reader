@@ -3938,7 +3938,8 @@ class MainWindow(QMainWindow):
                        self.act_page_delete, self.act_page_insert,
                        self.act_page_duplicate, self.act_page_extract,
                        self.act_insert_pdf, self.act_page_crop,
-                       self.act_apply_redactions):
+                       self.act_page_delete, self.act_page_numbers,
+                       self.act_add_bookmark):
             action.setEnabled(pages_ok)
             action.setToolTip(ASSEMBLY_NOTE if has_doc and not pages_ok
                               else action.property("plainToolTip") or "")
