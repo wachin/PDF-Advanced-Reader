@@ -1183,6 +1183,13 @@ def extract_pages(doc: fitz.Document, pages: Sequence[int], target_path: str) ->
     Does not modify *doc*. Checks boundaries, settles the page tree of a working copy
     so inherited attributes (/MediaBox, /CropBox, /Rotate) are preserved, copies the
     pages, outline, page labels, and metadata, and writes the output file atomically.
+    """
+    requires_assembly = True
+    """Extract *pages* from *doc* into a new PDF document at *target_path*.
+
+    Does not modify *doc*. Checks boundaries, settles the page tree of a working copy
+    so inherited attributes (/MediaBox, /CropBox, /Rotate) are preserved, copies the
+    pages, outline, page labels, and metadata, and writes the output file atomically.
 
     What survives the copy is what ``insert_pdf`` carries: the pages themselves, their
     own annotations and widgets, the outline rows whose destinations name a copied sheet
@@ -1365,6 +1372,7 @@ def merge_documents(source_paths: Sequence[str], target_path: str) -> None:
     geometry (/MediaBox, /CropBox, /Rotate) is preserved, copies pages, outlines,
     page labels, and metadata, and writes *target_path* atomically.
     """
+    requires_assembly = True
     if not source_paths:
         raise EditError("No source documents provided to merge")
 
@@ -1422,6 +1430,7 @@ def split_document(doc: fitz.Document, output_dir: str, chunk_size: int = 1,
 
     Each file will contain up to *chunk_size* pages. Returns list of created file paths.
     """
+    requires_assembly = True
     if chunk_size < 1:
         raise EditError(f"Chunk size must be at least 1, got {chunk_size}")
 

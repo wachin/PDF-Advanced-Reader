@@ -9,6 +9,8 @@
 
 20261106 OpenCode Desktop with FreeLLMAPI: Implemented Resource Dict Isolation (F10-7) - SettlePageTree copies Resources and /AP dict down to each page, ensuring no shared resource dictionaries in image_editing.py and pages.py with tests in test_page_settle.py.
 
+20261106 OpenCode Desktop with FreeLLMAPI: Carried requires_assembly onto extract, split, merge (F10-4) - extract_pages(), merge_documents(), split_document() now have requires_assembly = True in pages.py with tests in test_page_split_merge.py.
+
 20261106 OpenCode Desktop with FreeLLMAPI: Implemented outline and page numbers gating on assembly permission (F10-4) - act_add_bookmark and act_page_numbers now gated by allows_assembly in main.py.
 
 20261106 OpenCode Desktop with FreeLLMAPI: Implemented graphics state preservation (F10-7) - q/Q wrappers for text editing in text_engine.py with tests in test_text_editing.py.

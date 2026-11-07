@@ -1877,8 +1877,8 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       buffered decrypted book reports "not encrypted" and every right — and the lift
       F10-4aa types gets its own line while the file's answers stay as the producer wrote
       them.
-- [ ] Carry `requires_assembly` onto extract, split and merge when those edits exist — the
-      flag has nothing to sit on for them yet.
+- [x] Carry `requires_assembly` onto extract, split and merge when those edits exist — the
+      flag has nothing to sit on for them yet.  **Implemented**: `extract_pages()`, `merge_documents()`, and `split_document()` now have `requires_assembly = True`
 - [x] **F10-4ba** — *Insert blank page: the first page-tree ask that invents a sheet,
       spliced by MuPDF into the node that owns the gap and wearing the geometry the sheet
       below it states.*  Rotate, delete, move and reverse rearrange sheets that exist; this
