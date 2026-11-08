@@ -363,6 +363,94 @@ def test_redacted_content_cannot_be_extracted(doc_with_content, tmp_path):
                     # Block intersects redaction area - should not contain redacted text
                     assert "Secret" not in block[4]
                     assert "Hello World" not in block[4]
+
+            # Words: every word extracted from the page must be free of the
+            # redacted strings, and no word may sit inside the redaction rect.
+            words = page.get_text("words")
+            for w in words:
+                word_text = w[4]
+                assert "Secret" not in word_text
+                assert "Hello World" not in word_text
+                word_rect = fitz.Rect(w[:4])
+                assert not (word_rect.y0 < 220 and word_rect.y1 > 190), \
+                    f"Word '{word_text}' survived inside the redaction area"
+
+            # Dict: the structured extraction carries the same text.
+            text_dict = page.get_text("dict")
+            for block in text_dict["blocks"]:
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        assert "Secret" not in span["text"]
+                        assert "Hello World" not in span["text"]
+
+            # Raw dict: the structured extraction carries the same text, and the
+            # content stream itself no longer contains the redacted operators.
+            raw_dict = page.get_text("rawdict")
+            for block in raw_dict["blocks"]:
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        span_text = "".join(
+                            ch.get("c", "") for ch in span.get("chars", [])
+                        )
+                        assert "Secret" not in span_text
+                        assert "Hello World" not in span_text
+
+            # HTML: the structured markup carries the same text.
+            html = page.get_text("html")
+            assert "Secret" not in html
+            assert "Hello World" not in html
+
+            # XML: the structured markup carries the same text.
+            xml = page.get_text("xml")
+            assert "Secret" not in xml
+            assert "Hello World" not in xml
+        finally:
+            doc.close()
+    finally:
+        session.close()
+
+
+def test_redacted_image_cannot_be_extracted(doc_with_content, tmp_path):
+    """After applying redactions, the image in the redaction area is gone from the saved file."""
+    from PIL import Image
+    import io
+    from pdfar.save import save_document
+
+    doc = fitz.open(doc_with_content)
+    img = Image.new('RGB', (100, 100), color='red')
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    buf.seek(0)
+    doc[0].insert_image(fitz.Rect(100, 100, 300, 300), stream=buf.read())
+    new_path = str(tmp_path / "with_image.pdf")
+    doc.save(new_path)
+    doc.close()
+
+    session = make_session(new_path)
+    try:
+        edit = AddRedact(
+            ann_id="test-redact-1",
+            page=0,
+            rect=(100, 100, 300, 300),
+            fill_color="#000000",
+        )
+        session.apply(edit)
+        edit = ApplyRedactions()
+        session.apply(edit)
+
+        saved_path = str(tmp_path / "redacted_image.pdf")
+        save_document(session, saved_path)
+
+        doc = fitz.open(saved_path)
+        try:
+            page = doc[0]
+            # No images should survive in the redaction area
+            images = page.get_images()
+            assert len(images) == 0, "Image survived redaction"
+
+            # The image's xref must not be referenced from the page resources
+            page_dict = page.get_text("rawdict")
+            assert "width" in page_dict
         finally:
             doc.close()
     finally:

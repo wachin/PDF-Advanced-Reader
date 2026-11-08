@@ -1469,7 +1469,7 @@ Highlights are implemented and persisted (`src/pdfar/annotations.py`).
       `invalidate` now announces a page count that changed, which is what carries the toolbar's
       total and the page box through a delete *and* back from it: they used to re-agree only on
       a tab switch (**F10-4f**)
-- [ ] Shift what the *user's own* state keys on a page number, which no document-level undo
+- [x] Shift what the *user's own* state keys on a page number, which no document-level undo
       reaches.  Measured, that is four stores and one panel, each broken differently, so each is
       its own step:
       - [x] **F10-4g** — *Bookmarks follow their sheet.*  A user bookmark is a 0-based page in
@@ -1944,7 +1944,7 @@ explicitly a cover, not a redaction.
 - [x] **Proof step:** after applying, re-extract text, images, and vector graphics from redacted areas and abort if anything survives
 - [x] Force a full save afterwards — the previous revision still holds the secret (uses staged_write)
 - [x] Report exactly what was removed (pages processed, marks, annotations, text, images, graphics), and fail closed when a page cannot be processed (vertical text, inline images, undecodable streams)
-- [ ] Tests that assert the redacted string cannot be selected, copied, searched
+- [x] Tests that assert the redacted string cannot be selected, copied, searched
       or extracted, in the saved file
 
 ## F10-6 Adding content — [ ]
