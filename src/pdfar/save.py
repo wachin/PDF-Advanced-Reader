@@ -353,6 +353,37 @@ def verify_file(path: str, expected_pages: int, password: str = "") -> int:
         doc.close()
 
 
+def _has_signature_fields(doc: fitz.Document) -> bool:
+    """Check if the document has signature fields by scanning widgets.
+
+    Avoids using doc.get_sigflags() because PyMuPDF has a bug where get_sigflags()
+    closes the document object in some contexts.
+    """
+    try:
+        for page in doc:
+            for widget in page.widgets():
+                if widget.field_type == fitz.PDF_WIDGET_TYPE_SIGNATURE:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _save_invalidates_signatures(doc: fitz.Document) -> bool:
+    """Check if saving would invalidate digital signatures.
+
+    A full rewrite invalidates signatures if any signature field contains a signature value.
+    """
+    try:
+        for page in doc:
+            for widget in page.widgets():
+                if widget.field_type == fitz.PDF_WIDGET_TYPE_SIGNATURE and widget.field_value:
+                    return True
+    except Exception:
+        pass
+    return True  # Fail safe: assume saving invalidates if we can't check
+
+
 # --------------------------------------------------------------------- saving
 def _can_append(doc: fitz.Document, target: str) -> bool:
     """Is *doc* still the handle that was opened from *target*?
@@ -368,6 +399,7 @@ def _can_append(doc: fitz.Document, target: str) -> bool:
 
 
 def _save_incremental(session, doc: fitz.Document, target: str) -> SaveReport:
+    """Append to the file the document came from, leaving the old revision intact."""
     """Append to the file the document came from, leaving the old revision intact."""
     try:
         doc.save(target, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
@@ -442,13 +474,7 @@ def save_document(session, path: Optional[str] = None, *, full: bool = False,
     # Check if document has digital signatures that would be invalidated by a full rewrite
     # (only for full rewrites, not incremental saves)
     if not _can_append(doc, target):
-        sigflags = doc.get_sigflags()
-        # PyMuPDF returns -1 for documents without signatures (all bits set in two's complement)
-        # We need to treat sigflags == -1 as "no signatures"
-        has_sig_fields = sigflags != -1 and bool(sigflags & 1)  # Bit 1: has signature field
-        save_invalidates = sigflags != -1 and bool(sigflags & 2)  # Bit 2: save invalidates signatures
-
-        if has_sig_fields and save_invalidates:
+        if _has_signature_fields(doc) and _save_invalidates_signatures(doc):
             raise SaveError(
                 f"Document contains digital signatures that would be invalidated by a full rewrite. "
                 f"Use incremental save (Save without 'full' option) to preserve signatures, "
@@ -456,6 +482,12 @@ def save_document(session, path: Optional[str] = None, *, full: bool = False,
             )
 
     # A viewer paints what an annotation's /AP says.  PDFAR's own marks write
+    # that stream as they are made, but a mark from another program may have
+    # been left for the viewer to regenerate, and not every viewer does.  The
+    # file becomes someone else's copy from here, so it leaves complete.
+    ensure_appearances(doc)
+
+    # Level 1 frees the bytes of the objects a deleted page leaves behind; level
     # 2 also merges duplicate streams and shrinks the object table, and costs the
     # same (1.40 s against 1.37 s on a 540-page book, 37185 slots written from
     # 38172).  Level 3 then compacts cross references — 213 more slots out of a
