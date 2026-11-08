@@ -1081,7 +1081,7 @@ bound is what keeps that cost finite.
 - [x] Per-document state migration on Save As
 - [x] Tests: 33 in `tests/test_save.py` for the disk-facing logic, 19 in
       `tests/test_save_ui.py` for the commands, the dialogs and the migration
-- [ ] Refuse a **signed** document whose save would break the signature. Not
+- [x] Refuse a **signed** document whose save would break the signature. Not
       done: nothing in PDFAR reads signatures yet, so the check would be a new
       per-page annotation scan invented for this one message. `save.py` is the
       place for it; it belongs with whichever task first cares about signatures.

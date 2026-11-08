@@ -468,6 +468,62 @@ def test_an_owner_only_document_saves_incrementally_with_its_password(tmp_path):
     session.close()
 
 
+def test_a_signed_document_refuses_full_rewrite(tmp_path):
+    """A document with signature fields that would be invalidated refuses full rewrite."""
+    # Build a signed PDF in a fresh document (PyMuPDF quirks: the doc must be
+    # opened from a file and only saved once before sigflags becomes readable
+    # again after a reopen).
+    path = str(tmp_path / "doc.pdf")
+    doc = fitz.open()
+    for index in range(2):
+        page = doc.new_page(width=200, height=100)
+        page.insert_text(fitz.Point(10, 30), f"Page {index + 1} content", fontsize=12)
+    widget = fitz.Widget()
+    widget.field_name = "sig1"
+    widget.field_type = fitz.PDF_WIDGET_TYPE_SIGNATURE
+    widget.rect = fitz.Rect(100, 60, 190, 90)
+    doc[0].add_widget(widget)
+    doc.save(path)
+    doc.close()
+
+    session = open_session(path)
+    session.apply(AddText(0, "SHOULD FAIL"))
+
+    # A full rewrite renumbers objects, so any signature covering them is broken.
+    with pytest.raises(SaveError, match="digital signatures that would be invalidated"):
+        save_document(session, full=True)
+
+    # The refusal must not touch the file, and the edit stays pending.
+    assert session.dirty is True
+    with fitz.open(path) as untouched:
+        assert "SHOULD FAIL" not in page_text(untouched)
+    session.close()
+
+
+def test_a_signed_document_still_allows_an_incremental_save(tmp_path):
+    """An in-place change on a signed book may append; only a rewrite is refused."""
+    path = str(tmp_path / "doc.pdf")
+    doc = fitz.open()
+    for index in range(2):
+        page = doc.new_page(width=200, height=100)
+        page.insert_text(fitz.Point(10, 30), f"Page {index + 1} content", fontsize=12)
+    widget = fitz.Widget()
+    widget.field_name = "sig1"
+    widget.field_type = fitz.PDF_WIDGET_TYPE_SIGNATURE
+    widget.rect = fitz.Rect(100, 60, 190, 90)
+    doc[0].add_widget(widget)
+    doc.save(path)
+    doc.close()
+
+    session = open_session(path)
+    in_place_change(session)
+
+    report = save_document(session)
+
+    assert report.incremental is True
+    session.close()
+
+
 def test_an_owner_only_document_keeps_the_password_it_never_showed(tmp_path):
     """Editing it no longer costs the user their protection.
 
