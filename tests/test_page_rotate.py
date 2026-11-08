@@ -636,7 +636,9 @@ def test_the_commands_sit_beside_the_view_rotation(qapp, sample_pdf):
     qapp.processEvents()
     try:
         menus = {menu.title(): menu for menu in win.menuBar().findChildren(QMenu)}
-        tools = menus["&Tools"].actions()
+        # Rotate actions are now in a "Rotate" submenu under Tools
+        rotate_menu = menus["Rotate"]
+        tools = rotate_menu.actions()
         order = [a for a in tools if a in (win.act_rotate_left, win.act_rotate_right,
                                            win.act_page_rotl, win.act_page_rotr)]
         assert order == [win.act_rotate_left, win.act_rotate_right,

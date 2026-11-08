@@ -945,10 +945,14 @@ class MainWindow(QMainWindow):
         tools_menu.addSeparator()
         tools_menu.addAction(self.act_page_numbers)
         tools_menu.addSeparator()
-        tools_menu.addAction(self.act_rotate_left)
-        tools_menu.addAction(self.act_rotate_right)
-        tools_menu.addAction(self.act_page_rotl)
-        tools_menu.addAction(self.act_page_rotr)
+        
+        # Rotate submenu
+        rotate_menu = tools_menu.addMenu("Rotate")
+        rotate_menu.addAction(self.act_rotate_left)
+        rotate_menu.addAction(self.act_rotate_right)
+        rotate_menu.addAction(self.act_page_rotl)
+        rotate_menu.addAction(self.act_page_rotr)
+        
         tools_menu.addAction(self.act_page_insert)
         tools_menu.addAction(self.act_page_duplicate)
         tools_menu.addAction(self.act_page_extract)
