@@ -553,6 +553,13 @@ class MainWindow(QMainWindow):
         self.act_sel_table.triggered.connect(
             lambda: self._set_tool_mode("table"))
 
+        self.act_edit_text = QAction("Edit Text", self)
+        self.act_edit_text.setCheckable(True)
+        self.act_edit_text.setToolTip(
+            "Edit Text: click existing text on the page to modify it in place")
+        self.act_edit_text.triggered.connect(
+            lambda: self._set_tool_mode("edit_text"))
+
         self.act_draw = QAction("Freehand", self)
         self.act_draw.setCheckable(True)
         self.act_draw.setToolTip("Freehand: drag to draw on the page")
@@ -1137,6 +1144,11 @@ class MainWindow(QMainWindow):
             page_view_menu.addAction(self._view_actions[mode])
         self.view_mode_button.setMenu(page_view_menu)
         tb.addWidget(self.view_mode_button)
+
+        # Existing-text editing: its own toolbar button, placed after the
+        # viewing-mode group so it does not disturb the contiguous tool group
+        # asserted by the toolbar layout tests.
+        tb.addAction(self.act_edit_text)
 
         self._build_pen_options(tb)
 
@@ -3623,6 +3635,7 @@ class MainWindow(QMainWindow):
             "table": self.act_sel_table,
             "draw": self.act_draw,
             "measure": self.act_measure,
+            "edit_text": self.act_edit_text,
         }[mode]
 
     def _measure_tip(self, scale: MeasurementScale) -> str:
@@ -3637,7 +3650,7 @@ class MainWindow(QMainWindow):
     def _set_tool_mode(self, mode: str) -> None:
         """Activate a mouse tool and apply it to the current view."""
         if mode not in ("browse", "text", "area", "table", "draw", "shape",
-                        "stamp", "measure"):
+                        "stamp", "measure", "edit_text"):
             return
         view = self.view
         if (view is not None and view.reflow_mode
@@ -3655,6 +3668,9 @@ class MainWindow(QMainWindow):
                 self.stamp_split.setDefaultAction(action)
             elif mode == "measure":
                 self.measure_split.setDefaultAction(action)
+            elif mode == "edit_text":
+                # Its own toolbar button; leave the selection popup alone.
+                pass
             else:
                 self.tool_split.setDefaultAction(action)
         if view is not None:

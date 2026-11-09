@@ -1,5 +1,5 @@
 
-
+20261108 codebuddy (https://www.workbuddy.ai/docs/cli/installation)
 
 20261106 OpenCode Desktop with FreeLLMAPI: Completed page operations polish (F10-4) - metadata/outline preservation confirmed, outline entry cleanup on delete verified, all page edits undoable, destructive operations (delete/redact) have confirmation dialogs.
 

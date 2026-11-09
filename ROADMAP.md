@@ -8375,3 +8375,49 @@ PDFAR 2.1
 
 Following version 2.1, work will continue on the roadmap incrementally.
 
+
+---
+
+## Existing-Text Editing (F10-7 addendum — implemented 2026-11-08)
+
+Status: **Available (core workflow)**. Users can hover existing text to see a
+word highlighted, click it, edit it inline with a live preview, and apply the
+change. Changes are genuine content-stream edits (Strategy A), integrated with
+the existing undo/redo, dirty-state and save machinery.
+
+New modules:
+- `src/pdfar/text_edit_existing.py` — hit testing (`find_text_at_point`),
+  content-stream operator mapping (`locate_operator_for_word`, graphics-state
+  replay), surgical single-operator replacement (`ReplaceExistingText`), and
+  font/glyph validation (Strategy D fallback).
+- `src/pdfar/text_edit_inline.py` — the inline editor popover.
+- Viewer UI: `"edit_text"` tool mode with hover highlight + live preview in
+  `viewer.py`; toolbar action in `main.py`.
+
+Reused: `content_stream.py` (parser/serializer). Removed obsolete stubs
+`text_edit.py` and `text_edit_core.py` (the latter was unimportable).
+
+Implemented:
+- Word-level hover highlight and click-to-edit (no whole-page highlight).
+- Genuine operator replacement preserving every other stream byte (q/BT/Tf/ET/Q,
+  dictionaries, inline images kept byte-identical).
+- Undo / redo / save / reopen verified by tests (see
+  `tests/test_existing_text_edit.py`, `tests/test_existing_text_ui.py`).
+
+Partially implemented / limitations:
+- Multi-column, rotated, different-size and different-color text: detected and
+  editable when each word maps to a single text-showing operator.
+- A word split across `TJ` kerning segments is **refused** with a clear message
+  (Strategy D) rather than corrupted.
+- Replacement glyphs not present in the original font are **refused** (Strategy D).
+- Type0/CID/embedded-subset fonts: best-effort; replacement is attempted when the
+  font can be loaded, but full font substitution/embedding is not yet done, and
+  some subsetted fonts will be refused.
+- Form XObjects, scanned (non-text) content and complex graphics states are not
+  supported and are detected/refused to avoid corrupting the file.
+- Full paragraph reflow, OpenType shaping and complex CJK line breaking are out
+  of scope.
+
+Known limitations to address later: font substitution/embedding when the
+original font lacks the needed glyphs; editing words split by kerning; broader
+CJK/complex-script support.

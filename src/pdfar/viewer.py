@@ -57,6 +57,10 @@ from .reflow import (
 from .render import RenderPool, RenderResult
 from .search import SearchHit
 from .session import DocumentSession
+from .text_edit_existing import (
+    WordHit, find_text_at_point, ReplaceExistingText,
+)
+from .text_edit_inline import ExistingTextEditor
 from .tiles import Tile, TileGrid, TILE_SIZE
 from .annotations import (
     CUSTOM_STAMP_NAME, INK_COLOR, INK_WIDTH, MEASURE_DEFAULT_SCALE,
@@ -343,6 +347,13 @@ class PDFView(QAbstractScrollArea):
 
         self._errors: Dict[int, str] = {}
         self._press_pos = QPoint()
+
+        #: Existing-text editing: the word currently hovered (WordHit) and the
+        #: editor popover state.
+        self._hover_word: Optional[WordHit] = None
+        self._text_editor: Optional[ExistingTextEditor] = None
+        self._edit_hit: Optional[WordHit] = None
+        self._edit_preview: Optional[str] = None
 
         # Annotations
         self.annotation_manager = AnnotationManager(self.session, self)
@@ -840,10 +851,11 @@ class PDFView(QAbstractScrollArea):
 
     # ---------------------------------------------------------- mouse tools
     TOOL_MODES = ("browse", "text", "area", "table", "draw", "shape",
-                  "stamp", "measure")
+                  "stamp", "measure", "edit_text")
 
     #: Tools that need the page geometry reflow does not have.
-    _PAGE_ONLY_TOOLS = ("area", "table", "draw", "shape", "stamp", "measure", "redact")
+    _PAGE_ONLY_TOOLS = ("area", "table", "draw", "shape", "stamp", "measure",
+                        "redact", "edit_text")
 
     def set_tool_mode(self, mode: str) -> None:
         """Switch the left-button tool: browse, text, area, table, pen, shape,
@@ -860,6 +872,8 @@ class PDFView(QAbstractScrollArea):
         self._cancel_stroke()
         self._cancel_shape()
         self._cancel_measure()
+        self._close_text_editor()
+        self._hover_word = None
         self._panning = False
         if mode != "text":
             self.clear_selection()
@@ -964,6 +978,8 @@ class PDFView(QAbstractScrollArea):
                      else Qt.CursorShape.OpenHandCursor)
         elif self.tool_mode == "text":
             shape = Qt.CursorShape.IBeamCursor
+        elif self.tool_mode == "edit_text":
+            shape = Qt.CursorShape.IBeamCursor
         else:
             shape = Qt.CursorShape.CrossCursor
         self.viewport().setCursor(shape)
@@ -974,6 +990,126 @@ class PDFView(QAbstractScrollArea):
             self.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
             return
         self._apply_tool_cursor()
+
+    # --------------------------------------------------- existing-text editing
+    def _update_text_hover(self, pos: QPoint) -> None:
+        """Hit-test the pointer and cache the word under it for highlighting."""
+        hit = self._pdf_point_at(pos)
+        new_word = None
+        if hit is not None:
+            page, x, y = hit
+            try:
+                new_word = find_text_at_point(self.doc[page], (x, y))
+            except Exception:
+                new_word = None
+        if new_word is not self._hover_word and (
+                new_word is None or self._hover_word is None
+                or new_word.text != self._hover_word.text
+                or new_word.rect != self._hover_word.rect):
+            self._hover_word = new_word
+            self.viewport().update()
+
+    def _open_text_editor(self, page: int, word_hit: WordHit) -> None:
+        """Show the inline editor over *word_hit* and start live preview."""
+        self._close_text_editor()
+        self._edit_hit = word_hit
+        self._edit_preview = word_hit.text
+        editor = ExistingTextEditor(
+            self.viewport(), word_hit.text, font_size=word_hit.font_size)
+        editor.set_preview_callback(self._set_edit_preview)
+        editor.applied.connect(self._commit_text_edit)
+        editor.cancelled.connect(self._cancel_text_edit)
+        editor.show()
+        self._text_editor = editor
+        self._position_text_editor()
+        editor.line.setFocus()
+        self.viewport().update()
+
+    def _position_text_editor(self) -> None:
+        """Place the editor popover over the current word in screen pixels."""
+        if self._text_editor is None or self._edit_hit is None:
+            return
+        page = self._edit_hit.page
+        if page >= self.page_count:
+            return
+        px, py = self._page_origin(page)
+        px -= self.horizontalScrollBar().value()
+        py -= self.verticalScrollBar().value()
+        z = self.zoom
+        w0, h0, turn = self._sheet_space(page)
+        x0, y0, x1, y1 = map_rect(self._edit_hit.rect, w0, h0, turn)
+        left = int(px + x0 * z)
+        top = int(py + y0 * z)
+        width = max(120, int((x1 - x0) * z) + 8)
+        height = self._text_editor.sizeHint().height()
+        self._text_editor.setGeometry(left, top, width, height)
+
+    def _set_edit_preview(self, text: str) -> None:
+        self._edit_preview = text
+        self.viewport().update()
+
+    def _commit_text_edit(self, new_text: str) -> None:
+        hit = self._edit_hit
+        editor = self._text_editor
+        self._close_text_editor()
+        if hit is None or new_text == hit.text:
+            if editor is not None:
+                editor.deleteLater()
+            return
+        edit = ReplaceExistingText(
+            page_num=hit.page, old_word=hit.text, new_word=new_text,
+            word_rect=hit.rect, font=hit.font, font_size=hit.font_size,
+            color=hit.color, flags=hit.flags,
+        )
+        if not self.apply_edit(edit):
+            # apply_edit already surfaced the reason; restore the live view.
+            self.viewport().update()
+
+    def _cancel_text_edit(self) -> None:
+        self._close_text_editor()
+
+    def _close_text_editor(self) -> None:
+        if self._text_editor is not None:
+            self._text_editor.deleteLater()
+            self._text_editor = None
+        self._edit_hit = None
+        self._edit_preview = None
+        self.viewport().update()
+
+    def _paint_text_edit_overlay(self, painter: QPainter, page: int,
+                                ox: float, oy: float) -> None:
+        """Draw the hover highlight and the live replacement preview."""
+        w0, h0, turn = self._sheet_space(page)
+        z = self.zoom
+        word = self._hover_word
+        if word is not None and word.page == page and self._text_editor is None:
+            x0, y0, x1, y1 = map_rect(word.rect, w0, h0, turn)
+            r = QRect(int(ox + x0 * z), int(oy + y0 * z),
+                      max(1, int((x1 - x0) * z)), max(1, int((y1 - y0) * z)))
+            painter.fillRect(r, QColor(255, 220, 0, 70))
+            painter.setPen(QPen(QColor(220, 160, 0), 1.5))
+            painter.drawRect(r)
+        preview = self._edit_preview
+        hit = self._edit_hit
+        if preview is not None and hit is not None and hit.page == page:
+            x0, y0, x1, y1 = map_rect(hit.rect, w0, h0, turn)
+            rx = int(ox + x0 * z)
+            ry = int(oy + y0 * z)
+            rw = max(1, int((x1 - x0) * z))
+            rh = max(1, int((y1 - y0) * z))
+            # Faint band so the original glyph is dimmed while previewing.
+            painter.fillRect(QRect(rx, ry, rw, rh), QColor(255, 255, 255, 170))
+            font = QFont("sans-serif", max(6, int(hit.font_size * z)))
+            painter.setFont(font)
+            # Warn (red) when the replacement is clearly wider than the slot.
+            metrics = painter.fontMetrics()
+            if metrics.horizontalAdvance(preview) > rw * 1.25:
+                painter.setPen(QColor(200, 30, 30))
+            else:
+                painter.setPen(QColor(10, 10, 10))
+            painter.drawText(QRect(rx, ry, rw, rh),
+                            Qt.AlignmentFlag.AlignLeft
+                            | Qt.AlignmentFlag.AlignVCenter, preview)
 
     def _cancel_marquee(self) -> None:
         if self._marquee is not None:
@@ -2144,6 +2280,8 @@ class PDFView(QAbstractScrollArea):
         self._paint_shape(painter)
         self._paint_redact(painter)
         self._paint_measure(painter)
+        if self._text_editor is not None:
+            self._position_text_editor()
         painter.end()
 
     def _paint_stroke(self, painter: QPainter) -> None:
@@ -2550,6 +2688,8 @@ class PDFView(QAbstractScrollArea):
             x0, y0, x1, y1 = rect
             painter.fillRect(QRect(int(x + x0 * z), int(y + y0 * z),
                                    max(1, int((x1 - x0) * z)), max(1, int((y1 - y0) * z))), SEL_COLOR)
+
+        self._paint_text_edit_overlay(painter, page, x, y)
 
         if self._numbering_preview is not None:
             self._paint_numbering_preview(painter, page, x, y)
@@ -3511,6 +3651,16 @@ class PDFView(QAbstractScrollArea):
             self.viewport().update()
             event.accept()
             return
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self.tool_mode == "edit_text"):
+            hit = self._pdf_point_at(event.position().toPoint())
+            if hit is not None:
+                page, x, y = hit
+                word_hit = find_text_at_point(self.doc[page], (x, y))
+                if word_hit is not None:
+                    self._open_text_editor(page, word_hit)
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             self._press_pos = event.position().toPoint()
@@ -3528,6 +3678,10 @@ class PDFView(QAbstractScrollArea):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self.tool_mode == "edit_text" and self._text_editor is None:
+            self._update_text_hover(event.position().toPoint())
+            event.accept()
+            return
         if self._numbering_drag is not None:
             drag = self._numbering_drag
             pos = event.position()
