@@ -363,3 +363,73 @@ word-edit engine:
   approximate). Single-line rotated paragraphs are handled fully.
 - Real-world refusals (genuine mixed styles, math spans, unmapped glyphs) are
   expected and explained, not silently "fixed".
+
+## 13. Phase 5.1 addendum — PdfCraft-style paragraph selection & editing UX (2026-11-12)
+
+This phase changes the **default interaction** of the Edit-Text tool so it
+matches PdfCraft's "click a word → the whole block is selected and outlined →
+edit it as one paragraph" behaviour, without building a new editing engine.
+The Phase 1–5 paragraph engine is reused unchanged.
+
+### 13.1 What changed in the viewer (`src/pdfar/viewer.py`)
+
+- **Default click = whole paragraph.** A plain left click in the Edit-Text tool
+  now runs the same path PdfCraft's `block_at` + smallest-enclosing `TextBlock`
+  does: identify the word (`find_text_at_point`), find the containing paragraph
+  (`paragraph_for_word`), and open `ParagraphEditorDialog`. A plain click no
+  longer opens the inline word editor.
+- **Word editing preserved.** `Shift`+click (or the right-click "Edit word…"
+  menu, or a drag across words on the same line) still opens the inline
+  `ExistingTextEditor`. The old Ctrl+click → paragraph shortcut still works.
+- **Persistent paragraph outline.** While the paragraph editor is open the
+  viewer paints a dashed green outline around `Paragraph.rect` (the union of the
+  paragraph's real line rectangles), through the same `map_rect` page→view
+  transform as every other overlay. It is cleared on apply, on cancel, and when
+  the tool changes or a new selection begins. The hover highlight is suppressed
+  while a paragraph is selected so the two never overlap.
+- **No engine duplication.** `Paragraph.rect`, `paragraph_for_word`,
+  `ReflowParagraph` and the dialog are the same objects Phase 5 built; the 5.1
+  work is purely viewer interaction + overlay painting.
+
+### 13.2 How it maps to PdfCraft (`/external/pdfcraft`, MIT+Apache, reference only)
+
+| PdfCraft | PDFAR 5.1 |
+|----------|-----------|
+| `rich_copy::block_at` hit-test (smallest-area box holding the glyph centre) | `find_text_at_point` + `paragraph_for_word` |
+| `TextBlock.rect` (union of line rects) | `Paragraph.rect` |
+| "click selects the whole block" | plain click → `ParagraphEditorDialog` |
+| per-block editor | `ParagraphEditorDialog` (with `plan_reflow` preview) |
+| word-only fallback when a block is ambiguous | inline `ExistingTextEditor` (Shift / drag / menu) |
+
+### 13.3 Ambiguous cases (handled by the engine, surfaced to the user)
+
+- Headings (different font/size), captions, list items, table text and separate
+  paragraphs are kept apart by geometric + typographic evidence; a click in one
+  never drags in a neighbour (see `test_neighbour_paragraph_not_merged`,
+  `test_heading_and_body_are_separate`).
+- When a paragraph cannot be rebuilt as one block (`para.problems`), the editor
+  falls back to the inline word editor with an explanation, exactly as before.
+- A short line followed by a full line at the body edge is treated as a paragraph
+  break on purpose (the common "title then body" pattern); this is the one case
+  where the grouping heuristic intentionally splits.
+
+### 13.4 Tests added (`tests/test_paragraph_selection_ui.py`)
+
+18 headless integration tests drive the **real** viewer event handlers with
+synthetic mouse press/release/move events and a non-blocking `ParagraphEditor`
+double, covering the 15 specification scenarios: single-line selection,
+multi-line grouping, first/last-word → same selection, neighbour exclusion,
+heading/body separation, consecutive-line grouping (multi-operator), rotated
+text outline geometry, outline-boundary fidelity, normal-click opens the editor,
+Shift = word editor, drag = word editor, apply, cancel, undo/redo and
+save-reopen, plus overlay painting (outline present inside the paragraph, absent
+in a far corner; hover suppressed while selected).
+
+### 13.5 Known limitations (Phase 5.1)
+
+- The paragraph editor is modal, so the outline is painted behind it and is most
+  visible before the dialog opens and after it closes; it is not live-updated
+  during editing (the dialog's own preview already shows the live layout).
+- Rotated paragraphs whose operators cannot be matched to the content stream fall
+  back to the word editor (same as Phase 5); their outline is still drawn from
+  the geometric bounding box.

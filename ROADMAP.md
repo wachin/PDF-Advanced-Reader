@@ -8565,3 +8565,37 @@ Still open: whole-page / multi-paragraph / multi-column / table reflow, new-page
 placement, OCR, CFF/OpenType embedding, variable-font instances, Windows/macOS
 discovery backends, and multi-line paragraphs rotated via an enclosing `cm` (the
 writer reproduces the rotation, but fit-checking is approximate for that case).
+
+### F10-7 Phase 5.1 — PdfCraft-style paragraph selection & editing UX (2026-11-12)
+
+Changes the **default Edit-Text click** to match PdfCraft's "click a word → the
+whole block is selected and outlined → edit it as one paragraph" workflow,
+reusing the Phase 1–5 paragraph engine unchanged (no new editing engine).
+
+- **Plain click = whole paragraph.** Identifies the word (`find_text_at_point`),
+  finds the containing paragraph (`paragraph_for_word`), selects the whole
+  paragraph, paints a dashed green outline around `Paragraph.rect` (the real
+  union of the line rectangles, mapped through the same `map_rect` transform as
+  every overlay), and opens `ParagraphEditorDialog`.
+- **Word editing preserved.** `Shift`+click, a drag across words on one line, or
+  the right-click "Edit word…" menu still open the inline `ExistingTextEditor`.
+  Ctrl+click still forces the paragraph editor (legacy shortcut).
+- **Outline lifecycle.** Set before the (modal) dialog opens, cleared on apply,
+  cancel, tool change or a new selection; hover highlight suppressed while a
+  paragraph is selected.
+- **No engine duplication.** `Paragraph.rect`, `paragraph_for_word`,
+  `ReflowParagraph` and the dialog are the Phase 5 objects; 5.1 is purely viewer
+  interaction + overlay painting.
+
+Tests: 18 new (`tests/test_paragraph_selection_ui.py`) driving the **real** viewer
+event handlers with synthetic mouse events and a non-blocking `ParagraphEditor`
+double; covers the 15 specification scenarios (single/multi-line selection,
+first/last word → same selection, neighbour exclusion, heading/body separation,
+consecutive-line grouping, rotated outline geometry, outline-boundary fidelity,
+normal-click opens editor, word editor via Shift/drag, apply, cancel, undo/redo,
+save-reopen) plus overlay painting.
+
+Open: the outline is most visible before/after the modal dialog rather than live
+during editing (the dialog's own preview shows the live layout); rotated
+paragraphs whose operators cannot be matched to the content stream fall back to
+the word editor.

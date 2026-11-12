@@ -781,3 +781,61 @@ Phase 5 gives PDFAR a natural, layout-aware way to edit existing paragraphs,
 reusing the fail-closed word-edit engine underneath. Reflow stays inside the
 paragraph's region, refuses anything it cannot do safely, and shows the user an
 accurate preview before committing.
+
+## 14. Phase 5.1 report (2026-11-12) — PdfCraft-style paragraph selection UX
+
+Phase 5.1 changes the **default Edit-Text click** so it behaves like PdfCraft's
+"click a word → the whole block is selected and outlined → edit it as one
+paragraph" workflow, without building a new editing engine. The Phase 1–5
+paragraph machinery is reused unchanged.
+
+### 14.1 Interaction model
+
+- **Plain click** on any word inside a paragraph: identifies the word, finds the
+  containing paragraph (`paragraph_for_word`), selects the *whole* paragraph,
+  paints a dashed outline around `Paragraph.rect` (the real union of the line
+  rectangles, mapped through the same `map_rect` transform as every overlay), and
+  opens `ParagraphEditorDialog`.
+- **Shift+click**, a **drag across words on one line**, or the right-click
+  "Edit word…" menu keep the inline `ExistingTextEditor` (single/multi-word).
+- **Ctrl+click** still forces the paragraph editor (legacy shortcut).
+- A paragraph that cannot be rebuilt as one block falls back to the word editor
+  with an explanation.
+
+### 14.2 What changed
+
+- `src/pdfar/viewer.py`
+  - `mousePressEvent`/`mouseReleaseEvent` (Edit-Text): plain click now routes to
+    `_open_paragraph_editor`; Shift or a drag routes to `_open_text_editor`.
+  - `_open_paragraph_editor`: sets `_paragraph_selection`/`_paragraph_selection_page`
+    before opening the (modal) dialog and clears them on apply or cancel.
+  - `_paint_text_edit_overlay`: paints the paragraph outline (green dashed +
+    faint fill) and suppresses the hover highlight while a paragraph is selected.
+  - New helper `_clear_paragraph_selection`; called on tool change.
+
+### 14.3 Tests added
+
+`tests/test_paragraph_selection_ui.py` — 18 headless integration tests that
+drive the **real** viewer event handlers with synthetic mouse events and a
+non-blocking `ParagraphEditor` double. They cover the 15 specification
+scenarios (single/multi-line selection, first/last word → same selection,
+neighbour exclusion, heading/body separation, consecutive-line grouping, rotated
+outline geometry, outline-boundary fidelity, normal-click opens editor, word
+editor reachable via Shift/drag, apply, cancel, undo/redo, save-reopen) plus
+overlay painting (outline present inside the paragraph, absent in a far corner;
+hover suppressed while selected).
+
+### 14.4 Known limitations
+
+- The paragraph editor is modal, so the outline is most visible before the dialog
+  opens and after it closes rather than live during editing (the dialog's own
+  `ParagraphPreview` already shows the live layout).
+- Rotated paragraphs whose operators cannot be matched to the content stream fall
+  back to the word editor; their outline is still drawn from the geometric box.
+
+### 14.5 Result
+
+The acceptance criterion is met: activate Edit Text, click any word inside a
+paragraph, and PDFAR selects and outlines the complete paragraph; any word or
+sentence within it can then be edited through the paragraph editor, while the
+inline word editor remains one Shift+click or right-click away.

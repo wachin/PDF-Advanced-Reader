@@ -65,7 +65,7 @@ from .text_edit_existing import (
 )
 from .text_edit_inline import ExistingTextEditor
 from .font_picker import FontSubstitutionDialog
-from .paragraph import ParagraphError, paragraph_for_word
+from .paragraph import Paragraph, ParagraphError, paragraph_for_word
 from .paragraph_dialog import ParagraphEditorDialog
 from .tiles import Tile, TileGrid, TILE_SIZE
 from .annotations import (
@@ -363,6 +363,13 @@ class PDFView(QAbstractScrollArea):
         #: Drag-to-select words on one line for a multi-word edit.
         self._text_select_start: Optional[WordHit] = None
         self._text_select_hits: list[WordHit] = []
+        #: PdfCraft-style paragraph selection: a whole paragraph is outlined
+        #: and the paragraph editor opens on a plain click (Shift = word).
+        self._paragraph_selection: Optional[Paragraph] = None
+        self._paragraph_selection_page: Optional[int] = None
+        #: True when the current press wants the inline word editor (Shift held
+        #: at press time); a plain click opens the paragraph editor instead.
+        self._edit_word_mode: bool = False
 
         # Annotations
         self.annotation_manager = AnnotationManager(self.session, self)
@@ -896,6 +903,7 @@ class PDFView(QAbstractScrollArea):
         self._cancel_shape()
         self._cancel_measure()
         self._close_text_editor()
+        self._clear_paragraph_selection()
         self._hover_word = None
         self._panning = False
         if mode != "text":
@@ -1150,12 +1158,23 @@ class PDFView(QAbstractScrollArea):
         self._edit_preview = None
         self.viewport().update()
 
+    def _clear_paragraph_selection(self) -> None:
+        """Drop any PdfCraft-style paragraph outline and repaint."""
+        if self._paragraph_selection is not None:
+            self._paragraph_selection = None
+            self._paragraph_selection_page = None
+            self.viewport().update()
+
     def _open_paragraph_editor(self, page: int, word_hit: WordHit) -> None:
         """Open the dedicated paragraph editor for the paragraph at *word_hit*.
 
         The dialog plans the reflow with the same code the edit uses, so what
         the user approves is exactly what gets written.  The document is only
         touched when the dialog is accepted and the edit applies cleanly.
+
+        A plain click selects and outlines the *whole* paragraph (PdfCraft
+        style); the outline is painted from :attr:`Paragraph.rect` and stays up
+        while the editor is open, then is cleared on apply or cancel.
         """
         pdf_page = self.doc[page]
         try:
@@ -1175,13 +1194,21 @@ class PDFView(QAbstractScrollArea):
             # Fall back to the inline word editor for a single-word change.
             self._open_text_editor(page, word_hit)
             return
+        # Outline the whole paragraph before the (modal) editor covers it; the
+        # state is cleared again once the dialog is dismissed.
+        self._paragraph_selection = para
+        self._paragraph_selection_page = page
+        self.viewport().update()
         dialog = ParagraphEditorDialog(self, pdf_page, para, page_num=page)
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        dialog.deleteLater()
+        # The selection is gone whether the edit applied or was cancelled.
+        self._paragraph_selection = None
+        self._paragraph_selection_page = None
+        self.viewport().update()
         if not accepted:
-            dialog.deleteLater()
             return
         edit = dialog.build()
-        dialog.deleteLater()
         try:
             version, scope = self.session.apply(edit)
         except FontSubstitutionRequired as exc:
@@ -1195,11 +1222,35 @@ class PDFView(QAbstractScrollArea):
 
     def _paint_text_edit_overlay(self, painter: QPainter, page: int,
                                 ox: float, oy: float) -> None:
-        """Draw the hover highlight and the live replacement preview."""
+        """Draw the PdfCraft-style paragraph outline, hover and preview.
+
+        The paragraph outline is the union of the selection's line rectangles
+        (:attr:`Paragraph.rect`) mapped through the same page→view transform as
+        every other overlay, so it hugs the real text geometry and excludes
+        neighbours.  It is painted whenever a paragraph is selected.
+        """
         w0, h0, turn = self._sheet_space(page)
         z = self.zoom
+
+        # Whole-paragraph selection outline (PdfCraft-style).  Drawn first so
+        # the hover/preview markers sit on top of it.
+        para = self._paragraph_selection
+        if para is not None and self._paragraph_selection_page == page:
+            x0, y0, x1, y1 = map_rect(para.rect, w0, h0, turn)
+            pr = QRect(int(ox + x0 * z), int(oy + y0 * z),
+                       max(2, int((x1 - x0) * z)),
+                       max(2, int((y1 - y0) * z)))
+            painter.fillRect(pr, QColor(0, 150, 70, 28))
+            pen = QPen(QColor(0, 120, 60), 2)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(pr)
+
         word = self._hover_word
-        if word is not None and word.page == page and self._text_editor is None:
+        if (word is not None and word.page == page
+                and self._text_editor is None
+                and self._paragraph_selection is None):
             x0, y0, x1, y1 = map_rect(word.rect, w0, h0, turn)
             r = QRect(int(ox + x0 * z), int(oy + y0 * z),
                       max(1, int((x1 - x0) * z)), max(1, int((y1 - y0) * z)))
@@ -3786,13 +3837,13 @@ class PDFView(QAbstractScrollArea):
                 page, x, y = hit
                 word_hit = find_text_at_point(self.doc[page], (x, y))
                 if word_hit is not None:
-                    if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-                        # Ctrl+click opens the paragraph editor directly.
-                        self._open_paragraph_editor(page, word_hit)
-                        event.accept()
-                        return
-                    # Defer opening until release so a drag can extend the
-                    # selection across several words on the same line.
+                    modifiers = event.modifiers()
+                    # Plain click selects the whole paragraph (PdfCraft-style).
+                    # Shift+click keeps the inline word editor; Ctrl+click also
+                    # forces the paragraph editor, matching the old shortcut.
+                    want_word = bool(
+                        modifiers & Qt.KeyboardModifier.ShiftModifier)
+                    self._edit_word_mode = want_word
                     self._text_select_start = word_hit
                     self._text_select_hits = [word_hit]
                     self.viewport().update()
@@ -3912,9 +3963,16 @@ class PDFView(QAbstractScrollArea):
             self._text_select_start = None
             self._text_select_hits = []
             self.viewport().update()
-            target = combine_hits(hits) if len(hits) > 1 else start
-            if target is not None:
-                self._open_text_editor(target.page, target)
+            # A drag across several words always uses the inline word editor.
+            # A plain click opens the paragraph editor; Shift+click the word
+            # editor.  (Ctrl+click was handled at press time.)
+            dragged = len(hits) > 1
+            if self._edit_word_mode or dragged:
+                target = combine_hits(hits) if dragged else start
+                if target is not None:
+                    self._open_text_editor(target.page, target)
+            else:
+                self._open_paragraph_editor(start.page, start)
             event.accept()
             return
         if (event.button() == Qt.MouseButton.LeftButton
