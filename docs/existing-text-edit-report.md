@@ -672,3 +672,112 @@ refused with an explanation.
 
 **Correctness, licensing compliance and document integrity take priority over
 attempting unsupported font substitutions.**
+
+## 13. Phase 5 report (2026-11-12) — intelligent paragraph reflow
+
+### 13.1 Goal
+
+Let the user edit an existing PDF paragraph as ordinary text — adding or
+removing words and lines — while preserving the original appearance and
+integrity as closely as possible. When a paragraph cannot be safely reflowed,
+explain the limitation instead of producing a damaged document.
+
+### 13.2 Architecture
+
+Three new modules, layered so the UI never edits the document directly:
+
+- `paragraph.py` — analysis + planning only. Never mutates a PDF.
+- `paragraph_edit.py` — the `ReflowParagraph` `Edit`.
+- `paragraph_dialog.py` — the Qt dialog + faithful preview.
+
+The same `plan_reflow` is used by the preview and by `ReflowParagraph.apply`, so
+the preview is exactly what gets written.
+
+### 13.3 Paragraph model
+
+- Lines are collected **page-wide**, not block-local, because PyMuPDF splits
+  centred/right-aligned lines into one block per line. Grouping projects every
+  measurement on the writing-direction `u` and normal `v`, so rotated/vertical
+  text is grouped correctly.
+- A real paragraph boundary is distinguished from a visual line break by shared
+  body edges, leading, and consistent font/size/colour; mixed styles raise a
+  `problems` entry and the paragraph is refused rather than mis-edited.
+- Each paragraph exposes font, size, colour, flags, leading, alignment, first/
+  last line index, bounding box and transform, plus a confidence score.
+
+### 13.4 Line breaking and layout
+
+- Greedy wrapping using **actual glyph advances** (PDF width tables before the
+  font program), so line widths are accurate for subsetted fonts that lack a
+  Unicode cmap.
+- Left / center / right / justified alignment; first-line indent preserved;
+  typed newlines are hard breaks; spaces are written as `TJ` gaps (not space
+  glyphs), which also makes justification exact.
+- Overflow / collision detection against neighbouring text, images, drawings
+  and the page boundary. Width reduction and widening into free horizontal space
+  are offered **only with explicit user approval**.
+
+### 13.5 Content-stream reconstruction
+
+- The paragraph's `BT … ET` block is replaced as a unit; every other operator is
+  preserved byte-for-byte. Balanced `q`/`Q` wrappers and an identical `cm`
+  inside a saved state are allowed (the wrapper is re-emitted verbatim); anything
+  else is refused. Form XObjects use copy-on-write so a shared object is never
+  modified in place.
+
+### 13.6 Preview and collision detection
+
+- `ParagraphPreview` paints the original outline, each planned line at its real
+  baseline, the new bounding box, and any collision/overflow in red/orange.
+  Because it uses the same plan, the committed result matches.
+
+### 13.7 Undo/redo and integrity
+
+- One paragraph edit = one `Scope.CONTENT` transaction; undo/redo, save/revert,
+  dirty-state and rendering invalidation work unchanged. Cancel leaves the
+  document exactly as it was.
+
+### 13.8 Tests
+
+`tests/test_paragraph.py` (model, layout, collision, overflow, rotated,
+substitution planning), `tests/test_paragraph_edit.py` (apply, undo/redo,
+save/reopen, substitution embedding, overflow refusal, changed-page refusal),
+`tests/test_paragraph_ui.py` (dialog seeding, replanning, feasibility, range
+adjustment, substitution button, preview paint). All existing tests remain green
+(3065 passed in the full suite).
+
+### 13.9 Supported and refused
+
+Supported: adding/removing words and lines inside a paragraph; left/center/
+right/justified text; first-line indent; font-size reduction and widening with
+approval; font substitution; rotated (single-line) paragraphs; undo/redo and
+save/reopen.
+
+Refused (with an explanation): multi-stream paragraphs; shared or nested Form
+XObjects; lines under different transforms; mixed fonts/sizes/colours;
+non-fill render modes; unrecoverable text matrix; overflow without approval;
+collisions with neighbours; whole-page / multi-paragraph / multi-column / table
+reflow; new-page placement; OCR.
+
+### 13.10 Files changed in Phase 5
+
+- `src/pdfar/paragraph.py` — new.
+- `src/pdfar/paragraph_edit.py` — new.
+- `src/pdfar/paragraph_dialog.py` — new.
+- `src/pdfar/text_edit_existing.py` — font-width lookup (`_font_widths`,
+  `_advance_fn`, `_validate_replacement`) and the public facade used by the
+  paragraph layer.
+- `src/pdfar/font_discovery.py` — space-insensitive family matching
+  (`_compact`) so subset names like `DejaVuSans` rank against `DejaVu Sans`.
+- `src/pdfar/viewer.py` — paragraph editor entry points.
+- `tests/test_paragraph.py`, `tests/test_paragraph_edit.py`,
+  `tests/test_paragraph_ui.py` — new.
+- `docs/existing-text-edit-audit.md`, `docs/existing-text-edit-report.md`,
+  `ROADMAP.md` — this report.
+
+### 13.11 Conclusion
+
+Phase 5 gives PDFAR a natural, layout-aware way to edit existing paragraphs,
+reusing the fail-closed word-edit engine underneath. Reflow stays inside the
+paragraph's region, refuses anything it cannot do safely, and shows the user an
+accurate preview before committing.

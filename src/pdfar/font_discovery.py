@@ -500,6 +500,16 @@ _STYLE_WORDS = re.compile(
     re.I)
 
 
+def _compact(name: str) -> str:
+    """Strip separators so ``DejaVuSans`` and ``DejaVu Sans`` compare equal.
+
+    PDF ``/BaseFont`` names routinely omit the spaces a family name has in the
+    font file (``DejaVuSans``), so the *comparison* has to ignore spacing even
+    though :func:`normalize_family` keeps its documented output.
+    """
+    return re.sub(r"[^0-9a-z]+", "", name or "")
+
+
 def normalize_family(name: str, style: str = "") -> str:
     """Lower-case a family name and drop style/weight suffixes.
 
@@ -507,7 +517,7 @@ def normalize_family(name: str, style: str = "") -> str:
     string agrees, so "Arial Black" (style "Regular") keeps its name while
     "Helvetica-Bold" (style "Bold") becomes "helvetica".
     """
-    words = re.split(r"[\s\-]+", (name or "").strip())
+    words = re.split(r"[\s\-]+", name or "")
     style_words = set(w.lower() for w in re.split(r"[\s\-]+", style or "") if w)
     while len(words) > 1:
         last = words[-1].lower()
@@ -522,9 +532,11 @@ def normalize_family(name: str, style: str = "") -> str:
 
 
 def _family_group(name: str) -> Optional[int]:
-    n = normalize_family(name)
+    n = _compact(normalize_family(name))
+    if not n:
+        return None
     for i, group in enumerate(_FAMILY_GROUPS):
-        if n in group:
+        if any(_compact(item) == n for item in group):
             return i
     return None
 
@@ -536,7 +548,11 @@ def _family_score(query: FontQuery, face: FontFace) -> float:
         return 0.0
     if original == candidate:
         return 100.0
-    if original and (original in candidate or candidate in original):
+    flat_original, flat_candidate = _compact(original), _compact(candidate)
+    if flat_original and flat_original == flat_candidate:
+        return 100.0
+    if flat_original and (flat_original in flat_candidate
+                          or flat_candidate in flat_original):
         return 70.0
     g1, g2 = _family_group(query.basefont), _family_group(face.family)
     if g1 is not None and g1 == g2:

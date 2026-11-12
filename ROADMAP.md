@@ -8527,3 +8527,41 @@ suite 3,032 passing.  `fonttools>=4.40` is now declared in `pyproject.toml`.
 
 Still open: CFF/OpenType embedding, variable-font instances, Windows/macOS
 discovery backends, paragraph reflow, OCR editing, and nested Form XObjects.
+
+### F10-7 Phase 5 — intelligent paragraph reflow (2026-11-12)
+
+Building on the surgical word-edit engine, PDFAR can now edit an existing
+paragraph as ordinary text and re-lay it out, while preserving appearance and
+document integrity.
+
+- **Paragraph model** (`paragraph.py`).  Page-wide line grouping (PyMuPDF splits
+  centred/right-aligned lines into one block each), real-boundary detection via
+  shared body edges / leading / consistent style, writing-direction projection
+  for rotated/vertical text, and a confidence + problems list.
+- **Layout engine** (`plan_reflow`).  Greedy wrapping from **actual glyph
+  advances** (PDF `/Widths`/`/W` before the font program); left/center/right/
+  justified; first-line indent; typed newlines as hard breaks; spaces written as
+  `TJ` gaps; optional font-size reduction or widening into free space — both
+  only with explicit user approval.
+- **Collision / overflow.**  Scans neighbouring text, images, drawings and the
+  page boundary; refuses to overwrite a neighbour or run off the page unless the
+  user explicitly approves shrinking.
+- **The edit** (`paragraph_edit.ReflowParagraph`).  One `Scope.CONTENT`
+  transaction; re-extracts, re-runs the same planner the preview used, and
+  rewrites the paragraph's `BT … ET` block.  Form XObjects use copy-on-write;
+  balanced `q`/`Q` wrappers and an identical `cm` inside a saved state are
+  re-emitted verbatim; everything else is refused.
+- **Editor + preview** (`paragraph_dialog.py`).  Edits as plain text, adjusts the
+  line range, chooses alignment, approves shrink/widen, picks a substitute font,
+  and paints an accurate preview (original outline, planned lines at their real
+  baselines, new bbox, collisions/overflow) so preview == commit.
+- **Viewer wiring** (`viewer.py`).  Ctrl+click or the right-click "Edit
+  paragraph…" menu in the Edit-Text tool; refusal falls back to the word editor.
+
+Tests: 33 new (`test_paragraph.py`, `test_paragraph_edit.py`,
+`test_paragraph_ui.py`); full suite 3,065 passing.
+
+Still open: whole-page / multi-paragraph / multi-column / table reflow, new-page
+placement, OCR, CFF/OpenType embedding, variable-font instances, Windows/macOS
+discovery backends, and multi-line paragraphs rotated via an enclosing `cm` (the
+writer reproduces the rotation, but fit-checking is approximate for that case).

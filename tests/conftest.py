@@ -87,3 +87,67 @@ def big_session(big_pdf):
 @pytest.fixture
 def big_pdf(tmp_path):
     return build_sample_pdf(tmp_path / "big.pdf", pages=40)
+
+
+def build_paragraph_pdf(path, width=600, height=800, lines=3,
+                        region=(100, 100, 500, 760), fontsize=12,
+                        align="left"):
+    """A PDF with one paragraph of wrapped lines.
+
+    Uses :meth:`fitz.Page.insert_textbox` so the lines form a single text block
+    (one ``BT … ET``), which is what the paragraph reflow machinery expects.
+    ``align`` is one of ``left``, ``center``, ``right``, ``justify``.  ``height``
+    lets a test create a short page so overflow is easy to trigger.
+    """
+    """A PDF with one paragraph of wrapped lines.
+
+    Uses :meth:`fitz.Page.insert_textbox` so the lines form a single text block
+    (one ``BT … ET``), which is what the paragraph reflow machinery expects.
+    ``align`` is one of ``left``, ``center``, ``right``, ``justify``.
+    """
+    aligns = {"left": fitz.TEXT_ALIGN_LEFT, "center": fitz.TEXT_ALIGN_CENTER,
+              "right": fitz.TEXT_ALIGN_RIGHT, "justify": fitz.TEXT_ALIGN_JUSTIFY}
+    sentence = ("The quick brown fox jumps over the lazy dog near the river "
+                "and the meadow while the sun sets slowly behind the distant "
+                "hills. ")
+    body = sentence * lines
+    doc = fitz.open()
+    page = doc.new_page(width=width, height=height)
+    page.insert_textbox(fitz.Rect(*region), body, fontsize=fontsize,
+                        fontname="helv", align=aligns[align])
+    doc.save(path)
+    doc.close()
+    return str(path)
+
+
+@pytest.fixture
+def paragraph_session(tmp_path):
+    path = build_paragraph_pdf(tmp_path / "paragraph.pdf")
+    handle = make_session(path)
+    try:
+        yield handle
+    finally:
+        handle.close()
+
+
+def build_rotated_paragraph_pdf(path, width=600, height=800, fontsize=12):
+    """A PDF with one rotated (90°) paragraph."""
+    doc = fitz.open()
+    page = doc.new_page(width=width, height=height)
+    body = ("Rotated sample text line here flows down the page slowly while "
+            "the reader follows each word in turn across the narrow column. ") * 2
+    page.insert_text((width / 2, height - 120), body, fontsize=fontsize,
+                     fontname="helv", rotate=90)
+    doc.save(path)
+    doc.close()
+    return str(path)
+
+
+@pytest.fixture
+def rotated_session(tmp_path):
+    path = build_rotated_paragraph_pdf(tmp_path / "rotated.pdf")
+    handle = make_session(path)
+    try:
+        yield handle
+    finally:
+        handle.close()

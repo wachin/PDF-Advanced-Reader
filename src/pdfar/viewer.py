@@ -65,6 +65,8 @@ from .text_edit_existing import (
 )
 from .text_edit_inline import ExistingTextEditor
 from .font_picker import FontSubstitutionDialog
+from .paragraph import ParagraphError, paragraph_for_word
+from .paragraph_dialog import ParagraphEditorDialog
 from .tiles import Tile, TileGrid, TILE_SIZE
 from .annotations import (
     CUSTOM_STAMP_NAME, INK_COLOR, INK_WIDTH, MEASURE_DEFAULT_SCALE,
@@ -789,13 +791,27 @@ class PDFView(QAbstractScrollArea):
         return ann
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
-        """Right-click a page: place a note, or open the one under the cursor."""
+        """Right-click a page: text actions in edit mode, else notes."""
         if self.reflow_mode:
             return          # reflow is its own document, with no page geometry
         hit = self._pdf_point_at(event.pos())
         if hit is None:
             return
         page, x, y = hit
+        if self.tool_mode == "edit_text":
+            word_hit = find_text_at_point(self.doc[page], (x, y))
+            if word_hit is not None:
+                menu = QMenu(self)
+                edit_word = menu.addAction(self.tr("Edit word…"))
+                edit_para = menu.addAction(self.tr("Edit paragraph…"))
+                action = menu.exec(event.globalPos())
+                if action is None:
+                    return
+                if action is edit_word:
+                    self._open_text_editor(page, word_hit)
+                elif action is edit_para:
+                    self._open_paragraph_editor(page, word_hit)
+                return
         self._note_menu(hit, self._note_at(page, x, y)).exec(event.globalPos())
 
     # ------------------------------------------------- annotation navigation
@@ -1133,6 +1149,49 @@ class PDFView(QAbstractScrollArea):
         self._edit_hit = None
         self._edit_preview = None
         self.viewport().update()
+
+    def _open_paragraph_editor(self, page: int, word_hit: WordHit) -> None:
+        """Open the dedicated paragraph editor for the paragraph at *word_hit*.
+
+        The dialog plans the reflow with the same code the edit uses, so what
+        the user approves is exactly what gets written.  The document is only
+        touched when the dialog is accepted and the edit applies cleanly.
+        """
+        pdf_page = self.doc[page]
+        try:
+            para = paragraph_for_word(pdf_page, word_hit)
+        except ParagraphError as exc:
+            self.transient_message.emit(str(exc))
+            return
+        except Exception as exc:  # pragma: no cover - defensive
+            self.transient_message.emit(str(exc))
+            return
+        if para is None or para.problems:
+            reason = " ".join(para.problems) if para else ""
+            self.transient_message.emit(
+                self.tr("This text cannot be edited as one paragraph. ")
+                + (reason and (reason + " ") or "")
+                + self.tr("Use the word editor instead."))
+            # Fall back to the inline word editor for a single-word change.
+            self._open_text_editor(page, word_hit)
+            return
+        dialog = ParagraphEditorDialog(self, pdf_page, para, page_num=page)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        if not accepted:
+            dialog.deleteLater()
+            return
+        edit = dialog.build()
+        dialog.deleteLater()
+        try:
+            version, scope = self.session.apply(edit)
+        except FontSubstitutionRequired as exc:
+            self._offer_font_substitution(edit, exc)
+            return
+        except EditError as exc:
+            self.transient_message.emit(f"{edit.label}: {exc}")
+            self.viewport().update()
+            return
+        self.invalidate(scope)
 
     def _paint_text_edit_overlay(self, painter: QPainter, page: int,
                                 ox: float, oy: float) -> None:
@@ -3727,6 +3786,11 @@ class PDFView(QAbstractScrollArea):
                 page, x, y = hit
                 word_hit = find_text_at_point(self.doc[page], (x, y))
                 if word_hit is not None:
+                    if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                        # Ctrl+click opens the paragraph editor directly.
+                        self._open_paragraph_editor(page, word_hit)
+                        event.accept()
+                        return
                     # Defer opening until release so a drag can extend the
                     # selection across several words on the same line.
                     self._text_select_start = word_hit

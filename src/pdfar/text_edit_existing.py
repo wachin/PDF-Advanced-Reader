@@ -590,6 +590,83 @@ def _build_font_codec(doc: fitz.Document,
     return _FontCodec(1, code_to_unicode, unicode_to_code, "simple")
 
 
+def _font_widths(doc: fitz.Document, info: _FontInfo):
+    """Return ``(widths, default)`` in em units, or ``None``.
+
+    ``/Widths`` (simple fonts) and ``/W`` (Type0) are the PDF's own statement
+    of how wide each character is.  They stay reliable when a subsetted font
+    program has lost its Unicode cmap — common in real documents, and the
+    reason ``Font.has_glyph`` alone is not enough to measure or validate text.
+    """
+    try:
+        if info.type == "Type0":
+            kind, value = doc.xref_get_key(info.xref, "DescendantFonts")
+            match = re.search(r"(\d+)\s+0\s+R", value or "")
+            if not match:
+                return None
+            cid_xref = int(match.group(1))
+            dk, dv = doc.xref_get_key(cid_xref, "DW")
+            try:
+                default = float(dv) / 1000.0 if dk in ("int", "float") else 1.0
+            except (TypeError, ValueError):
+                default = 1.0
+            wk, wv = doc.xref_get_key(cid_xref, "W")
+            if wk != "array":
+                return ({}, default)
+            tokens = re.findall(r"\[|\]|-?\d+(?:\.\d+)?", wv or "")
+            widths: Dict[int, float] = {}
+            index = 0
+            while index < len(tokens):
+                token = tokens[index]
+                if token in ("[", "]"):
+                    index += 1
+                    continue
+                try:
+                    first = int(float(token))
+                except ValueError:
+                    index += 1
+                    continue
+                index += 1
+                if index < len(tokens) and tokens[index] == "[":
+                    index += 1
+                    code = first
+                    while index < len(tokens) and tokens[index] != "]":
+                        try:
+                            widths[code] = float(tokens[index]) / 1000.0
+                        except ValueError:
+                            pass
+                        code += 1
+                        index += 1
+                    index += 1
+                else:
+                    if index + 1 >= len(tokens):
+                        break
+                    try:
+                        last = int(float(tokens[index]))
+                        width = float(tokens[index + 1])
+                    except ValueError:
+                        break
+                    index += 2
+                    for code in range(first, last + 1):
+                        widths[code] = width / 1000.0
+            return (widths, default)
+
+        fk, fv = doc.xref_get_key(info.xref, "FirstChar")
+        wk, wv = doc.xref_get_key(info.xref, "Widths")
+        if wk != "array":
+            return None
+        try:
+            first = int(float(fv)) if fk in ("int", "float") else 0
+        except (TypeError, ValueError):
+            first = 0
+        numbers = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", wv or "")]
+        if not numbers:
+            return None
+        return ({first + i: n / 1000.0 for i, n in enumerate(numbers)}, 0.0)
+    except Exception:
+        return None
+
+
 def _load_font_program(doc: fitz.Document, info: _FontInfo) -> Optional[fitz.Font]:
     """Load the font program so glyph presence can be verified."""
     try:
@@ -634,33 +711,36 @@ def _validate_replacement(
                 f"'{info.basefont}'. Editing text in this font is not "
                 f"supported because the replacement could be written "
                 f"incorrectly.", None)
+    widths = _font_widths(doc, info)
     font = _load_font_program(doc, info)
-    if font is None:
+    if font is None and widths is None:
         return (False,
                 f"Could not load the font program for '{info.basefont}' to "
                 f"verify glyphs, so the replacement cannot be verified "
                 f"safely.", codec)
-    # 1) Glyph presence in the font program.
+    # 1) Glyph presence: the PDF width table is authoritative when the font
+    #    program has lost its cmap (common for subsetted TrueType fonts).
     for ch in text:
+        code = codec.unicode_to_code.get(ch)
+        if widths is not None and code is not None and code in widths[0]:
+            continue
+        if font is not None and font.has_glyph(ord(ch)):
+            continue
+        if (info.type == "Type0" and font is not None and code is not None
+                and code < font.glyph_count):
+            # Identity-H subsets may have no Unicode cmap at all.
+            continue
         if info.type == "Type0":
-            # The embedded program may have no Unicode cmap at all (Identity-H
-            # subsets often do not); fall back to the CID range check then.
-            if font.has_glyph(ord(ch)):
-                continue
-            cid = codec.unicode_to_code.get(ch)
-            if cid is not None and cid < font.glyph_count:
-                continue
             return (False,
                     f"Character {ch!r} (U+{ord(ch):04X}) has no glyph in "
                     f"the embedded font '{info.basefont}'. The replacement "
                     f"cannot be drawn without embedding a different "
                     f"font.", codec)
-        elif not font.has_glyph(ord(ch)):
-            return (False,
-                    f"Character {ch!r} (U+{ord(ch):04X}) is not available in "
-                    f"the original font '{info.basefont}'. The replacement "
-                    f"cannot be drawn without substituting or embedding a "
-                    f"different font.", codec)
+        return (False,
+                f"Character {ch!r} (U+{ord(ch):04X}) is not available in "
+                f"the original font '{info.basefont}'. The replacement "
+                f"cannot be drawn without substituting or embedding a "
+                f"different font.", codec)
     # 2) Encodability through the font's actual PDF encoding.
     bad = codec.first_unencodable(text)
     if bad is not None:
@@ -789,6 +869,13 @@ class _TextRun:
     font_size: float
     #: Text state in force for this operator (spacing, scaling, rise).
     text_state: "_TextState"
+    #: Text matrix in force for this operator, in the stream's own user space
+    #: (before the CTM).  Paragraph reflow writes new ``Tm`` values in the same
+    #: space, so it needs the matrix that was in force here, not the page-space
+    #: one.  ``None`` only for runs built by older callers/tests.
+    tm: Optional[Tuple[float, ...]] = None
+    #: CTM in force for this operator (stream user space -> page space).
+    ctm: Optional[Tuple[float, ...]] = None
 
     def point_at(self, char_index: int) -> Tuple[float, float]:
         """Page-space ``(x, y)`` of the character at *char_index*."""
@@ -799,22 +886,36 @@ class _TextRun:
                 self.trm[1] * d + self.trm[5])
 
 
-def _advance_fn(font, info, codec):
+def _advance_fn(font, info, codec, doc=None):
     """Return a ``char -> advance (em fraction)`` function, or ``None``.
 
-    PyMuPDF's ``glyph_advance`` is addressed by *Unicode*, not by glyph id
-    (passing a glyph id silently returns the advance of that code point).  For
-    Type0 fonts the embedded program's own cmap is therefore the only reliable
-    source; when it has none the advances are unknown and the caller must fall
-    back to text-only matching.
+    The PDF's own ``/Widths`` / ``/W`` table is preferred: subsetted fonts
+    often have no Unicode cmap, so ``has_glyph`` fails for characters the
+    document can still draw, and ``glyph_advance`` then returns the width of
+    an unrelated code point.  The font program is only a fallback.
     """
-    if font is None or info is None:
-        return lambda _ch: None
+    widths = None
+    if doc is not None and info is not None:
+        widths = _font_widths(doc, info)
 
     def adv(ch):
-        if not font.has_glyph(ord(ch)):
+        if codec is not None and widths is not None:
+            code = codec.unicode_to_code.get(ch)
+            if code is not None:
+                value = widths[0].get(code)
+                if value is not None and (value > 0.0 or ch == " "):
+                    return value
+        if ch == " ":
+            if widths is not None:
+                return widths[1] or 0.25
+            if font is not None and font.has_glyph(32):
+                return font.glyph_advance(32)
+            return 0.25
+        if font is None:
             return None
-        return font.glyph_advance(ord(ch))
+        if font.has_glyph(ord(ch)):
+            return font.glyph_advance(ord(ch))
+        return None
     return adv
 
 
@@ -1021,7 +1122,7 @@ def _iter_stream_runs(page: fitz.Page, data: bytes, ref: _StreamRef,
             codec = resolve_codec(ts.font_resource)
             info, font = resolve_font(ts.font_resource)
             text, offsets = _operator_char_offsets(
-                op, codec, _advance_fn(font, info, codec), ts)
+                op, codec, _advance_fn(font, info, codec, doc), ts)
             # Ts offsets the text rendering matrix vertically (in text space,
             # before Tm), so include it between the glyph origin and Tm.
             rise = (1.0, 0.0, 0.0, 1.0, 0.0, ts.rise)
@@ -1029,7 +1130,8 @@ def _iter_stream_runs(page: fitz.Page, data: bytes, ref: _StreamRef,
             yield _TextRun(
                 source=ref, op_index=op_index, operator=o, text=text,
                 offsets=offsets, trm=trm, font_resource=ts.font_resource,
-                font_size=ts.font_size, text_state=ts.copy())
+                font_size=ts.font_size, text_state=ts.copy(),
+                tm=tuple(tm), ctm=ctm)
 
 
 def _iter_xobject_runs(page: fitz.Page, name: str, res_kind, res_value,
@@ -1981,3 +2083,65 @@ class ReplaceExistingText(Edit):
         new_stream = (data[:op.start_pos] + b"\n".join(parts)
                       + data[op.end_pos:])
         doc.update_stream(target_xref, new_stream)
+
+
+# --------------------------------------------------------------------------- #
+# Public facade for the paragraph layer (Phase 5)
+# --------------------------------------------------------------------------- #
+#: The paragraph reflow engine needs the same graphics-state replay, font
+#: decoding and object plumbing as the word editor.  Rather than re-implement
+#: them (which would drift), it imports these wrappers.  They are deliberately
+#: thin: the private functions stay the single source of truth.
+TextRun = _TextRun
+StreamRef = _StreamRef
+TextState = _TextState
+OperatorLoc = _OperatorLoc
+
+
+def iter_page_runs(page: fitz.Page,
+                   counts: Optional[Dict[int, int]] = None) -> List[_TextRun]:
+    """Every text-showing operator on *page*, in painting order.
+
+    *counts* is filled with how often each Form XObject is invoked, which the
+    caller uses to refuse editing a shared object.
+    """
+    return list(_iter_page_runs(page, counts))
+
+
+def page_font_codecs(page: fitz.Page, res_owner: Optional[int] = None):
+    """Return the ``resource -> _FontCodec`` resolver for *page*'s resources."""
+    return _page_font_codecs(page, res_owner)
+
+
+def page_font_programs(page: fitz.Page, res_owner: Optional[int] = None):
+    """Return the ``resource -> (info, font)`` resolver for *page*."""
+    return _page_font_programs(page, res_owner)
+
+
+def clone_object(doc: fitz.Document, xref: int) -> int:
+    """Create an independent indirect copy of *xref* (copy-on-write helper)."""
+    return _clone_object(doc, xref)
+
+
+def copy_on_write_xobject(page: fitz.Page, loc: "_OperatorLoc") -> int:
+    """Give this page a private clone of the Form XObject behind *loc*."""
+    return _copy_on_write_xobject(page, loc)
+
+
+def format_number(value: float) -> bytes:
+    """Format a number the way the content-stream writer does (``%g``)."""
+    return _fmt_num(value)
+
+
+def font_info_for(page: fitz.Page, res_owner: Optional[int],
+                  resource: str):
+    """Return the ``_FontInfo`` for one resource, or ``None``."""
+    try:
+        return _font_infos_for(page, res_owner).get(resource)
+    except Exception:
+        return None
+
+
+def font_widths(doc: fitz.Document, info):
+    """Public wrapper: ``(widths, default)`` in em units, or ``None``."""
+    return _font_widths(doc, info)

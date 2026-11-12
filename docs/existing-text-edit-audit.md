@@ -301,3 +301,65 @@ leak the font into unrelated content or fail.  `font_embed._font_dict_target`
 now clones an indirect `/Resources` and an indirect `/Font` first, parses
 inline dictionaries with a depth-aware scanner, and falls back to copying
 inherited resources into a private object.
+
+## 12. Phase 5 addendum — Intelligent paragraph reflow (2026-11-12)
+
+### 12.1 What was added
+
+A separate, layout-aware paragraph editing feature on top of the surgical
+word-edit engine:
+
+- **Paragraph model** (`src/pdfar/paragraph.py`): extracts page-wide text lines
+  (grouping across the blocks PyMuPDF splits for centred/right-aligned text),
+  distinguishes real paragraph boundaries from visual line groupings using
+  geometric + typographic evidence (shared body edges, leading, consistent
+  font/size/colour), exposes the writing direction so rotated/vertical text is
+  handled, and reports a confidence + problems list.
+- **Line-breaking / layout engine** (`plan_reflow`): a greedy, metric-accurate
+  wrapper that uses the *actual font advances* (PDF `/Widths`/`/W` tables first,
+  font program second) rather than character counts; supports left/center/right/
+  justified alignment, first-line indent, explicit newlines as hard breaks, and
+  optional font-size reduction or widening into free space — both only with
+  explicit user approval.
+- **Collision / overflow detection**: scans the page for neighbouring text,
+  images, drawings and the page boundary; refuses (does not silently overwrite)
+  when the reflowed text would overlap a neighbour or run off the page, unless
+  the user explicitly approves shrinking.
+- **The edit** (`src/pdfar/paragraph_edit.py::ReflowParagraph`): one transaction;
+  re-extracts the paragraph on the session clone, re-runs the *same* planner the
+  preview used, and rewrites the paragraph's `BT … ET` block as a unit. Colours,
+  clipping, transforms, Form XObjects (copy-on-write) and every other operator
+  are untouched.
+- **Editor + preview** (`src/pdfar/paragraph_dialog.py`): a dialog that edits the
+  paragraph as ordinary text, lets the user adjust the line range, choose
+  alignment, approve shrink/widen, and pick a substitute font; a live preview
+  paints the original outline, the new lines at their real baselines, the new
+  bounding box, and any collisions/overflow, so preview == commit.
+- **Viewer wiring** (`src/pdfar/viewer.py`): Ctrl+click or the right-click
+  "Edit paragraph…" menu in the Edit-Text tool opens the dialog; rejection
+  falls back to the word editor.
+
+### 12.2 Safety properties preserved
+
+- Undo/redo, save/revert, dirty-state and rendering invalidation all work
+  unchanged because `ReflowParagraph` is a normal `Scope.CONTENT` `Edit`.
+- A paragraph edit refuses (with an explanation) when: the page content changed
+  since selection (anchor mismatch), the paragraph spans streams, it is drawn by
+  a shared/nested Form XObject, its lines use different transforms, or it has
+  mixed fonts/sizes/colours / non-fill render mode / unrecoverable text matrix.
+- Preview and commit cannot disagree: both call `plan_reflow` with the same
+  options, font and region.
+
+### 12.3 Known limitations (Phase 5)
+
+- A paragraph reflow stays inside the paragraph's original region by default; it
+  does **not** re-flow the whole page, move other paragraphs, handle multi-column
+  or table text, or place text on a new page. OCR is a separate pipeline.
+- Multi-line paragraphs rotated via an enclosing `cm` (graphics-state rotation)
+  are recognised as rotated only when the text matrix itself carries the
+  rotation; a `cm`-only rotated multi-line block is currently detected as
+  horizontal for collision/overflow purposes (the writer still reproduces the
+  rotation via the preserved `cm`, so the output is correct, but fit checking is
+  approximate). Single-line rotated paragraphs are handled fully.
+- Real-world refusals (genuine mixed styles, math spans, unmapped glyphs) are
+  expected and explained, not silently "fixed".
