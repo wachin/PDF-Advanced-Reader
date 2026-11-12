@@ -218,3 +218,86 @@ characters before the first unknown glyph ("the quick brown fox" became "t"),
 so the word was never found and the *font-inspection* refusal messages were
 never reached. The fix records the failure but keeps every character, so
 location still works and validation reports the real reason.
+
+## 11. Phase 4 audit addendum (2026-11-12)
+
+A fourth review asked a different question: *where exactly does the engine give
+up when the original font cannot draw the replacement?* The audit traced every
+`return` in `_validate_replacement`, the advance machinery used for geometry,
+and the font-discovery/embedding primitives that did not yet exist.
+
+### 11.1 The refusal points were identified precisely
+
+`_validate_replacement` (`text_edit_existing.py`) refuses in four places:
+
+| # | Condition | Message / effect |
+|---|---|---|
+| a | `_build_font_codec` returns `None` | "Cannot verify how characters are encoded…" |
+| b | `_load_font_program` returns `None` | "Could not load the font program…" |
+| c | the glyph is absent from the program | "Character … has no glyph…" / "…is not available…" |
+| d | `codec.first_unencodable(text)` finds a character | "…cannot be encoded through the existing encoding…" |
+
+Cases (c) and (d) are the ones that a substitute font can solve.  Before this
+phase there was no continuation: the edit simply failed.  The audit also
+confirmed that `_diagnose_font_issue` could only describe the *first* problem,
+not the complete set of missing characters the UI needs.
+
+### 11.2 Type0 advances were computed with the wrong API
+
+`fitz.Font.glyph_advance()` takes a **Unicode code point**, not a glyph id.
+`_advance_fn` passed the glyph id (`glyph_advance(cid)`), so for Identity-H
+fonts it returned the advance of an unrelated code point (usually 0).  Every
+computed character position in a Type0 font was therefore wrong, which also
+made the new width-correction logic impossible to trust.  The function now
+checks `has_glyph(ord(ch))` first and only then calls
+`glyph_advance(ord(ch))`.
+
+### 11.3 `_validate_replacement` discarded the codec on failure
+
+All post-codec failure paths returned `(False, reason, None)`.  Substitution
+needs the *original* codec to re-encode the text around the replaced word
+(prefix/suffix).  With `None`, the substitution path could never run and would
+have refused with "the encoding … cannot be verified".  The codec is now
+returned on every path after it has been built.
+
+### 11.4 The width correction had the wrong sign
+
+The correction that keeps following text in place was computed as
+`(original - new)`, but a positive `TJ` number moves the pen *backwards*.  A
+wider replacement therefore pushed the suffix by the extra width *twice*
+instead of not at all.  A test with "mundo tail" on one line caught it: the
+tail moved 25.6 pt.  The correction is now `(new - original)`, and the tail
+stays within 1 pt.
+
+### 11.5 Fontconfig metadata is not authoritative
+
+`fc-list` reported "Arial Black" with weight 400, and some families expose a
+style string that does not contain the weight word.  Ranking by the fontconfig
+values alone selected thin/hairline faces as substitutes for regular text.  The
+ranker now re-reads `OS/2.usWeightClass`, `fsSelection`, `post.isFixedPitch`
+and the Panose family type from the font file and lets those override the
+fontconfig hints.
+
+### 11.6 Family normalisation dropped real name words
+
+`normalize_family("Arial Black")` produced `"arial"`, so "Arial Black" scored
+as an exact match for Arial and outranked regular Arial.  The function now
+removes a trailing word only when the face's own style string contains it:
+`"Helvetica-Bold"` + style `"Bold"` → `"helvetica"`, while
+`"Arial Black"` + style `"Regular"` keeps its name.
+
+### 11.7 Advance units were multiplied by 1000
+
+`face_advances` returned `hmtx[name][0] * 1000 / upem`, i.e. 1000-unit glyph
+space, while the query and the width-ratio maths expect em units.  Width ratios
+of 1261 % were observed.  It now returns `hmtx[name][0] / upem`.
+
+### 11.8 Resource dictionaries can be inline or shared
+
+The embedding writer must add a `/Font` entry to the object that owns the text
+(page or Form XObject).  That dictionary may be indirect, a direct
+sub-dictionary, or shared with another page.  Writing into it directly would
+leak the font into unrelated content or fail.  `font_embed._font_dict_target`
+now clones an indirect `/Resources` and an indirect `/Font` first, parses
+inline dictionaries with a depth-aware scanner, and falls back to copying
+inherited resources into a private object.

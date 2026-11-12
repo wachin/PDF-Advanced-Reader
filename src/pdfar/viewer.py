@@ -19,6 +19,7 @@ from __future__ import annotations
 import bisect
 import math
 from collections import OrderedDict
+from dataclasses import replace as dataclass_replace
 from typing import Dict, List, Optional, Tuple
 
 try:
@@ -34,7 +35,7 @@ from PyQt6.QtGui import (
     QWheelEvent, QGuiApplication, QResizeEvent,
 )
 from PyQt6.QtWidgets import (
-    QAbstractScrollArea, QFrame, QInputDialog, QMenu, QScroller,
+    QAbstractScrollArea, QDialog, QFrame, QInputDialog, QMenu, QScroller,
 )
 
 from .cache import PageCache
@@ -58,10 +59,12 @@ from .render import RenderPool, RenderResult
 from .search import SearchHit
 from .session import DocumentSession
 from .text_edit_existing import (
-    WordHit, find_text_at_point, ReplaceExistingText,
-    combine_hits, words_between, words_in_line,
+    FontSubstitution, FontSubstitutionRequired, WordHit, find_font_alternatives,
+    find_text_at_point, ReplaceExistingText, combine_hits, words_between,
+    words_in_line,
 )
 from .text_edit_inline import ExistingTextEditor
+from .font_picker import FontSubstitutionDialog
 from .tiles import Tile, TileGrid, TILE_SIZE
 from .annotations import (
     CUSTOM_STAMP_NAME, INK_COLOR, INK_WIDTH, MEASURE_DEFAULT_SCALE,
@@ -1087,9 +1090,38 @@ class PDFView(QAbstractScrollArea):
             word_rect=hit.rect, font=hit.font, font_size=hit.font_size,
             color=hit.color, flags=hit.flags,
         )
-        if not self.apply_edit(edit):
-            # apply_edit already surfaced the reason; restore the live view.
+        try:
+            _version, scope = self.session.apply(edit)
+        except FontSubstitutionRequired as exc:
+            self._offer_font_substitution(edit, exc)
+            return
+        except EditError as exc:
+            self.transient_message.emit(f"{edit.label}: {exc}")
             self.viewport().update()
+            return
+        self.invalidate(scope)
+
+    def _offer_font_substitution(self, edit: ReplaceExistingText,
+                                 exc: FontSubstitutionRequired) -> None:
+        """Explain why the edit needs another font and let the user pick one."""
+        page = self.session.doc[edit.page_num]
+        try:
+            matches = find_font_alternatives(
+                self.session.doc, page, edit.old_word, edit.new_word,
+                edit.word_rect, limit=8)
+        except Exception:
+            matches = []
+        dialog = FontSubstitutionDialog(
+            self, exc.issue, edit.new_word, matches)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        face = dialog.chosen_face()
+        dialog.deleteLater()
+        if not accepted or face is None:
+            self.viewport().update()
+            return
+        retry = dataclass_replace(
+            edit, substitute=FontSubstitution(face=face))
+        self.apply_edit(retry)
 
     def _cancel_text_edit(self) -> None:
         self._close_text_editor()

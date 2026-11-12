@@ -8490,3 +8490,40 @@ real-world, 16 graphics/state, 12 XObject); full suite 2,937 passing.
 
 Still open: font substitution/embedding for missing glyphs, paragraph reflow,
 OCR-based editing, and editing text nested more than one Form XObject deep.
+
+### F10-7 Phase 4 — intelligent font substitution and embedding (2026-11-12)
+
+Same engine, same `Edit`/`DocumentSession` architecture; no parallel editing
+system and no paragraph reflow.  When the document's own font cannot draw or
+encode the replacement, the edit now offers a verified substitute instead of
+failing outright.
+
+- **Diagnosis.** `FontSubstitutionRequired` carries a `FontIssue` with the
+  original font name, type, embedded/subsetted state and the exact missing
+  characters.  Nothing is modified before the user approves.
+- **Discovery** (`font_discovery.py`).  Faces come from `fc-list`, with a
+  standard-directory scan as fallback; metadata (`fsType`, weight, slant,
+  coverage, metrics) is read with fontTools and cached.  Platform-specific
+  enumeration is isolated, so Windows/macOS backends can be added later.
+- **Ranking.** Coverage and embedding permission are hard gates; survivors are
+  scored by family group, style, weight proximity, width class and measured
+  text width — never by family name alone.
+- **Embedding** (`font_embed.py`).  TrueType outlines are subset (when the
+  licence allows), written as Type0/Identity-H + CIDFontType2 + FontFile2 with
+  a real `/W` array and `/ToUnicode`, and attached to a private `/Font`
+  dictionary (shared resources are cloned).
+- **Layout.** The replacement's advance is measured from the embedded subset;
+  a `TJ` correction keeps the following text at its original x position.
+  Font size, scale, rise and colour are untouched.
+- **UI** (`font_picker.py`).  The dialog explains the problem, lists ranked
+  fonts with width deltas, previews the text, warns when it is wider/narrower,
+  and validates a browsed file.  It never installs fonts.
+- **Refusals.** Unknown original encoding, `'`/`"` operators, CFF fonts,
+  restricted `fsType`, bitmap-only permissions and missing glyphs are refused
+  with a reason.
+
+Tests: 95 new (27 discovery, 28 embedding, 27 substitution, 13 dialog); full
+suite 3,032 passing.  `fonttools>=4.40` is now declared in `pyproject.toml`.
+
+Still open: CFF/OpenType embedding, variable-font instances, Windows/macOS
+discovery backends, paragraph reflow, OCR editing, and nested Form XObjects.

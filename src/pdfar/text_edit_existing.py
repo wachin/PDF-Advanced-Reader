@@ -86,6 +86,10 @@ class _OperatorLoc:
     occurrence: int = 0
     #: How many times the containing Form XObject is invoked on this page.
     invocations: int = 1
+    #: Text state in force at the operator (needed to match advances).
+    text_state: Optional["_TextState"] = None
+    #: Per-character text-space offsets, including the final pen position.
+    offsets: Optional[List[float]] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -635,32 +639,35 @@ def _validate_replacement(
         return (False,
                 f"Could not load the font program for '{info.basefont}' to "
                 f"verify glyphs, so the replacement cannot be verified "
-                f"safely.", None)
+                f"safely.", codec)
     # 1) Glyph presence in the font program.
     for ch in text:
         if info.type == "Type0":
+            # The embedded program may have no Unicode cmap at all (Identity-H
+            # subsets often do not); fall back to the CID range check then.
+            if font.has_glyph(ord(ch)):
+                continue
             cid = codec.unicode_to_code.get(ch)
-            if cid is None:
-                continue  # encoding check below reports it
-            if cid >= font.glyph_count:
-                return (False,
-                        f"Character {ch!r} (U+{ord(ch):04X}) has no glyph in "
-                        f"the embedded font '{info.basefont}'. The replacement "
-                        f"cannot be drawn without embedding a different "
-                        f"font.", None)
+            if cid is not None and cid < font.glyph_count:
+                continue
+            return (False,
+                    f"Character {ch!r} (U+{ord(ch):04X}) has no glyph in "
+                    f"the embedded font '{info.basefont}'. The replacement "
+                    f"cannot be drawn without embedding a different "
+                    f"font.", codec)
         elif not font.has_glyph(ord(ch)):
             return (False,
                     f"Character {ch!r} (U+{ord(ch):04X}) is not available in "
                     f"the original font '{info.basefont}'. The replacement "
                     f"cannot be drawn without substituting or embedding a "
-                    f"different font.", None)
+                    f"different font.", codec)
     # 2) Encodability through the font's actual PDF encoding.
     bad = codec.first_unencodable(text)
     if bad is not None:
         return (False,
                 f"Character {bad!r} (U+{ord(bad):04X}) cannot be encoded "
                 f"through the existing encoding of font '{info.basefont}'. "
-                f"The replacement would not display correctly.", None)
+                f"The replacement would not display correctly.", codec)
     return True, None, codec
 
 
@@ -780,6 +787,8 @@ class _TextRun:
     trm: Tuple[float, ...]
     font_resource: str
     font_size: float
+    #: Text state in force for this operator (spacing, scaling, rise).
+    text_state: "_TextState"
 
     def point_at(self, char_index: int) -> Tuple[float, float]:
         """Page-space ``(x, y)`` of the character at *char_index*."""
@@ -791,22 +800,21 @@ class _TextRun:
 
 
 def _advance_fn(font, info, codec):
-    """Return a ``char -> advance (em fraction)`` function, or ``None``."""
+    """Return a ``char -> advance (em fraction)`` function, or ``None``.
+
+    PyMuPDF's ``glyph_advance`` is addressed by *Unicode*, not by glyph id
+    (passing a glyph id silently returns the advance of that code point).  For
+    Type0 fonts the embedded program's own cmap is therefore the only reliable
+    source; when it has none the advances are unknown and the caller must fall
+    back to text-only matching.
+    """
     if font is None or info is None:
         return lambda _ch: None
-    if info.type == "Type0":
-        def adv(ch):
-            cid = codec.unicode_to_code.get(ch) if codec is not None else None
-            if cid is None or cid >= font.glyph_count:
-                return None
-            return font.glyph_advance(cid)
-        return adv
 
     def adv(ch):
-        gid = font.has_glyph(ord(ch))
-        if not gid:
+        if not font.has_glyph(ord(ch)):
             return None
-        return font.glyph_advance(gid)
+        return font.glyph_advance(ord(ch))
     return adv
 
 
@@ -867,7 +875,12 @@ def _operator_char_offsets(op: PDFOperator, codec: Optional[_FontCodec],
     else:
         ok = False
     text = "".join(chars)
-    return text, (offsets if ok else None)
+    if not ok:
+        return text, None
+    # One extra entry: offsets[len(text)] is the pen position after the last
+    # glyph, which is what a width correction needs.
+    offsets.append(x)
+    return text, offsets
 
 
 def _page_font_programs(page: fitz.Page, res_owner: Optional[int] = None):
@@ -1016,7 +1029,7 @@ def _iter_stream_runs(page: fitz.Page, data: bytes, ref: _StreamRef,
             yield _TextRun(
                 source=ref, op_index=op_index, operator=o, text=text,
                 offsets=offsets, trm=trm, font_resource=ts.font_resource,
-                font_size=ts.font_size)
+                font_size=ts.font_size, text_state=ts.copy())
 
 
 def _iter_xobject_runs(page: fitz.Page, name: str, res_kind, res_value,
@@ -1158,6 +1171,8 @@ def locate_operator_for_word(
                     font_size=run.font_size,
                     occurrence=occurrence,
                     invocations=1,
+                    text_state=run.text_state,
+                    offsets=run.offsets,
                 )
     if best is not None and best.source.in_xobject:
         # The generator has now seen every invocation, so the final count is
@@ -1454,6 +1469,293 @@ def _copy_on_write_xobject(page: fitz.Page, loc: "_OperatorLoc") -> int:
 
 
 # --------------------------------------------------------------------------- #
+# Font substitution (Phase 4)
+# --------------------------------------------------------------------------- #
+_SUBSET_TAG_RE = re.compile(r"^[A-Z]{6}\+")
+
+
+@dataclass
+class FontIssue:
+    """Why the original font cannot draw the replacement, for the UI."""
+
+    reason: str = ""
+    text: str = ""
+    font_name: str = ""
+    font_type: str = ""
+    embedded: bool = False
+    subsetted: bool = False
+    missing: Tuple[str, ...] = ()
+
+
+class FontSubstitutionRequired(EditError):
+    """The original font cannot draw the text; a substitute must be chosen.
+
+    Carries a :class:`FontIssue` describing the original font so the UI can
+    explain the problem and offer alternatives.  Nothing has been modified.
+    """
+
+    def __init__(self, message: str, issue: FontIssue):
+        super().__init__(message)
+        self.issue = issue
+
+
+@dataclass
+class FontSubstitution:
+    """A user-approved replacement font (a ``font_discovery.FontFace``)."""
+
+    face: Any
+    note: str = ""
+
+
+def _diagnose_font_issue(doc: fitz.Document, page: fitz.Page,
+                         loc: _OperatorLoc, text: str) -> FontIssue:
+    """Describe why the operator's font cannot render *text*."""
+    info = None
+    try:
+        info = _font_infos_for(page, loc.source.res_owner).get(loc.font_resource)
+    except Exception:
+        info = None
+    if info is None:
+        return FontIssue(reason="The font resource could not be inspected.",
+                         text=text)
+    missing: Tuple[str, ...] = ()
+    try:
+        codec = _build_font_codec(doc, info)
+        font = _load_font_program(doc, info)
+        if codec is not None and font is not None:
+            bad: List[str] = []
+            for ch in text:
+                if info.type == "Type0":
+                    if font.has_glyph(ord(ch)):
+                        continue
+                    cid = codec.unicode_to_code.get(ch)
+                    if cid is None or cid >= font.glyph_count:
+                        bad.append(ch)
+                elif not font.has_glyph(ord(ch)):
+                    bad.append(ch)
+            if not bad:
+                enc = codec.first_unencodable(text)
+                if enc is not None:
+                    bad.append(enc)
+            missing = tuple(dict.fromkeys(bad))
+    except Exception:
+        pass
+    return FontIssue(
+        reason="",
+        text=text,
+        font_name=info.basefont,
+        font_type=info.type,
+        embedded=info.embedded,
+        subsetted=bool(_SUBSET_TAG_RE.match(info.basefont or "")),
+        missing=missing,
+    )
+
+
+def _word_advances(loc: _OperatorLoc, start: int, end: int) -> Tuple[float, ...]:
+    """Per-character advances of the located word, in em units."""
+    ts = loc.text_state
+    fs = loc.font_size or (ts.font_size if ts is not None else 0.0)
+    th = ts.h_scale if ts is not None and ts.h_scale else 1.0
+    if not loc.offsets or fs <= 0 or th <= 0:
+        return ()
+    scale = fs * th
+    if len(loc.offsets) <= end:
+        return ()
+    return tuple((loc.offsets[i + 1] - loc.offsets[i]) / scale
+                 for i in range(start, end))
+
+
+def _font_query(doc: fitz.Document, loc: _OperatorLoc, info: _FontInfo,
+                word: str, advances: Tuple[float, ...]):
+    """Build the ranking query describing the original font."""
+    from .font_discovery import FontQuery
+
+    basefont = _SUBSET_TAG_RE.sub("", info.basefont or "")
+    bold = italic = serif = mono = None
+    font = None
+    try:
+        font = _load_font_program(doc, info)
+    except Exception:
+        font = None
+    if font is not None:
+        bold = bool(font.is_bold)
+        italic = bool(font.is_italic)
+        serif = bool(font.is_serif)
+        mono = bool(font.is_monospaced)
+    else:
+        name = basefont.lower()
+        bold = any(w in name for w in ("bold", "black", "semibold", "heavy"))
+        italic = any(w in name for w in ("italic", "oblique"))
+    return FontQuery(
+        basefont=basefont, bold=bool(bold), italic=bool(italic),
+        serif=serif, monospaced=mono, text=word, advances=advances)
+
+
+def _resolve_operator(doc: fitz.Document, page: fitz.Page,
+                      loc: _OperatorLoc):
+    """Return ``(target_xref, data, operator)`` for *loc*."""
+    if loc.source.in_xobject:
+        data = doc.xref_stream(loc.source.xref)
+        target_xref = loc.source.xref
+    else:
+        streams = _page_content_streams(page)
+        if loc.source.page_index >= len(streams):
+            raise EditError("Content stream index out of range.")
+        target_xref, data = streams[loc.source.page_index]
+    if not data:
+        raise EditError("The content stream holding the text is empty.")
+    ops = ContentStreamParser.parse(data)
+    if loc.op_index >= len(ops):
+        raise EditError("Text operator index out of range.")
+    return target_xref, data, ops[loc.op_index]
+
+
+def _encode_tj_string(text: str, codec: _FontCodec) -> bytes:
+    if not text:
+        return b""
+    return codec.encode(text)
+
+
+def _tj_string_op(text: str, codec: _FontCodec) -> bytes:
+    """Serialize *text* as a hex ``Tj`` operator (b"" when empty)."""
+    if not text:
+        return b""
+    raw = _encode_tj_string(text, codec)
+    return b"<" + raw.hex().encode("ascii") + b"> Tj"
+
+
+def _split_tj_array(arr: List[Any], codec: _FontCodec,
+                    start: int, end: int) -> Tuple[List[Any], List[Any]]:
+    """Split a ``TJ`` array into the parts before and after ``[start, end)``.
+
+    Kerning numbers outside the replaced range are kept: a number just before
+    the word stays at the end of the prefix (it positioned the word), and one
+    just after stays at the start of the suffix.  Numbers inside the replaced
+    range are dropped, exactly as for the in-place replacement.
+    """
+    prefix: List[Any] = []
+    suffix: List[Any] = []
+    pos = 0
+    for item in arr:
+        if isinstance(item, (bytes, str)):
+            text = _operand_text(item, codec) or ""
+            n = len(text)
+            if pos + n <= start:
+                if text:
+                    prefix.append(_encode_tj_string(text, codec))
+            elif pos >= end:
+                if text:
+                    suffix.append(_encode_tj_string(text, codec))
+            else:
+                a = max(0, start - pos)
+                b = min(n, end - pos)
+                if a > 0:
+                    prefix.append(_encode_tj_string(text[:a], codec))
+                if b < n:
+                    suffix.append(_encode_tj_string(text[b:], codec))
+            pos += n
+        elif isinstance(item, (int, float)) and not isinstance(item, bool):
+            if pos <= start:
+                prefix.append(float(item))
+            elif pos >= end:
+                suffix.append(float(item))
+            # else: kerning inside the replaced word — dropped with it.
+    return prefix, suffix
+
+
+def _tj_array_op(ops: List[Any]) -> bytes:
+    if not ops:
+        return b""
+    body = b" ".join(
+        ContentStreamSerializer.serialize_operand(op, "TJ") for op in ops)
+    return b"[" + body + b"] TJ"
+
+
+def _split_operator(op: PDFOperator, codec: _FontCodec,
+                    start: int, end: int) -> Tuple[bytes, bytes]:
+    """Split a text-showing operator around ``[start, end)``.
+
+    Returns the serialized prefix and suffix operators (either may be empty).
+    Only ``Tj`` and ``TJ`` are supported: ``'`` and ``"`` also move the text
+    line, which cannot be split without duplicating that movement.
+    """
+    if op.operator == "Tj":
+        value = op.operands[0] if op.operands else b""
+        text = _operand_text(value, codec) or ""
+        try:
+            return (_tj_string_op(text[:start], codec),
+                    _tj_string_op(text[end:], codec))
+        except ValueError as exc:
+            raise EditError(
+                f"The untouched text cannot be re-encoded with font "
+                f"'{codec.source}': {exc}.") from exc
+    if op.operator == "TJ":
+        arr = op.operands[0] if op.operands else []
+        if not isinstance(arr, list):
+            raise EditError("The text operator is malformed.")
+        try:
+            prefix, suffix = _split_tj_array(arr, codec, start, end)
+        except ValueError as exc:
+            raise EditError(
+                f"The untouched text cannot be re-encoded with font "
+                f"'{codec.source}': {exc}.") from exc
+        return _tj_array_op(prefix), _tj_array_op(suffix)
+    raise EditError(
+        f"Text drawn with the '{op.operator}' operator cannot be split to "
+        f"insert a substitute font. Edit a word drawn with Tj or TJ instead.")
+
+
+def _fmt_num(value: float) -> bytes:
+    return ("%g" % value).encode("ascii")
+
+
+def diagnose_replacement(doc: fitz.Document, page: fitz.Page, old_word: str,
+                         new_word: str,
+                         word_rect: Tuple[float, float, float, float]
+                         ) -> Optional[FontIssue]:
+    """Return the font problem that blocks editing, or ``None`` when it works."""
+    loc = locate_operator_for_word(page, old_word, word_rect)
+    if loc is None:
+        return None
+    ok, reason, _codec = _validate_replacement(
+        doc, page, loc.font_resource, new_word, loc.source.res_owner)
+    if ok:
+        return None
+    issue = _diagnose_font_issue(doc, page, loc, new_word)
+    if reason:
+        issue.reason = reason
+    return issue
+
+
+def find_font_alternatives(doc: fitz.Document, page: fitz.Page, old_word: str,
+                           new_word: str,
+                           word_rect: Tuple[float, float, float, float],
+                           limit: int = 8) -> List[Any]:
+    """Rank installed fonts as substitutes for the blocked replacement."""
+    from .font_discovery import find_alternatives
+
+    loc = locate_operator_for_word(page, old_word, word_rect)
+    if loc is None:
+        return []
+    info = None
+    try:
+        info = _font_infos_for(page, loc.source.res_owner).get(loc.font_resource)
+    except Exception:
+        info = None
+    advances: Tuple[float, ...] = ()
+    if loc.offsets:
+        start = _nth_index(loc.text, old_word, loc.occurrence)
+        if start >= 0:
+            advances = _word_advances(loc, start, start + len(old_word))
+    if info is None:
+        from .font_discovery import FontQuery
+        query = FontQuery(text=new_word, advances=advances)
+    else:
+        query = _font_query(doc, loc, info, new_word, advances)
+    return find_alternatives(query, limit=limit)
+
+
+# --------------------------------------------------------------------------- #
 # The Edit
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
@@ -1474,6 +1776,8 @@ class ReplaceExistingText(Edit):
     font_size: float = 0.0
     color: int = 0
     flags: int = 0
+    #: Optional user-approved substitute font (a ``font_discovery.FontFace``).
+    substitute: Optional[FontSubstitution] = None
 
     scope = Scope.CONTENT
     pages = None
@@ -1519,7 +1823,14 @@ class ReplaceExistingText(Edit):
         ok, reason, codec = _validate_replacement(
             doc, page, loc.font_resource, self.new_word, loc.source.res_owner)
         if not ok:
-            raise EditError(reason or "The replacement could not be verified.")
+            if self.substitute is None:
+                issue = _diagnose_font_issue(doc, page, loc, self.new_word)
+                if reason:
+                    issue.reason = reason
+                raise FontSubstitutionRequired(
+                    reason or "The replacement could not be verified.", issue)
+            self._apply_substitution(doc, page, loc, codec)
+            return
 
         if loc.source.in_xobject:
             data = doc.xref_stream(loc.source.xref)
@@ -1558,4 +1869,115 @@ class ReplaceExistingText(Edit):
             # Never modify a shared object: this page gets its own copy.  Done
             # only now so a failed replacement leaves the document untouched.
             target_xref = _copy_on_write_xobject(page, loc)
+        doc.update_stream(target_xref, new_stream)
+
+    # ------------------------------------------------------------------ #
+    # Font substitution
+    # ------------------------------------------------------------------ #
+    def _apply_substitution(self, doc: fitz.Document, page: fitz.Page,
+                            loc: _OperatorLoc,
+                            codec: Optional[_FontCodec]) -> None:
+        """Draw the replacement with a user-chosen font, embedded in the PDF.
+
+        The rest of the operator keeps its original font and bytes: the
+        operator is split into prefix + substituted word + suffix, and a ``TJ``
+        width correction keeps the following text exactly where it was.
+        """
+        from .font_discovery import missing_characters
+        from .font_embed import (FontEmbedError, attach_font, build_font,
+                                 embedding_permission)
+
+        assert self.substitute is not None
+        face = self.substitute.face
+
+        if codec is None:
+            raise EditError(
+                f"The encoding of font '{loc.font_resource}' cannot be "
+                f"verified, so the untouched text around the word cannot be "
+                f"re-encoded safely. Substitution is not possible here.")
+
+        missing = missing_characters(face, self.new_word)
+        if missing:
+            raise EditError(
+                f"The chosen font '{face.display_name}' cannot draw "
+                + ", ".join(repr(c) for c in missing) + ".")
+
+        allowed, why = embedding_permission(face)
+        if not allowed:
+            raise EditError(
+                f"The font '{face.display_name}' cannot be embedded: {why}.")
+
+        target_xref, data, op = _resolve_operator(doc, page, loc)
+        if op.operator not in ("Tj", "TJ"):
+            raise EditError(
+                f"Text drawn with the '{op.operator}' operator cannot be split "
+                f"to insert a substitute font. Use a word drawn with Tj or TJ.")
+
+        start = _nth_index(loc.text, self.old_word, loc.occurrence)
+        if start < 0:
+            raise EditError(
+                f"The text '{self.old_word}' could not be found inside the "
+                f"located text operator.")
+        end = start + len(self.old_word)
+
+        ts = loc.text_state or _TextState()
+        fs = loc.font_size or ts.font_size
+        if fs <= 0:
+            raise EditError(
+                "The font size of the original text is unknown, so the "
+                "replacement cannot be positioned.")
+        th = ts.h_scale if ts.h_scale else 1.0
+
+        prefix, suffix = _split_operator(op, codec, start, end)
+        if not loc.offsets or len(loc.offsets) <= end:
+            raise EditError(
+                "The original word's width could not be measured, so the "
+                "following text could not be kept in place.")
+        original_advance = loc.offsets[end] - loc.offsets[start]
+
+        try:
+            embedded = build_font(doc, face, self.new_word)
+        except FontEmbedError as exc:
+            raise EditError(str(exc)) from exc
+
+        new_advance = 0.0
+        for ch in self.new_word:
+            gid = embedded.gid_for[ch]
+            new_advance += (embedded.advances.get(gid, 1.0) * fs
+                            + ts.char_spacing
+                            + (ts.word_spacing if ch == " " else 0.0)) * th
+        # A positive TJ number moves the pen *back*, so to cancel a wider
+        # replacement the number must be positive: (new - original).
+        correction = int(round(
+            (new_advance - original_advance) / (fs * th) * 1000.0))
+
+        # A shared Form XObject must be cloned before its resources grow.
+        if loc.source.in_xobject:
+            clone = _copy_on_write_xobject(page, loc)
+            data = doc.xref_stream(clone)
+            ops = ContentStreamParser.parse(data)
+            op = ops[loc.op_index]
+            target_xref = clone
+            owner = clone if loc.source.res_owner == loc.source.xref else page.xref
+        else:
+            owner = page.xref
+
+        attach_font(doc, owner, embedded)
+
+        parts: List[bytes] = []
+        if prefix:
+            parts.append(prefix)
+        parts.append(b"/" + embedded.resource_name.encode("ascii")
+                     + b" " + _fmt_num(fs) + b" Tf")
+        parts.append(b"<" + embedded.encode(self.new_word).hex().encode("ascii")
+                     + b"> Tj")
+        if correction:
+            parts.append(b"[" + str(correction).encode("ascii") + b"] TJ")
+        parts.append(b"/" + loc.font_resource.encode("latin-1")
+                     + b" " + _fmt_num(fs) + b" Tf")
+        if suffix:
+            parts.append(suffix)
+
+        new_stream = (data[:op.start_pos] + b"\n".join(parts)
+                      + data[op.end_pos:])
         doc.update_stream(target_xref, new_stream)

@@ -22,6 +22,10 @@ classifiers = [
 dependencies = [
     "PyQt6>=6.4",
     "PyMuPDF>=1.22",
+    # Font substitution/embedding: authoritative fsType/coverage/metadata and
+    # the subset writer.  The viewer still runs without it, but embedding a
+    # replacement font requires it.
+    "fonttools>=4.40",
 ]
 
 [project.scripts]

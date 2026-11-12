@@ -439,3 +439,236 @@ that can be edited.** Every new capability either proves it can map a word to
 exactly one operator occurrence, or refuses with a message the user can act on.
 A safe refusal is preferable to a corrupted document or an incorrect text
 replacement.
+
+---
+
+## 12. Phase 4 report (2026-11-12) — font substitution and embedding
+
+Phase 4 makes the existing-text editor usable on documents whose font cannot
+draw the replacement.  It does **not** replace the editing engine: the same
+`ReplaceExistingText` `Edit`, the same surgical operator splice, the same
+`DocumentSession` clone-and-adopt cycle.  A new module pair discovers and ranks
+system fonts, another embeds the chosen one, and the dialog only appears when
+the original font provably cannot encode the text.
+
+### 12.1 Architecture
+
+```
+ReplaceExistingText.apply()
+        │
+        ├─ _validate_replacement() ── ok ──────────────► in-place splice (Phases 1–3)
+        │
+        └─ not ok, no substitute
+                └─ FontSubstitutionRequired(issue) ────► UI
+                                                          │
+                          find_font_alternatives() ───────┤ font_discovery
+                          FontSubstitutionDialog ─────────┤ font_picker
+                                                          │
+                          user approves FontSubstitution ─┘
+        │
+        └─ not ok, substitute present
+                └─ _apply_substitution()
+                        ├─ missing_characters() / embedding_permission()
+                        ├─ _split_operator()  (prefix, suffix in the original font)
+                        ├─ font_embed.build_font()  (Type0/CIDFontType2/FontFile2/ToUnicode)
+                        ├─ attach_font()  (copy-on-write /Font dictionary)
+                        └─ prefix + /Fsub Tf + <gids> Tj + [correction] TJ + /Forig Tf + suffix
+```
+
+Three new modules:
+
+| Module | Responsibility |
+|---|---|
+| `font_discovery.py` | enumerate faces (fontconfig, directory-scan fallback), read/caches `fsType`, coverage, weight, slant, family; rank candidates |
+| `font_embed.py` | licence gate, TrueType subsetting, Type0/Identity-H writer, ToUnicode CMap, private resource attachment |
+| `font_picker.py` | `FontSubstitutionDialog`: explanation, ranked table, preview, width warning, browse |
+
+`text_edit_existing.py` gained only the substitution path
+(`FontIssue`, `FontSubstitutionRequired`, `FontSubstitution`,
+`_diagnose_font_issue`, `_word_advances`, `_font_query`, `_resolve_operator`,
+`_split_operator`, `diagnose_replacement`, `find_font_alternatives`) and the
+`substitute` field on the existing `Edit`.  The viewer gained one handler.
+
+### 12.2 Font discovery
+
+- `fc-list --format …` is the primary source (file, index, family, style,
+  weight, slant, spacing, format).  When fontconfig is absent or fails, the
+  standard font directories are scanned (`/usr/share/fonts`,
+  `/usr/local/share/fonts`, `~/.local/share/fonts`, `~/.fonts`).
+- Platform-specific enumeration is isolated in `system_faces()`.  A Windows or
+  macOS backend only has to yield `FontFace` objects; ranking and embedding are
+  platform neutral.
+- Per-face metadata is read with **fontTools** when installed (authoritative
+  `fsType`, `OS/2`, `post`, cmap, upem) and with PyMuPDF otherwise.  It is
+  cached per `(path, index)`; `clear_cache()` exists for tests and font
+  installs.
+- `FontFace` carries `path`, `index`, `family`, `style`, `weight`, `italic`,
+  `monospaced`, `serif`, `outline` (`truetype`/`cff`/`unknown`), `fs_type`,
+  `embeddable`, `subset_allowed`, `source`.
+
+### 12.3 Ranking — never family name alone
+
+Hard requirements first: the face must be embeddable, have TrueType outlines,
+and contain **every character** of the replacement.  Only survivors are
+scored:
+
+| Signal | Effect |
+|---|---|
+| Same normalised family | +100 |
+| Family name contains the original (or vice versa) | +70 |
+| Same family group (Helvetica/Arial/DejaVu Sans…, Times/…, Courier/…) | +55 |
+| Same serif classification | +20 |
+| Italic matches | +25 / −40 |
+| Bold matches | +25 / −40 |
+| Weight proximity to 400/700 | up to +15 |
+| Monospace matches | +10 |
+| Width class mismatch (condensed/expanded) | −25 |
+| Text width close to the original | up to +30 |
+
+The `OS/2` values override the fontconfig hints, and duplicate installations
+(same family/style/weight/italic) are collapsed.  Each `FontMatch` reports its
+`score`, `missing` characters, `width_ratio` and licence notes, so the UI can
+explain the choice.
+
+### 12.4 Embedding
+
+The writer only handles TrueType outlines (`glyf`), which map cleanly to
+`CIDFontType2` + `FontFile2`.  CFF/OpenType is refused with an explanation
+rather than written incorrectly.
+
+1. Check `fsType` **before** touching the document:
+   `0`/`4`/`8` allow embedding, `2` forbids it, `0x0100` forbids subsetting,
+   `0x0200` allows only bitmaps (refused for text).
+2. Subset with `fontTools.subset` when permitted; otherwise embed the whole
+   program.
+3. Re-read the bytes that will actually be embedded: subsetting renumbers glyph
+   ids, so the Unicode→GID map and advances come from the final program.
+4. Write `/FontFile2` (+`/Length1`), `/FontDescriptor` (flags, bbox, ascent,
+   descent, cap height), `/CIDFontType2` with `/CIDToGIDMap /Identity`, `/DW`
+   and a real `/W` array, `/ToUnicode`, and a `/Type0` parent with
+   `/Encoding /Identity-H`.
+5. Attach the resource to a **private** `/Font` dictionary: shared `/Resources`
+   and `/Font` objects are cloned first, so the font never appears on another
+   page or XObject.
+
+Text is written as two-byte glyph ids; `/ToUnicode` preserves copying and
+extraction.
+
+### 12.5 Metrics and layout
+
+- `_word_advances` measures the original word from the per-character pen
+  offsets computed during location, in em units.
+- The replacement's advance is recomputed from the embedded subset's `hmtx`
+  (plus `Tc`, `Tw`, `Tz`).
+- A `TJ` correction `(new − original) × 1000 / (size × h_scale)` is inserted
+  after the substituted word, so the following text keeps its original x
+  position.  A positive TJ number moves the pen back, which is why the sign is
+  `new − original`.
+- The font size, horizontal scale, rise, colour and render mode are untouched.
+  The replacement is **not** squeezed or scaled: if it is wider, the dialog
+  says so and the text after it is displaced by the correction, not reflowed.
+- No paragraph reflow is attempted.
+
+### 12.6 User interface
+
+`FontSubstitutionDialog` shows:
+
+- the original font name, and whether it is embedded and/or subsetted;
+- the exact reason the replacement is blocked, and every missing character
+  with its code point;
+- a ranked table of fonts (family, style, width delta);
+- a live preview rendered with the candidate face, plus a width warning;
+- a **Browse…** button that validates coverage, embedding permission and
+  TrueType outlines before accepting a file.
+
+Nothing is installed and nothing is written until the user presses **Use this
+font**.  Cancelling leaves the document byte-identical.
+
+### 12.7 Supported and refused
+
+| Case | Result |
+|---|---|
+| Original font covers the replacement | **In-place edit** (no substitution) |
+| Original font missing glyphs / encoding | **Substitution offered** |
+| Embedded, subsetted Type0/CID font | **Substitution supported** |
+| Non-embedded base-14 font | **Substitution supported** (original codec re-encodes the rest) |
+| Bold / italic original | **Style-matched substitute** preferred |
+| Spanish accents, Latin extended | **Supported** (DejaVu, Liberation, Noto, …) |
+| `Tj` and `TJ` operators | **Supported** |
+| Text inside a Form XObject | **Supported**; font added to the XObject |
+| `'` / `"` show operators | **Refused** (cannot be split without duplicating line movement) |
+| Original codec unknown | **Refused** (surrounding text cannot be re-encoded) |
+| Chosen font lacks a glyph | **Refused** |
+| `fsType` forbids embedding | **Refused** |
+| CFF/PostScript outlines | **Refused** (no safe writer in this phase) |
+| Bitmap-only embedding permission | **Refused** |
+| Paragraph reflow / OCR / scanned pages | **Out of scope** |
+
+### 12.8 Tests
+
+95 new tests, all passing:
+
+| File | Tests | Covers |
+|---|---|---|
+| `tests/test_font_discovery.py` | 27 | fontconfig parsing and fallback, caching, `fsType` matrix, metadata, coverage, advances, ranking, real-system search |
+| `tests/test_font_embedding.py` | 28 | licence gate, Type0 structure, subsetting, ToUnicode, extraction, save/reopen, copy-on-write, CFF/missing-glyph/fontTools refusals |
+| `tests/test_existing_text_substitution.py` | 27 | diagnosis, refusal without approval, alternatives, bold/italic, Spanish and Latin-extended, TJ arrays, width correction, XObjects, restricted licence, save/reopen, portability, session undo/redo, viewer dialog |
+| `tests/test_font_picker_ui.py` | 13 | dialog contents, selection, accept/cancel, width labels, preview, browse validation |
+
+The substitution fixture is a real subsetted Type0 font: the font program is
+re-subsetted with `retain_gids=True` and its `/ToUnicode` is replaced by one
+that only maps the visible characters, so the missing glyphs are genuinely
+absent rather than simulated by a mock.
+
+**Full suite: 3,032 passing** (2,937 before Phase 4).  No existing test was
+deleted or weakened.
+
+### 12.9 Licensing compliance
+
+- `fsType` is read from the font file, not guessed from its name.
+- Restricted fonts (`fsType` 2) are never embedded.
+- Preview-and-print fonts (`fsType` 4) are embedded as subsets only, keeping
+  the document read-only with respect to the font.
+- Fonts that forbid subsetting (`0x0100`) are embedded whole.
+- The writer never modifies or redistributes the original font file; it
+  writes a subset into the user's own document, which is the normal use of an
+  embeddable font.
+- No font is installed, downloaded or copied to a system directory.
+
+### 12.10 Limitations and deferred work
+
+| Deferred | Why | Recommended approach |
+|---|---|---|
+| CFF/OpenType embedding | Needs `CIDFontType0` + `FontFile3` and CFF charset handling | Add a CFF writer behind the same `EmbeddedFont` interface; keep refusing until it is verified |
+| Variable fonts | Named instances need `fvar`/`gvar` handling | Instantiate a static instance with `fontTools.varLib.instancer`, then embed normally |
+| Windows/macOS discovery | Only fontconfig and directory scanning are implemented | Add `DirectWrite`/`CoreText` enumerators that yield `FontFace`; ranking is already platform neutral |
+| Paragraph reflow | A visual paragraph is not one PDF object | Separate feature that re-lays-out text, never part of a surgical edit |
+| OCR editing | Scanned pages have no text operators | Separate OCR pipeline with an invisible text layer |
+| Automatic installation of missing fonts | Would change the user's system without consent | Keep the Browse… path and the explanation; never install silently |
+
+### 12.11 Files changed in Phase 4
+
+- `src/pdfar/font_discovery.py` — new.
+- `src/pdfar/font_embed.py` — new.
+- `src/pdfar/font_picker.py` — new.
+- `src/pdfar/text_edit_existing.py` — diagnosis, substitution path, operator
+  splitting, width correction; advance lookup fixed for Type0.
+- `src/pdfar/viewer.py` — `FontSubstitutionRequired` handling and the dialog.
+- `tests/test_font_discovery.py`, `tests/test_font_embedding.py`,
+  `tests/test_existing_text_substitution.py`, `tests/test_font_picker_ui.py` —
+  new.
+- `docs/existing-text-edit-audit.md`, `docs/existing-text-edit-report.md`,
+  `ROADMAP.md` — this report.
+
+### 12.12 Conclusion
+
+Phase 4 closes the last common reason an existing-text edit was refused, without
+weakening any of the Phase 1–3 guarantees.  The replacement font is chosen from
+evidence (coverage, style, weight, metrics), shown to the user, embedded as a
+portable subset with a real ToUnicode map, and attached without touching shared
+resources.  Everything that cannot be done safely — unknown encodings, `'`/`"`
+operators, CFF fonts, restricted licences, unsupported glyphs — is still
+refused with an explanation.
+
+**Correctness, licensing compliance and document integrity take priority over
+attempting unsupported font substitutions.**
