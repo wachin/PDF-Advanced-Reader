@@ -8455,6 +8455,38 @@ the surgical single-operator splice, undo/redo, save and geometry are unchanged.
 Tests: 47 dedicated existing-text tests (29 engine, 5 UI, 3 visual, 10
 real-world); full suite 2,907 passing.
 
-Still open: font substitution/embedding for missing glyphs, positional
-disambiguation of repeated words inside one operator, paragraph reflow, and
-Form XObject / scanned content.
+Still open (addressed by Phase 3 below): font substitution/embedding for missing
+glyphs, positional disambiguation of repeated words inside one operator,
+paragraph reflow, and Form XObject / scanned content.
+
+### F10-7 Phase 3 — advanced compatibility (2026-11-12)
+
+Continued on the same engine; `Edit` / `DocumentSession`, the surgical
+single-operator splice, undo/redo, save and geometry are unchanged.
+
+- **Correct graphics-state replay.** `q`/`Q` now save and restore the CTM *and*
+  the text state; nested `cm` matrices compose in the right order (the previous
+  `_concat` multiplied in the opposite order); `Tm`/`Td`/`TD`/`T*`, `TL`, `Ts`
+  and `Tr` are modelled. Page coordinates are mapped through
+  `page.transformation_matrix`, so CropBox offsets and page rotation are handled
+  without manual flipping.
+- **Glyph-position matching.** Each character's advance is computed from the
+  real font program, giving a per-character page position. A clicked word is
+  matched by distance to that position (with a tolerance) instead of "nearest
+  run origin", which is what makes rotated and transformed text locatable and
+  repeated words distinguishable.
+- **Repeated-word disambiguation.** `_OperatorLoc.occurrence` records which
+  occurrence inside the operator was clicked, and replacement edits exactly
+  that one. Surrounding kerning values and other segments are preserved.
+- **Form XObjects.** `Do` is followed into Form XObjects: `/Matrix` is composed
+  with the invoking CTM, the object's own `/Resources` shadow the page's, and
+  the text becomes editable. Shared objects are handled with copy-on-write —
+  the page gets a private resource dictionary and a cloned XObject — and an
+  object invoked more than once on the same page is refused. Nested XObjects
+  (depth ≥ 2) and cycles are refused / cut with an explanation.
+
+Tests: 77 dedicated existing-text tests (29 engine, 5 UI, 4 visual, 11
+real-world, 16 graphics/state, 12 XObject); full suite 2,937 passing.
+
+Still open: font substitution/embedding for missing glyphs, paragraph reflow,
+OCR-based editing, and editing text nested more than one Form XObject deep.

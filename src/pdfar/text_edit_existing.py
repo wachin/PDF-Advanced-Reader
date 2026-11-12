@@ -8,17 +8,25 @@ Design (see ``docs/existing-text-edit-audit.md``):
 
 * Hit testing uses :meth:`fitz.Page.get_text` ``"words"``, which yields a precise
   page-space bounding box per word.
-* Mapping a word to its operator replays the graphics state of the page's content
-  stream (``cm``, ``Tm``, ``Td``, ``TD``, ``T*``, ``Tf``, ``Tc``, ``Tw``, ``Tz``)
-  to compute each text-showing operator's origin, then matches the clicked word by
-  text containment + nearest origin.
+* Mapping a word to its operator replays the graphics state of the page's
+  content streams: nested ``q``/``Q`` save/restore, composed ``cm`` matrices,
+  ``Tm``/``Td``/``TD``/``T*`` positioning and the text state (``Tf``, ``Tc``,
+  ``Tw``, ``Tz``, ``TL``, ``Ts``).  Each character's advance is computed from
+  the real font program, so the clicked word is matched by glyph position, not
+  just by text — which is what disambiguates a word drawn several times inside
+  one operator.
+* Form XObjects are followed through ``Do``: their ``/Matrix`` is composed with
+  the invoking CTM, their own ``/Resources`` replace the page's, and their text
+  becomes editable.  A shared XObject is never modified in place — the page
+  gets a copy-on-write clone — and an object invoked twice on one page is
+  refused, because editing it would change every copy.
 * Replacement is *surgical*: the matched operator is re-serialized and spliced
   back into the original stream at ``[start_pos:end_pos)``.  No whole-stream
   re-serialization, so dictionaries, inline images and other operators survive
   byte-for-byte (Strategy A from the task spec).
-* If the original font cannot represent a replacement glyph, or the word is split
-  across kerning segments, the edit refuses with a clear message (Strategy D)
-  rather than producing a corrupted file.
+* If the original font cannot represent a replacement glyph through its actual
+  encoding, the edit refuses with a clear message (Strategy D) rather than
+  producing a corrupted file.
 
 This file does **not** copy PdfCraft (which is Rust); it reuses PDFAR's own
 ``content_stream`` infrastructure and follows the same intent-based ``Edit`` model.
@@ -67,14 +75,17 @@ class WordHit:
 class _OperatorLoc:
     """A text-showing operator and where it sits in the page."""
 
-    stream_index: int
-    stream_xref: int
+    source: "_StreamRef"    # stream + resource context holding the operator
     op_index: int          # index within the parsed stream operators
     operator: str          # Tj, TJ, ', "
     text: str              # extracted visible text
     origin: Tuple[float, float]   # (x, y) in top-left page space
     font_resource: str     # resource name used by the preceding Tf
     font_size: float
+    #: Which occurrence of the word inside the operator text (0-based).
+    occurrence: int = 0
+    #: How many times the containing Form XObject is invoked on this page.
+    invocations: int = 1
 
 
 # --------------------------------------------------------------------------- #
@@ -354,6 +365,173 @@ def _font_infos(page: fitz.Page) -> Dict[str, _FontInfo]:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Resource dictionaries (page tree and Form XObjects)
+# --------------------------------------------------------------------------- #
+_PDF_NAME_ENTRY_RE = re.compile(r"/([^\s/<>\[\](){}%]+)\s+(\d+)\s+0\s+R")
+_NUMBER_RE = re.compile(r"[-+]?(?:\d+\.\d*|\.\d+|\d+)")
+
+
+def _pdf_name(name: str) -> str:
+    """Decode ``#xx`` escapes in a PDF name."""
+    return re.sub(
+        r"#([0-9A-Fa-f]{2})", lambda m: chr(int(m.group(1), 16)), name)
+
+
+def _resources_of(doc: fitz.Document, owner_xref: int):
+    """Return ``(kind, value)`` for *owner_xref*'s ``/Resources``.
+
+    Resources may be inherited from the page tree, so ``/Parent`` is followed
+    when an object does not define its own.  ``kind`` is ``"xref"`` (value is
+    ``"N 0 R"``) or ``"dict"`` (value is the dictionary source).
+    """
+    seen = set()
+    xref = owner_xref
+    while xref and xref not in seen:
+        seen.add(xref)
+        try:
+            kind, value = doc.xref_get_key(xref, "Resources")
+        except Exception:
+            return None, None
+        if kind in ("xref", "dict"):
+            return kind, value
+        try:
+            pkind, pvalue = doc.xref_get_key(xref, "Parent")
+        except Exception:
+            return None, None
+        if pkind != "xref":
+            return None, None
+        try:
+            xref = int(pvalue.split()[0])
+        except (IndexError, ValueError):
+            return None, None
+    return None, None
+
+
+def _subdict(doc: fitz.Document, kind: Optional[str], value: Optional[str],
+             key: str):
+    """Return ``(kind, value)`` of *key* inside a dictionary."""
+    if not kind or value is None:
+        return None, None
+    if kind == "xref":
+        try:
+            xref = int(value.split()[0])
+            k, v = doc.xref_get_key(xref, key)
+        except Exception:
+            return None, None
+        return (k, v) if k in ("xref", "dict", "array") else (None, None)
+    m = re.search(r"/%s\s*(<<|\d+\s+0\s+R)" % re.escape(key), value)
+    if not m:
+        return None, None
+    if m.group(1) != "<<":
+        return "xref", m.group(1)
+    start = m.end() - 2
+    depth = 0
+    i = start
+    while i < len(value):
+        if value.startswith("<<", i):
+            depth += 1
+            i += 2
+        elif value.startswith(">>", i):
+            depth -= 1
+            i += 2
+            if depth == 0:
+                return "dict", value[start:i]
+        else:
+            i += 1
+    return None, None
+
+
+def _dict_refs(doc: fitz.Document, kind: Optional[str],
+               value: Optional[str]) -> Dict[str, int]:
+    """Map name -> xref for the indirect entries of a dictionary."""
+    out: Dict[str, int] = {}
+    if not kind or value is None:
+        return out
+    if kind == "xref":
+        try:
+            xref = int(value.split()[0])
+            keys = doc.xref_get_keys(xref)
+        except Exception:
+            return out
+        for key in keys:
+            try:
+                k, v = doc.xref_get_key(xref, key)
+            except Exception:
+                continue
+            if k != "xref":
+                continue
+            try:
+                out[str(key)] = int(v.split()[0])
+            except (IndexError, ValueError):
+                continue
+        return out
+    for name, xref in _PDF_NAME_ENTRY_RE.findall(value):
+        out[_pdf_name(name)] = int(xref)
+    return out
+
+
+def _array_numbers(kind: Optional[str], value: Optional[str]) -> List[float]:
+    """Parse a PDF array of numbers (e.g. a Form XObject ``/Matrix``)."""
+    if kind != "array" or not value:
+        return []
+    try:
+        return [float(n) for n in _NUMBER_RE.findall(value)]
+    except ValueError:
+        return []
+
+
+def _font_info_by_xref(page: fitz.Page) -> Dict[int, _FontInfo]:
+    """Map font xref -> info for every font PyMuPDF reports for *page*.
+
+    ``Page.get_fonts()`` also reports fonts that are only used inside Form
+    XObjects, which is what makes this a reliable lookup for XObject text.
+    """
+    out: Dict[int, _FontInfo] = {}
+    for f in page.get_fonts():
+        if len(f) < 6:
+            continue
+        xref = int(f[0])
+        if xref in out:
+            continue
+        out[xref] = _FontInfo(
+            xref=xref, ext=str(f[1]), type=str(f[2]),
+            basefont=str(f[3]), name=str(f[4]), encoding=str(f[5]))
+    return out
+
+
+def _font_infos_for(page: fitz.Page,
+                    owner_xref: Optional[int]) -> Dict[str, _FontInfo]:
+    """Font resources in force for the content owned by *owner_xref*.
+
+    A Form XObject carries its own ``/Resources`` (which may shadow a page
+    font of the same name), so the mapping must be resolved per owner rather
+    than from the page's flattened font list.
+    """
+    if not owner_xref:
+        return _font_infos(page)
+    doc = page.parent
+    try:
+        res_kind, res_value = _resources_of(doc, owner_xref)
+        font_kind, font_value = _subdict(doc, res_kind, res_value, "Font")
+        refs = _dict_refs(doc, font_kind, font_value)
+    except Exception:
+        refs = {}
+    if not refs:
+        return _font_infos(page)
+    by_xref = _font_info_by_xref(page)
+    page_infos = _font_infos(page)
+    out: Dict[str, _FontInfo] = {}
+    for name, xref in refs.items():
+        info = by_xref.get(xref)
+        if info is None:
+            info = page_infos.get(name)
+        if info is not None:
+            out[name] = info
+    return out or _font_infos(page)
+
+
+
 def _build_font_codec(doc: fitz.Document,
                       info: _FontInfo) -> Optional[_FontCodec]:
     """Build a codec from ``/ToUnicode``, else a known simple base encoding."""
@@ -422,7 +600,8 @@ def _load_font_program(doc: fitz.Document, info: _FontInfo) -> Optional[fitz.Fon
 
 
 def _validate_replacement(
-    doc: fitz.Document, page: fitz.Page, font_resource: str, text: str
+    doc: fitz.Document, page: fitz.Page, font_resource: str, text: str,
+    res_owner: Optional[int] = None,
 ) -> Tuple[bool, Optional[str], Optional[_FontCodec]]:
     """Fail-closed check that *text* can be drawn by the operator's font.
 
@@ -430,10 +609,11 @@ def _validate_replacement(
     can be inspected, a trustworthy encoding is available, every glyph exists
     in the font program, and every character can be encoded through the font's
     actual PDF encoding.  Any inspection failure is a refusal, never an
-    implicit approval.
+    implicit approval.  *res_owner* selects the resource dictionary that
+    applies (the page, or the Form XObject containing the operator).
     """
     try:
-        infos = _font_infos(page)
+        infos = _font_infos_for(page, res_owner)
     except Exception:
         return (False,
                 "Could not inspect the page fonts, so the replacement cannot "
@@ -484,7 +664,7 @@ def _validate_replacement(
     return True, None, codec
 
 
-def _page_font_codecs(page: fitz.Page):
+def _page_font_codecs(page: fitz.Page, res_owner: Optional[int] = None):
     """Return a ``resource -> Optional[_FontCodec]`` resolver for *page*."""
     cache: Dict[str, Optional[_FontCodec]] = {}
     infos: Optional[Dict[str, _FontInfo]] = None
@@ -497,7 +677,7 @@ def _page_font_codecs(page: fitz.Page):
         if not tried:
             tried = True
             try:
-                infos = _font_infos(page)
+                infos = _font_infos_for(page, res_owner)
             except Exception:
                 infos = None
         codec: Optional[_FontCodec] = None
@@ -511,156 +691,478 @@ def _page_font_codecs(page: fitz.Page):
     return resolve
 
 
-def _decode_text_operand(op: PDFOperator, codec: Optional[_FontCodec]) -> str:
-    """Extract the visible text of a text-showing operator via *codec*."""
-
-    def dec(value) -> str:
-        if isinstance(value, bytes):
-            return codec.decode(value) if codec is not None else \
-                value.decode("latin-1", "ignore")
-        if isinstance(value, str):
-            return value
-        return ""
-
-    o = op.operator
-    if o == "Tj":
-        return dec(op.operands[0]) if op.operands else ""
-    if o == "TJ":
-        parts: List[str] = []
-        for operand in op.operands:
-            if isinstance(operand, list):
-                for item in operand:
-                    parts.append(dec(item))
-            else:
-                parts.append(dec(operand))
-        return "".join(parts)
-    if o == "'":
-        return dec(op.operands[0]) if op.operands else ""
-    if o == '"':
-        return dec(op.operands[2]) if len(op.operands) >= 3 else ""
-    return ""
-
-
 # --------------------------------------------------------------------------- #
 # Graphics-state replay + operator location
 # --------------------------------------------------------------------------- #
-def _apply_cm(ctm: Tuple[float, ...], e: float, f: float) -> Tuple[float, float]:
-    a, b, c, d = ctm[0], ctm[1], ctm[2], ctm[3]
-    return (a * e + c * f, b * e + d * f)
+_IDENTITY = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 
 
-def _concat(a, b):
-    """Multiply two 2D affine matrices (each (a,b,c,d,e,f))."""
-    a1, b1, c1, d1, e1, f1 = a
-    a2, b2, c2, d2, e2, f2 = b
+def _mat_mul(m1, m2):
+    """Return ``m1 × m2`` for ``(a,b,c,d,e,f)`` matrices.
+
+    The convention is "apply *m1*, then *m2*" (PDF row-vector form), matching
+    :meth:`fitz.Matrix.__mul__`.
+    """
+    a1, b1, c1, d1, e1, f1 = m1
+    a2, b2, c2, d2, e2, f2 = m2
     return (
-        a1 * a2 + c1 * b2,
-        b1 * a2 + d1 * b2,
-        a1 * c2 + c1 * d2,
-        b1 * c2 + d1 * d2,
-        a1 * e2 + c1 * f2 + e1,
-        b1 * e2 + d1 * f2 + f1,
+        a1 * a2 + b1 * c2,
+        a1 * b2 + b1 * d2,
+        c1 * a2 + d1 * c2,
+        c1 * b2 + d1 * d2,
+        e1 * a2 + f1 * c2 + e2,
+        e1 * b2 + f1 * d2 + f2,
     )
 
 
-def _to_topleft(y_bottom: float, page_height: float) -> float:
-    return page_height - y_bottom
+def _matrix_tuple(m) -> Tuple[float, float, float, float, float, float]:
+    """Convert a :class:`fitz.Matrix` to an ``(a,b,c,d,e,f)`` tuple."""
+    return (float(m.a), float(m.b), float(m.c),
+            float(m.d), float(m.e), float(m.f))
+
+
+def _float(operands, index: int, default: float = 0.0) -> float:
+    try:
+        return float(operands[index])
+    except (IndexError, TypeError, ValueError):
+        return default
+
+
+@dataclass
+class _TextState:
+    """The text-state parameters that affect glyph positioning."""
+
+    font_resource: str = ""
+    font_size: float = 0.0
+    char_spacing: float = 0.0      # Tc
+    word_spacing: float = 0.0      # Tw
+    h_scale: float = 1.0           # Tz / 100
+    leading: float = 0.0           # TL
+    rise: float = 0.0              # Ts
+    render_mode: int = 0           # Tr
+
+    def copy(self) -> "_TextState":
+        return _TextState(
+            self.font_resource, self.font_size, self.char_spacing,
+            self.word_spacing, self.h_scale, self.leading, self.rise,
+            self.render_mode)
+
+
+@dataclass(frozen=True)
+class _StreamRef:
+    """Where a text operator lives and which resources apply to it."""
+
+    xref: int
+    #: Index into ``page.get_contents()``; ``-1`` for a Form XObject stream.
+    page_index: int = -1
+    #: xref of the object whose ``/Resources`` are in force for the stream.
+    res_owner: int = 0
+    in_xobject: bool = False
+    #: Name under which the parent invokes this XObject (for copy-on-write).
+    resource_name: str = ""
+    #: 0 for a page content stream, 1 for a Form XObject invoked by the page,
+    #: 2+ for an XObject invoked from inside another XObject.
+    depth: int = 0
+
+
+@dataclass
+class _TextRun:
+    """A text-showing operator with its computed positioning data."""
+
+    source: _StreamRef
+    op_index: int
+    operator: str
+    text: str
+    #: Text-space x offset of each character relative to the operator origin.
+    #: ``None`` when a glyph advance could not be determined.
+    offsets: Optional[List[float]]
+    #: Combined ``Tm × CTM × page.transformation_matrix``.
+    trm: Tuple[float, ...]
+    font_resource: str
+    font_size: float
+
+    def point_at(self, char_index: int) -> Tuple[float, float]:
+        """Page-space ``(x, y)`` of the character at *char_index*."""
+        if self.offsets is None or char_index >= len(self.offsets):
+            return (self.trm[4], self.trm[5])
+        d = self.offsets[char_index]
+        return (self.trm[0] * d + self.trm[4],
+                self.trm[1] * d + self.trm[5])
+
+
+def _advance_fn(font, info, codec):
+    """Return a ``char -> advance (em fraction)`` function, or ``None``."""
+    if font is None or info is None:
+        return lambda _ch: None
+    if info.type == "Type0":
+        def adv(ch):
+            cid = codec.unicode_to_code.get(ch) if codec is not None else None
+            if cid is None or cid >= font.glyph_count:
+                return None
+            return font.glyph_advance(cid)
+        return adv
+
+    def adv(ch):
+        gid = font.has_glyph(ord(ch))
+        if not gid:
+            return None
+        return font.glyph_advance(gid)
+    return adv
+
+
+def _operator_char_offsets(op: PDFOperator, codec: Optional[_FontCodec],
+                           advance, ts: _TextState):
+    """Return ``(text, offsets)`` for a text-showing operator.
+
+    ``offsets[i]`` is the text-space x offset of character *i* relative to the
+    operator's origin.  Returns ``(text, None)`` when an advance is unknown.
+    """
+    chars: List[str] = []
+    offsets: List[float] = []
+    x = 0.0
+    th = ts.h_scale
+    fs = ts.font_size
+
+    def add_string(s: str) -> bool:
+        nonlocal x
+        ok_local = True
+        for ch in s:
+            offsets.append(x)
+            chars.append(ch)
+            w = advance(ch)
+            if w is None:
+                # Keep the character so the operator's text stays complete;
+                # the caller must not trust the offsets in this case.
+                ok_local = False
+                continue
+            x += ((w * fs) + ts.char_spacing
+                  + (ts.word_spacing if ch == " " else 0.0)) * th
+        return ok_local
+
+    def add_number(n: float) -> None:
+        nonlocal x
+        x -= (n / 1000.0) * fs * th
+
+    o = op.operator
+    if o == "Tj":
+        s = _operand_text(op.operands[0], codec) if op.operands else ""
+        ok = add_string(s)
+    elif o == "TJ":
+        arr = op.operands[0] if op.operands else []
+        ok = isinstance(arr, list)
+        if ok:
+            for item in arr:
+                if isinstance(item, (bytes, str)):
+                    if not add_string(_operand_text(item, codec) or ""):
+                        ok = False
+                elif isinstance(item, (int, float)) and not isinstance(item, bool):
+                    add_number(float(item))
+    elif o == "'":
+        s = _operand_text(op.operands[0], codec) if op.operands else ""
+        ok = add_string(s)
+    elif o == '"':
+        s = (_operand_text(op.operands[2], codec)
+             if len(op.operands) >= 3 else "")
+        ok = add_string(s)
+    else:
+        ok = False
+    text = "".join(chars)
+    return text, (offsets if ok else None)
+
+
+def _page_font_programs(page: fitz.Page, res_owner: Optional[int] = None):
+    """Return a ``resource -> (info, font)`` resolver for *page*."""
+    cache: Dict[str, Tuple[Optional[_FontInfo], Optional[fitz.Font]]] = {}
+    infos: Optional[Dict[str, _FontInfo]] = None
+    tried = False
+
+    def resolve(resource: str):
+        nonlocal infos, tried
+        if resource in cache:
+            return cache[resource]
+        if not tried:
+            tried = True
+            try:
+                infos = _font_infos_for(page, res_owner)
+            except Exception:
+                infos = None
+        info = infos.get(resource) if infos is not None else None
+        font = _load_font_program(page.parent, info) if info is not None else None
+        result = (info, font)
+        cache[resource] = result
+        return result
+
+    return resolve
+
+
+#: How deep to follow Form XObjects nested inside Form XObjects.
+_MAX_XOBJECT_DEPTH = 8
+
+
+def _iter_page_runs(page: fitz.Page,
+                    counts: Optional[Dict[int, int]] = None):
+    """Yield :class:`_TextRun` objects for all text drawn on *page*.
+
+    The graphics state is replayed faithfully: ``q``/``Q`` save and restore the
+    CTM and text state, ``cm`` concatenates (rather than replaces) the CTM,
+    state carries across content streams (they are logically concatenated), and
+    content coordinates are mapped to ``get_text`` page space through
+    ``page.transformation_matrix`` (which handles CropBox offsets and rotation).
+
+    Form XObjects are followed: their ``/Matrix`` is composed with the CTM in
+    force at the invoking ``Do``, and their own ``/Resources`` (when present)
+    replace the page's.  *counts* is filled with the number of times each
+    XObject xref is invoked on this page, which the caller uses to detect
+    shared XObjects before editing them.
+    """
+    if counts is None:
+        counts = {}
+    page_tm = _matrix_tuple(page.transformation_matrix)
+    for index, (xref, data) in enumerate(_page_content_streams(page)):
+        if not data:
+            continue
+        ref = _StreamRef(xref=xref, page_index=index, res_owner=page.xref)
+        yield from _iter_stream_runs(
+            page, data, ref, _IDENTITY, _TextState(), page_tm, 0, (), counts)
+
+
+def _iter_stream_runs(page: fitz.Page, data: bytes, ref: _StreamRef,
+                      ctm, text_state: _TextState, page_tm,
+                      depth: int, stack: Tuple[int, ...],
+                      counts: Dict[int, int]):
+    """Replay one content stream (the page's or a Form XObject's)."""
+    doc = page.parent
+    ctm = tuple(ctm)
+    ts = text_state.copy()
+    tm = _IDENTITY
+    tlm = _IDENTITY
+    gstack: List[Tuple[Tuple[float, ...], _TextState]] = []
+    resolve_codec = _page_font_codecs(page, ref.res_owner)
+    resolve_font = _page_font_programs(page, ref.res_owner)
+    try:
+        res_kind, res_value = _resources_of(doc, ref.res_owner)
+    except Exception:
+        res_kind, res_value = None, None
+
+    for op_index, op in enumerate(ContentStreamParser.parse(data)):
+        o = op.operator
+        if o == "q":
+            gstack.append((ctm, ts.copy()))
+        elif o == "Q":
+            if gstack:
+                ctm, ts = gstack.pop()
+        elif o == "cm":
+            m = tuple(_float(op.operands, i) for i in range(6))
+            ctm = _mat_mul(m, ctm)
+        elif o == "BT":
+            tm = _IDENTITY
+            tlm = _IDENTITY
+        elif o == "Tf":
+            if len(op.operands) >= 2:
+                ts.font_resource = str(op.operands[0])
+                ts.font_size = _float(op.operands, 1)
+        elif o == "Tc":
+            ts.char_spacing = _float(op.operands, 0)
+        elif o == "Tw":
+            ts.word_spacing = _float(op.operands, 0)
+        elif o == "Tz":
+            ts.h_scale = _float(op.operands, 0, 100.0) / 100.0
+        elif o == "TL":
+            ts.leading = _float(op.operands, 0)
+        elif o == "Ts":
+            ts.rise = _float(op.operands, 0)
+        elif o == "Tr":
+            ts.render_mode = int(_float(op.operands, 0))
+        elif o == "Tm":
+            try:
+                tm = tuple(float(v) for v in op.operands[:6])
+                tlm = tm
+            except (TypeError, ValueError):
+                pass
+        elif o in ("Td", "TD"):
+            tx = _float(op.operands, 0)
+            ty = _float(op.operands, 1)
+            tlm = _mat_mul((1.0, 0.0, 0.0, 1.0, tx, ty), tlm)
+            tm = tlm
+            if o == "TD":
+                ts.leading = -ty
+        elif o == "T*":
+            tlm = _mat_mul(
+                (1.0, 0.0, 0.0, 1.0, 0.0, -ts.leading), tlm)
+            tm = tlm
+        elif o == "Do" and op.operands and depth < _MAX_XOBJECT_DEPTH:
+            yield from _iter_xobject_runs(
+                page, str(op.operands[0]), res_kind, res_value,
+                ctm, ts, page_tm, ref, depth, stack, counts)
+        elif o in ContentStreamParser.TEXT_SHOW_OPS:
+            if o == "'":
+                tlm = _mat_mul(
+                    (1.0, 0.0, 0.0, 1.0, 0.0, -ts.leading), tlm)
+                tm = tlm
+            elif o == '"':
+                ts.word_spacing = _float(op.operands, 0)
+                ts.char_spacing = _float(op.operands, 1)
+                tlm = _mat_mul(
+                    (1.0, 0.0, 0.0, 1.0, 0.0, -ts.leading), tlm)
+                tm = tlm
+            codec = resolve_codec(ts.font_resource)
+            info, font = resolve_font(ts.font_resource)
+            text, offsets = _operator_char_offsets(
+                op, codec, _advance_fn(font, info, codec), ts)
+            # Ts offsets the text rendering matrix vertically (in text space,
+            # before Tm), so include it between the glyph origin and Tm.
+            rise = (1.0, 0.0, 0.0, 1.0, 0.0, ts.rise)
+            trm = _mat_mul(_mat_mul(_mat_mul(rise, tm), ctm), page_tm)
+            yield _TextRun(
+                source=ref, op_index=op_index, operator=o, text=text,
+                offsets=offsets, trm=trm, font_resource=ts.font_resource,
+                font_size=ts.font_size)
+
+
+def _iter_xobject_runs(page: fitz.Page, name: str, res_kind, res_value,
+                       ctm, ts: _TextState, page_tm, ref: _StreamRef,
+                       depth: int, stack: Tuple[int, ...],
+                       counts: Dict[int, int]):
+    """Follow a ``Do`` invocation when it names a Form XObject."""
+    doc = page.parent
+    try:
+        x_kind, x_value = _subdict(doc, res_kind, res_value, "XObject")
+        xref = _dict_refs(doc, x_kind, x_value).get(name)
+    except Exception:
+        return
+    if xref is None or xref in stack:
+        return  # missing resource, or a cycle we must not follow
+    try:
+        s_kind, s_value = doc.xref_get_key(xref, "Subtype")
+        if s_kind != "name" or s_value.strip() != "/Form":
+            return  # an image or another non-form XObject
+        data = doc.xref_stream(xref)
+    except Exception:
+        return
+    if not data:
+        return
+
+    counts[xref] = counts.get(xref, 0) + 1
+    try:
+        m_kind, m_value = doc.xref_get_key(xref, "Matrix")
+        matrix = _array_numbers(m_kind, m_value)
+    except Exception:
+        matrix = []
+    if len(matrix) != 6:
+        matrix = list(_IDENTITY)
+
+    try:
+        sub_res_kind, _ = _resources_of(doc, xref)
+    except Exception:
+        sub_res_kind = None
+    sub_ref = _StreamRef(
+        xref=xref, page_index=-1,
+        res_owner=xref if sub_res_kind else ref.res_owner,
+        in_xobject=True, resource_name=name, depth=depth + 1)
+    yield from _iter_stream_runs(
+        page, data, sub_ref, _mat_mul(tuple(matrix), ctm), ts, page_tm,
+        depth + 1, stack + (xref,), counts)
+
+
+def _occurrences(text: str, word: str) -> List[int]:
+    """Return the start index of every (non-overlapping) occurrence of *word*."""
+    out: List[int] = []
+    start = 0
+    while word:
+        i = text.find(word, start)
+        if i < 0:
+            break
+        out.append(i)
+        start = i + len(word)
+    return out
+
+
+def _nth_index(text: str, word: str, n: int) -> int:
+    """Return the start index of the *n*-th occurrence of *word*, or ``-1``."""
+    if n < 0:
+        return -1
+    start = 0
+    idx = -1
+    for _ in range(n + 1):
+        idx = text.find(word, start)
+        if idx < 0:
+            return -1
+        start = idx + len(word)
+    return idx
+
+
+def _rect_distance(point: Tuple[float, float],
+                   rect: Tuple[float, float, float, float]) -> float:
+    """Distance from *point* to *rect* (0 when the point is inside)."""
+    px, py = point
+    x0, y0, x1, y1 = rect
+    dx = max(x0 - px, 0.0, px - x1)
+    dy = max(y0 - py, 0.0, py - y1)
+    return (dx * dx + dy * dy) ** 0.5
 
 
 def locate_operator_for_word(
     page: fitz.Page,
     word: str,
     word_rect: Tuple[float, float, float, float],
+    counts: Optional[Dict[int, int]] = None,
 ) -> Optional[_OperatorLoc]:
-    """Find the content-stream operator that produced *word*.
+    """Find the content-stream operator and occurrence that produced *word*.
 
-    Returns the matching :class:`_OperatorLoc` or ``None`` when the word cannot
-    be reliably attributed to a single operator (Strategy D territory).
+    When the word occurs more than once inside one operator, the occurrence is
+    chosen by comparing the computed glyph position of each candidate against
+    the clicked word's page-space box.  If the advance widths cannot be
+    determined, repeated words are refused rather than guessed.
+
+    *counts*, when given, is filled with how often each Form XObject is
+    invoked on the page, so the caller can refuse to edit a shared object.
     """
     if not word:
         return None
-    page_height = page.rect.height
-    streams = _page_content_streams(page)
-    resolve_codec = _page_font_codecs(page)
+    if counts is None:
+        counts = {}
     best: Optional[_OperatorLoc] = None
     best_score = None
 
-    for stream_index, (xref, data) in enumerate(streams):
-        if not data:
+    for run in _iter_page_runs(page, counts):
+        if not run.text or word not in run.text:
             continue
-        ops = ContentStreamParser.parse(data)
-        ctm = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
-        tm = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
-        tlm = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
-        leading = 0.0
-        font_resource = ""
-        font_size = 0.0
-        # Tc, Tw, Tz, Tr, Ts are not needed for origin computation.
-        for op_index, op in enumerate(ops):
-            o = op.operator
-            if o == "cm":
-                ctm = tuple(op.operands[:6])
-            elif o == "Tf":
-                if len(op.operands) >= 2:
-                    font_resource = op.operands[0]
-                    try:
-                        font_size = float(op.operands[1])
-                    except (TypeError, ValueError):
-                        font_size = 0.0
-            elif o in ("Tm",):
-                try:
-                    tm = tuple(float(v) for v in op.operands[:6])
-                    tlm = tm
-                except (TypeError, ValueError):
-                    pass
-            elif o in ("Td", "TD"):
-                try:
-                    tx, ty = float(op.operands[0]), float(op.operands[1])
-                except (TypeError, ValueError, IndexError):
+        occurrences = _occurrences(run.text, word)
+        if not occurrences:
+            continue
+        if run.offsets is None:
+            if len(occurrences) > 1:
+                # Cannot disambiguate without glyph advances.
+                continue
+            candidates = [(0, 0)]
+        else:
+            candidates = list(enumerate(occurrences))
+        for occurrence, char_index in candidates:
+            point = run.point_at(char_index)
+            score = _rect_distance(point, word_rect)
+            if run.offsets is not None:
+                # Reject a run whose computed position is nowhere near the
+                # word: it is a different copy of the same text.
+                tolerance = max(6.0, 2.0 * abs(run.font_size))
+                if score > tolerance:
                     continue
-                tlm = _concat(tlm, (1.0, 0.0, 0.0, 1.0, tx, ty))
-                tm = tlm
-                if o == "TD":
-                    leading = -ty
-            elif o == "T*":
-                tlm = _concat(tlm, (1.0, 0.0, 0.0, 1.0, 0.0, -leading))
-                tm = tlm
-            elif o in ContentStreamParser.TEXT_SHOW_OPS:
-                # Compute origin in user space, then to top-left page space.
-                ex, ey = _apply_cm(ctm, tm[4], tm[5])
-                origin = (ex, _to_topleft(ey, page_height))
-                text = _decode_text_operand(
-                    op, resolve_codec(str(font_resource)))
-                if word in text:
-                    # Score: distance from the word's baseline-left point
-                    # (x0, y1) to the operator's baseline origin.  Comparing
-                    # against the baseline (y1) rather than the box top (y0)
-                    # avoids picking a neighbouring line whose baseline happens
-                    # to sit near this word's top.
-                    dx = origin[0] - word_rect[0]
-                    dy = origin[1] - word_rect[3]
-                    score = (dx * dx + dy * dy) ** 0.5
-                    if best_score is None or score < best_score:
-                        best_score = score
-                        best = _OperatorLoc(
-                            stream_index=stream_index,
-                            stream_xref=xref,
-                            op_index=op_index,
-                            operator=o,
-                            text=text,
-                            origin=origin,
-                            font_resource=str(font_resource),
-                            font_size=font_size,
-                        )
-                # Advance the line matrix for ' and " (they move to next line).
-                if o == "'":
-                    tlm = _concat(tlm, (1.0, 0.0, 0.0, 1.0, 0.0, -leading))
-                    tm = tlm
-                elif o == '"':
-                    if len(op.operands) >= 2:
-                        leading = -float(op.operands[1])
-                    tlm = _concat(tlm, (1.0, 0.0, 0.0, 1.0, 0.0, -leading))
-                    tm = tlm
+            if best_score is None or score < best_score:
+                best_score = score
+                best = _OperatorLoc(
+                    source=run.source,
+                    op_index=run.op_index,
+                    operator=run.operator,
+                    text=run.text,
+                    origin=point,
+                    font_resource=run.font_resource,
+                    font_size=run.font_size,
+                    occurrence=occurrence,
+                    invocations=1,
+                )
+    if best is not None and best.source.in_xobject:
+        # The generator has now seen every invocation, so the final count is
+        # authoritative (a run is yielded before later copies are reached).
+        best.invocations = counts.get(best.source.xref, 1)
     return best
 
 
@@ -731,11 +1233,10 @@ def _splice_segment(item, text: str, local_start: int, local_end: int,
 
 
 def _replace_in_value(value, word: str, replacement: str,
-                      codec: Optional[_FontCodec]):
-    """Replace *word* inside one string operand.
+                      codec: Optional[_FontCodec], occurrence: int = 0):
+    """Replace one occurrence of *word* inside a string operand.
 
-    Returns ``(new_value, status)`` with status ``"ok"``, ``"not_found"`` or
-    ``"ambiguous"``.
+    Returns ``(new_value, status)`` with status ``"ok"`` or ``"not_found"``.
     """
     if isinstance(value, str) and codec is not None and codec.code_width != 1:
         # A literal string in a multi-byte code space cannot be sliced safely.
@@ -743,25 +1244,21 @@ def _replace_in_value(value, word: str, replacement: str,
     text = _operand_text(value, codec)
     if text is None:
         return value, "not_found"
-    count = text.count(word)
-    if count == 0:
+    idx = _nth_index(text, word, occurrence)
+    if idx < 0:
         return value, "not_found"
-    if count > 1:
-        return value, "ambiguous"
-    idx = text.index(word)
     return (_splice_segment(value, text, idx, idx + len(word),
                             replacement, codec), "ok")
 
 
 def _replace_in_tj_array(arr: List[Any], word: str, replacement: str,
-                         codec: Optional[_FontCodec]):
-    """Replace *word* across the string segments of a ``TJ`` array.
+                         codec: Optional[_FontCodec], occurrence: int = 0):
+    """Replace one occurrence of *word* across a ``TJ`` array's segments.
 
-    The concatenated text is searched for *word*.  Only kerning numbers that
-    fall strictly inside the matched range are dropped (they positioned the old
-    glyphs); numbers before and after are preserved so the surrounding text
-    keeps its position.  The replacement is inserted exactly once.  Returns
-    ``(new_array, status)``.
+    Only kerning numbers that fall strictly inside the matched range are
+    dropped (they positioned the old glyphs); numbers before and after are
+    preserved so the surrounding text keeps its position.  The replacement is
+    inserted exactly once.  Returns ``(new_array, status)``.
     """
     if codec is not None and codec.code_width != 1:
         # Literal strings inside a multi-byte code space are not safe to slice.
@@ -775,12 +1272,9 @@ def _replace_in_tj_array(arr: List[Any], word: str, replacement: str,
             segments.append((idx, text))
             joined_parts.append(text)
     joined = "".join(joined_parts)
-    count = joined.count(word)
-    if count == 0:
+    start = _nth_index(joined, word, occurrence)
+    if start < 0:
         return list(arr), "not_found"
-    if count > 1:
-        return list(arr), "ambiguous"
-    start = joined.index(word)
     end = start + len(word)
 
     # Character offset at the start of each string segment.
@@ -829,34 +1323,38 @@ def _replace_in_tj_array(arr: List[Any], word: str, replacement: str,
 
 def _replace_in_operands(
     op: PDFOperator, word: str, replacement: str,
-    codec: Optional[_FontCodec] = None,
+    codec: Optional[_FontCodec] = None, occurrence: int = 0,
 ) -> Tuple[List[Any], str]:
-    """Replace *word* with *replacement* inside one operator's operands.
+    """Replace one occurrence of *word* inside one operator's operands.
 
-    Returns ``(new_operands, status)`` where status is ``"ok"``, ``"not_found"``
-    or ``"ambiguous"``.  When *codec* is given, strings are decoded/encoded
+    Returns ``(new_operands, status)`` where status is ``"ok"`` or
+    ``"not_found"``.  When *codec* is given, strings are decoded/encoded
     through the font's real encoding; otherwise latin-1 is used (unit tests).
     """
     o = op.operator
     if o == "Tj":
         value = op.operands[0] if op.operands else ""
-        new_value, status = _replace_in_value(value, word, replacement, codec)
+        new_value, status = _replace_in_value(
+            value, word, replacement, codec, occurrence)
         return [new_value], status
     if o == "TJ":
         operands = list(op.operands)
         arr = operands[0] if operands else []
         if not isinstance(arr, list):
             return operands, "not_found"
-        new_arr, status = _replace_in_tj_array(arr, word, replacement, codec)
+        new_arr, status = _replace_in_tj_array(
+            arr, word, replacement, codec, occurrence)
         operands[0] = new_arr
         return operands, status
     if o == "'":
         value = op.operands[0] if op.operands else ""
-        new_value, status = _replace_in_value(value, word, replacement, codec)
+        new_value, status = _replace_in_value(
+            value, word, replacement, codec, occurrence)
         return [new_value], status
     if o == '"':
         value = op.operands[2] if len(op.operands) >= 3 else ""
-        new_value, status = _replace_in_value(value, word, replacement, codec)
+        new_value, status = _replace_in_value(
+            value, word, replacement, codec, occurrence)
         return [op.operands[0], op.operands[1], new_value], status
     return list(op.operands), "not_found"
 
@@ -868,6 +1366,91 @@ def _splice_operator(
     new_op = PDFOperator(op.operator, new_operands, op.start_pos, op.end_pos)
     new_bytes = ContentStreamSerializer.serialize_ops([new_op])
     return stream_data[: op.start_pos] + new_bytes + stream_data[op.end_pos :]
+
+
+# --------------------------------------------------------------------------- #
+# Form XObject copy-on-write
+# --------------------------------------------------------------------------- #
+def _clone_object(doc: fitz.Document, xref: int) -> int:
+    """Create a new indirect object that is a copy of *xref*."""
+    new_xref = doc.get_new_xref()
+    doc.update_object(new_xref, "<<>>")
+    doc.xref_copy(xref, new_xref)
+    if doc.xref_is_stream(xref):
+        # Re-store the decoded stream so /Length is correct and a stale
+        # /Filter cannot corrupt later updates.
+        doc.update_stream(new_xref, doc.xref_stream(xref))
+    return new_xref
+
+
+def _copy_on_write_xobject(page: fitz.Page, loc: "_OperatorLoc") -> int:
+    """Clone the Form XObject behind *loc* and point this page at the clone.
+
+    The original object is never modified: any other page (or other place on
+    this page) that shares it keeps rendering exactly as before.  Returns the
+    xref of the clone, which is safe to rewrite.
+    """
+    doc = page.parent
+    name = loc.source.resource_name
+    if not name or any(ch in name for ch in "/ #()[]<>%"):
+        raise EditError(
+            f"The Form XObject resource name '{name}' cannot be rewritten "
+            f"safely.")
+
+    try:
+        res_kind, res_value = _resources_of(doc, page.xref)
+    except Exception:
+        res_kind, res_value = None, None
+    if res_kind is None:
+        raise EditError(
+            "The page has no resource dictionary, so the Form XObject cannot "
+            "be copied safely.")
+
+    # 1) Give the page a private resource dictionary.  It may be inherited
+    #    from the page tree or shared with other pages.
+    if res_kind == "xref":
+        try:
+            shared_xref = int(res_value.split()[0])
+        except (IndexError, ValueError):
+            raise EditError("The page's resource dictionary is malformed.")
+        res_xref = _clone_object(doc, shared_xref)
+        doc.xref_set_key(page.xref, "Resources", f"{res_xref} 0 R")
+        inline_res = False
+        res_owner = res_xref
+    else:
+        inline_res = True
+        res_owner = page.xref
+
+    prefix = "Resources/" if inline_res else ""
+
+    # 2) Make the /XObject sub-dictionary private too.
+    x_kind, x_value = _subdict(
+        doc, "dict" if inline_res else "xref",
+        res_value if inline_res else f"{res_owner} 0 R", "XObject")
+    if x_kind == "xref":
+        try:
+            xdict_xref = _clone_object(doc, int(x_value.split()[0]))
+        except (IndexError, ValueError):
+            raise EditError("The page's /XObject dictionary is malformed.")
+        doc.xref_set_key(res_owner, f"{prefix}XObject",
+                         f"{xdict_xref} 0 R")
+        target = xdict_xref
+    elif x_kind == "dict":
+        target = res_owner
+    else:
+        raise EditError(
+            "The page's resources have no usable /XObject dictionary, so the "
+            "Form XObject cannot be copied safely.")
+
+    # 3) Clone the XObject and point this page's private dictionary at it.
+    new_xref = _clone_object(doc, loc.source.xref)
+    if target == res_owner:
+        key = f"{prefix}XObject/{name}"
+    else:
+        # The cloned object *is* the /XObject dictionary.
+        key = name
+    doc.xref_set_key(target, key, f"{new_xref} 0 R")
+    return new_xref
 
 
 # --------------------------------------------------------------------------- #
@@ -907,23 +1490,48 @@ class ReplaceExistingText(Edit):
 
     def apply(self, doc: fitz.Document) -> None:
         page = doc[self.page_num]
-        loc = locate_operator_for_word(page, self.old_word, self.word_rect)
+        counts: Dict[int, int] = {}
+        loc = locate_operator_for_word(
+            page, self.old_word, self.word_rect, counts)
         if loc is None:
             raise EditError(
                 f"Could not locate the text '{self.old_word}' in the page "
                 f"content stream. The text may be inside an unsupported "
-                f"structure (Form XObject, scanned image, …)."
+                f"structure (nested Form XObject, scanned image, …)."
             )
 
+        if loc.source.in_xobject:
+            if loc.source.depth > 1:
+                raise EditError(
+                    f"The text '{self.old_word}' is drawn inside a Form "
+                    f"XObject that is nested in another Form XObject. Editing "
+                    f"it is not supported because the enclosing object cannot "
+                    f"be isolated safely."
+                )
+            if loc.invocations > 1:
+                raise EditError(
+                    f"The text '{self.old_word}' is drawn by a Form XObject "
+                    f"that is used {loc.invocations} times on this page. "
+                    f"Editing it would change every copy, so the edit was "
+                    f"refused."
+                )
+
         ok, reason, codec = _validate_replacement(
-            doc, page, loc.font_resource, self.new_word)
+            doc, page, loc.font_resource, self.new_word, loc.source.res_owner)
         if not ok:
             raise EditError(reason or "The replacement could not be verified.")
 
-        streams = _page_content_streams(page)
-        if loc.stream_index >= len(streams):
-            raise EditError("Content stream index out of range.")
-        xref, data = streams[loc.stream_index]
+        if loc.source.in_xobject:
+            data = doc.xref_stream(loc.source.xref)
+            if not data:
+                raise EditError("The Form XObject content stream is empty.")
+            target_xref = None  # decided only after the splice succeeds
+        else:
+            streams = _page_content_streams(page)
+            if loc.source.page_index >= len(streams):
+                raise EditError("Content stream index out of range.")
+            target_xref, data = streams[loc.source.page_index]
+
         ops = ContentStreamParser.parse(data)
         if loc.op_index >= len(ops):
             raise EditError("Text operator index out of range.")
@@ -932,7 +1540,7 @@ class ReplaceExistingText(Edit):
             raise EditError("Located operator is not a text-showing operator.")
 
         new_operands, status = _replace_in_operands(
-            op, self.old_word, self.new_word, codec)
+            op, self.old_word, self.new_word, codec, loc.occurrence)
         if status == "not_found":
             raise EditError(
                 f"The text '{self.old_word}' could not be found inside the "
@@ -946,4 +1554,8 @@ class ReplaceExistingText(Edit):
             )
 
         new_stream = _splice_operator(data, op, new_operands)
-        page.parent.update_stream(xref, new_stream)
+        if target_xref is None:
+            # Never modify a shared object: this page gets its own copy.  Done
+            # only now so a failed replacement leaves the document untouched.
+            target_xref = _copy_on_write_xobject(page, loc)
+        doc.update_stream(target_xref, new_stream)

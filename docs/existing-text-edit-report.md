@@ -229,3 +229,213 @@ real documents:
   `cm` matrices. Pages that rely on those may mislocate a word; the edit is
   still applied only to an operator whose decoded text contains the word, but
   positional disambiguation is not guaranteed in that case.
+
+---
+
+## 11. Phase 3 report (2026-11-12) — advanced compatibility
+
+### 11.1 What was implemented
+
+**Priority A — correct graphics-state replay.**
+The replay in `_iter_stream_runs()` is now a proper interpreter of the graphics
+state:
+
+| Concern | Behaviour |
+|---|---|
+| `q` / `Q` | Saves and restores the CTM **and** the text state (`Tf`, `Tc`, `Tw`, `Tz`, `TL`, `Ts`, `Tr`). Balanced across content streams and inside Form XObjects. |
+| `cm` | Concatenates in PDF row-vector order: `M_new × CTM`. Nested `cm` compose correctly. |
+| `Tm` / `Td` / `TD` / `T*` | `Tm` sets both text and line matrix; `Td`/`TD` translate the line matrix; `T*` moves by `TL`; `TD` also sets `TL`. |
+| `BT` | Resets `Tm` and `TLM` only (text state is *not* reset, per the spec). |
+| `'` / `"` | Move to the next line first, then show; `"` also sets `Tw`/`Tc`. |
+| Page mapping | `Tm × CTM × page.transformation_matrix`, which already encodes the y-flip, CropBox offset and page rotation. |
+
+Each text-showing operator gets a `_TextRun` with a per-character offset list
+built from real glyph advances (`Font.glyph_advance` / `has_glyph` for simple
+fonts, CID → glyph id for Type0), so `point_at(i)` returns the page position of
+character *i*. Unknown advances no longer truncate the extracted text; they only
+mark the offsets as untrustworthy.
+
+**Priority B — repeated-word disambiguation.**
+`_OperatorLoc` carries `occurrence`, the index of the clicked match inside the
+operator's text. Location scores every candidate occurrence by the distance from
+its computed glyph position to the clicked word's box (distance to the rect, not
+to a corner), and applies a tolerance of `max(6pt, 2 × font size)` when the
+offsets are known — a run whose text matches but whose position is nowhere near
+the click is rejected. Replacement then edits exactly that occurrence:
+`_nth_index()` walks to the *n*-th match in `Tj` strings and across `TJ`
+segments, and the surrounding kerning numbers are kept.
+
+**Priority C — Form XObjects.**
+`Do` operators are resolved against the current resource dictionary. For a Form
+XObject:
+
+- its `/Matrix` is composed with the CTM in force at the `Do`;
+- its own `/Resources` (when present) replace the page's for everything inside
+  it, so a `/F1` in an XObject cannot be confused with a page `/F1`;
+- the invocation path is tracked (`_StreamRef.depth`), cycles are cut, and the
+  number of invocations per XObject is counted.
+
+Editing an XObject never modifies a shared object in place:
+
+1. the page's `/Resources` is cloned if it is an indirect object (it may be
+   inherited from the page tree or shared with other pages);
+2. the `/XObject` sub-dictionary is cloned if it is an indirect object;
+3. the XObject itself is cloned (`xref_copy` + `update_stream`);
+4. the page's private dictionary is repointed at the clone, and only the clone's
+   stream is rewritten.
+
+The original object and every other page keep rendering exactly as before.
+Because the copy is made *after* the replacement has been computed, a refused
+edit leaves the document structurally untouched.
+
+### 11.2 Test results
+
+```
+tests/test_existing_text_edit.py        29 passed
+tests/test_existing_text_ui.py           5 passed
+tests/test_existing_text_visual.py       4 passed
+tests/test_existing_text_realworld.py   11 passed
+tests/test_existing_text_graphics.py    16 passed   (new)
+tests/test_existing_text_xobjects.py    12 passed   (new)
+--------------------------------------------------
+existing-text total                     77 passed
+full suite                           2,937 passed  (0 failed, 0 skipped)
+```
+
+Run with `PYTHONPATH=src QT_QPA_PLATFORM=offscreen python3 -m pytest tests/ -q`.
+No pre-existing test was weakened or removed. One Phase 2 test
+(`test_replace_in_operands_tj_multisegment_ambiguous`) encoded the old
+"refuse repeated words" semantics; it was replaced by
+`test_replace_in_operands_tj_multisegment_repeated_word`, which checks that
+`occurrence=0` edits the first match, `occurrence=1` edits the second, and
+`occurrence=2` reports `not_found`.
+
+New coverage in `tests/test_existing_text_graphics.py`:
+
+- nested `q`/`Q` restore, including text state;
+- nested `cm` composition (exact origin check);
+- `Tm` rotation and `cm` rotation, including an edit that keeps the origin;
+- `Tc`/`Tw`/`Tz` saved and restored by `q`/`Q`;
+- `Ts` (text rise) offsetting the origin;
+- `BT` resetting the text matrix;
+- CropBox offset;
+- repeated word inside one `Tj` (edit the second only);
+- repeated word across two operators on the same page;
+- repeated word split across `TJ` segments;
+- kerning numbers around the edited occurrence preserved;
+- `occurrence` reported by the locator;
+- a word whose box is far from the run is not matched;
+- an absent word raises `EditError`.
+
+New coverage in `tests/test_existing_text_xobjects.py`:
+
+- locating and editing XObject text;
+- `/Matrix` positioning (scale) and position preservation after the edit;
+- font resources scoped per object (page `/F1` = Helvetica, XObject `/F1` =
+  Times) — both the resolution helper and the end-to-end edit;
+- unrelated operators in the XObject preserved byte-for-byte;
+- save/reopen;
+- shared XObject across pages → copy-on-write, original untouched;
+- XObject invoked twice on one page → refused, document unchanged;
+- shared `/Resources` dictionary → split, other page unaffected;
+- inline page `/Resources` and indirect `/XObject` dictionary shapes;
+- nested XObject → refused;
+- self-referencing XObject → cycle cut, no hang.
+
+`tests/test_existing_text_visual.py` gained a transformed-text test: a word
+drawn under a scale and another under a rotation are rendered before and after;
+the edited word's box keeps its left edge and baseline, the rotated word is
+pixel-identical, and the edited region's pixel diff is > 3 while the rotated
+region stays < 1.
+
+`tests/test_existing_text_realworld.py` gained a real Form XObject test: the
+rotated arXiv stamp on page 1 of `arxiv-2610.30749.pdf` is located through the
+invocation matrix, edited, saved and reopened.
+
+### 11.3 Supported and refused
+
+| Case | Result |
+|---|---|
+| Plain page text (`Tj`, `TJ`, `'`, `"`) | **Editable** |
+| Text under `q`/`Q`, nested `cm`, scale, translation | **Editable** |
+| Text rotated by `Tm` or by `cm` | **Editable** |
+| Text in a CropBox-offset or rotated page | **Editable** |
+| Word repeated inside one operator | **Editable** — the clicked occurrence only |
+| Word split across `TJ` kerning segments | **Editable** |
+| Text in a Form XObject invoked once | **Editable** |
+| Form XObject shared with other pages | **Editable** via copy-on-write |
+| Form XObject invoked twice on the same page | **Refused** (would change every copy) |
+| XObject nested inside another XObject | **Refused** (enclosing object cannot be isolated) |
+| XObject cycle | **Cut** during replay; edit refused if not locatable |
+| Font without ToUnicode (Type0) or with an unknown encoding | **Refused** (fail-closed) |
+| Glyph missing from the font program | **Refused** |
+| Scanned image / OCR text | **Not supported** (no text operator) |
+| Text spanning several operators (e.g. a paragraph) | **Refused** as a span edit |
+
+### 11.4 Safety properties
+
+- **Surgical bytes.** Only the located operator's span is re-serialized; every
+  other byte of the stream is copied verbatim. Replacement of untouched
+  characters inside a string keeps their original bytes (`_splice_segment`).
+- **No whole-stream rewrite.** The splice is `data[:start] + op + data[end:]`.
+- **Fail-closed.** Any inspection failure (fonts, encoding, glyph program,
+  resource dictionary, XObject structure) is a refusal with a reason, never an
+  implicit approval.
+- **Atomicity.** All validation and the replacement computation happen before
+  any structural change; the copy-on-write clone is created last.
+- **No silent sharing.** Shared XObjects are cloned, never rewritten; the
+  original stream is verified unchanged by tests.
+- **Architecture.** `ReplaceExistingText` is still an `Edit` with
+  `Scope.CONTENT`; `DocumentSession.apply` still runs it on a throwaway clone
+  and adopts on success; undo/redo, save/revert, geometry and invalidation are
+  untouched. No second document manager, no parallel editing system.
+- **UI.** Unchanged: single click, double-click for a line, drag for a span,
+  inline popover with live preview, apply/cancel. Refusals surface through
+  `apply_edit` in the status bar with the engine's message.
+
+### 11.5 Deferred features and recommended approach
+
+| Deferred | Why it is deferred | Recommended approach |
+|---|---|---|
+| Automatic font substitution | Choosing a substitute changes metrics and appearance; a wrong choice silently reflows the line. | Add an explicit "substitute font" option: load the replacement font, check its advance widths against the original, and let the user confirm the visual difference. Never do it silently. |
+| Font embedding for missing glyphs | Requires subsetting a new font and rewriting the font resource dictionary; high risk of producing an unreadable file. | Build a small font-subset writer on top of `fontTools`, embed as Type0/Identity-H with a generated ToUnicode CMap, and validate by re-extracting the text after saving. |
+| Paragraph reflow | A visual paragraph is not one PDF object; reflow means re-laying-out text the original producer positioned explicitly. | Out of scope for surgical editing. A separate "reflow document" feature should regenerate text objects wholesale rather than patch them. |
+| OCR-based editing | Scanned pages have no text operators; editing pixels is image editing, not PDF text editing. | Separate OCR pipeline that produces an invisible text layer plus an image patch; must be clearly presented as a different operation. |
+| Nested Form XObjects | Isolating a shared parent chain needs recursive copy-on-write with cycle handling. | Extend `_copy_on_write_xobject` to clone the parent chain bottom-up; refuse if any link cannot be made private. |
+
+### 11.6 Files changed in Phase 3
+
+- `src/pdfar/text_edit_existing.py` — graphics-state replay, per-character
+  offsets, occurrence-based location and replacement, resource-dictionary
+  helpers, Form XObject traversal, copy-on-write.
+- `tests/test_existing_text_graphics.py` — new (15 tests).
+- `tests/test_existing_text_xobjects.py` — new (12 tests).
+- `tests/test_existing_text_edit.py` — occurrence semantics test updated.
+- `tests/test_existing_text_visual.py` — transformed-text pixel test.
+- `tests/test_existing_text_realworld.py` — real Form XObject test.
+- `docs/existing-text-edit-audit.md`, `docs/existing-text-edit-report.md`,
+  `ROADMAP.md` — this report.
+
+### 11.7 Known limitations and conclusion
+
+Known limitations that remain after Phase 3:
+
+- A replacement is refused when the original font cannot draw or encode it.
+  There is no substitution or embedding, by design (see 11.5).
+- A Form XObject invoked more than once on a page, or nested inside another
+  XObject, is refused rather than edited. This is deliberate: both cases would
+  otherwise change text the user did not click.
+- A span that crosses text-showing operators (a "paragraph" in the visual
+  sense) is refused. Editing never claims that a visual paragraph is a single
+  logical PDF object.
+- Text inside Type3 fonts, inline images or scanned pages is not editable.
+- The engine matches text by decoded content plus computed glyph position. If a
+  document's font program is unavailable, only unique words in a run can be
+  located; repeated words are refused.
+
+The guiding rule for Phase 3 was the same as for Phase 2: **correctness and
+preservation of the original PDF take priority over the number of documents
+that can be edited.** Every new capability either proves it can map a word to
+exactly one operator occurrence, or refuses with a message the user can act on.
+A safe refusal is preferable to a corrupted document or an incorrect text
+replacement.

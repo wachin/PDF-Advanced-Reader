@@ -161,3 +161,60 @@ be found inside the located operator" as a result.
 The editor only ever opened on one word; there was no way to select several
 words or a whole line, and no pixel-level verification that an edit left the
 rest of the page visually intact.
+
+## 10. Phase 3 audit addendum (2026-11-12)
+
+A second review focused on coordinate correctness, repeated words and Form
+XObjects. Four defects were found and fixed.
+
+### 10.1 The graphics-state replay did not model `q`/`Q`
+
+The Phase 2 replay walked operators linearly and only tracked `cm`, `Tm`,
+`Td`/`TD`, `T*`, `Tf`, `Tc`, `Tw` and `Tz`. It had no save/restore stack, so a
+`q … Q` block leaked its CTM *and* its text state into everything after it.
+Documents that wrap graphics in `q`/`Q` (LaTeX output does this around every
+figure and every colour change) could therefore be mapped to the wrong place.
+
+### 10.2 Nested `cm` matrices were composed in the wrong order
+
+The old `_concat(a, b)` implemented column-vector multiplication. PDF uses row
+vectors (`p' = p × M`), so concatenating `cm1` then `cm2` must produce
+`M1 × M2`, not `M2 × M1`. With a single `cm` the result looked right; with two
+nested ones (translation inside a scale, for example) the computed origin was
+off by exactly the amount that hides the bug in simple test documents.
+
+### 10.3 A word's position was compared against one corner of its box
+
+Matching used `(word_rect[0], word_rect[3])` — the bottom-left corner of the
+rendered box — and the run origin. For horizontal text that is close enough;
+for rotated text the glyph box extends *left* of the baseline, and for text
+under a scale the descent is scaled too. The error was small but the tolerance
+was unbounded, so a run could be selected from a completely different part of
+the page as long as its text matched.
+
+### 10.4 Repeated words could not be distinguished
+
+`locate_operator_for_word` took the first textual match inside a run, and
+`_replace_in_operands` replaced the first match in the operator. A page with
+"the cat and the dog" edited the *first* "the" no matter which one was
+clicked, silently changing the wrong word. The engine also had no way to say
+which occurrence it meant, so a refusal was the only safe behaviour it could
+have offered.
+
+### 10.5 Form XObjects were invisible to the engine
+
+`_iter_page_runs` only read the page's content streams. Text drawn by a Form
+XObject (`/Fm1 Do`) was never seen, so `apply()` reported "could not locate the
+text … may be inside an unsupported structure (Form XObject …)" even when the
+word was plainly visible. There was no code path that could resolve an
+XObject's own `/Resources`, follow its `/Matrix`, or edit its stream — and
+nothing that would have noticed if the same XObject were invoked twice.
+
+### 10.6 Text extraction truncated at the first unknown advance
+
+While rewriting the replay, `_operator_char_offsets` returned early when a
+glyph advance could not be computed. That truncated the extracted text to the
+characters before the first unknown glyph ("the quick brown fox" became "t"),
+so the word was never found and the *font-inspection* refusal messages were
+never reached. The fix records the failure but keeps every character, so
+location still works and validation reports the real reason.

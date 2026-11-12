@@ -135,3 +135,76 @@ def test_edit_preserves_page_structure(tmp_path):
     assert "Unrelated footer" in doc[0].get_text()
     assert other_before
     doc.close()
+
+
+def _transformed_pdf(tmp_path):
+    """A page whose text is drawn under nested cm and a rotation."""
+    path = str(tmp_path / "transformed.pdf")
+    doc = fitz.open()
+    p = doc.new_page(width=400, height=400)
+    p.insert_text((5, 5), ".")
+    p.insert_font(fontname="helv")
+    contents = p.get_contents()
+    xref = contents[0] if isinstance(contents, list) else contents
+    doc.update_stream(
+        xref,
+        b"q\n"
+        b"1 0 0 1 60 320 cm\n"
+        b"q\n"
+        b"1.4 0 0 1.4 0 0 cm\n"
+        b"BT /helv 14 Tf 1 0 0 1 0 0 Tm (Scaled word) Tj ET\n"
+        b"Q\n"
+        b"Q\n"
+        b"q\n"
+        b"0 1 -1 0 340 120 cm\n"
+        b"BT /helv 14 Tf 1 0 0 1 0 0 Tm (Rotated word) Tj ET\n"
+        b"Q\n")
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_transformed_text_edit_keeps_position(tmp_path):
+    path = _transformed_pdf(tmp_path)
+    doc = fitz.open(path)
+    try:
+        page = doc[0]
+        before = _word_rect(page, "Scaled")
+        rot_before = _word_rect(page, "Rotated")
+        hit = find_text_at_point(
+            page, ((before[0] + before[2]) / 2, (before[1] + before[3]) / 2))
+        assert hit is not None
+
+        target_clip = fitz.Rect(before[0] - 6, before[1] - 6,
+                                before[2] + 40, before[3] + 6)
+        rot_clip = fitz.Rect(rot_before[0] - 6, rot_before[1] - 6,
+                             rot_before[2] + 6, rot_before[3] + 6)
+        before_px = _samples(doc, 0, target_clip)
+        rot_before_px = _samples(doc, 0, rot_clip)
+
+        ReplaceExistingText(
+            page_num=0, old_word="Scaled", new_word="Zoomed",
+            word_rect=hit.rect).apply(doc)
+        out = str(tmp_path / "transformed_out.pdf")
+        doc.save(out)
+    finally:
+        doc.close()
+
+    reopened = fitz.open(out)
+    try:
+        page = reopened[0]
+        assert "Zoomed" in page.get_text()
+        assert "Rotated" in page.get_text()
+        after = _word_rect(page, "Zoomed")
+        # Same left edge and baseline: the transform was preserved.
+        assert after[0] == pytest.approx(before[0], abs=1.5)
+        assert after[1] == pytest.approx(before[1], abs=1.5)
+        # The rotated word is untouched, at the same place.
+        assert _word_rect(page, "Rotated") == pytest.approx(rot_before, abs=0.5)
+
+        after_px = _samples(reopened, 0, target_clip)
+        rot_after_px = _samples(reopened, 0, rot_clip)
+        assert _mean_abs(before_px, after_px) > 3.0
+        assert _mean_abs(rot_before_px, rot_after_px) < 1.0
+    finally:
+        reopened.close()

@@ -245,3 +245,49 @@ def test_subsetted_type0_font(tmp_path):
         assert "Hello" in d[0].get_text()
     finally:
         d.close()
+
+
+def test_form_xobject_text_in_real_pdf(tmp_path):
+    """The arXiv stamp is drawn by a rotated Form XObject.
+
+    It must be locatable through the invocation matrix, editable, and the
+    document must stay valid after a save/reopen cycle.
+    """
+    path = os.path.join(TWO_COLUMN, "arxiv-2610.30749.pdf")
+    if not os.path.exists(path):
+        pytest.skip("arxiv PDF not present")
+    from pdfar.text_edit_existing import _iter_page_runs
+
+    doc = fitz.open(path)
+    try:
+        page = doc[0]
+        xruns = [r for r in _iter_page_runs(page) if r.source.in_xobject]
+        assert xruns, "expected at least one text-bearing Form XObject"
+        run = xruns[0]
+        assert run.source.depth == 1
+
+        target = next(w for w in page.get_text("words")
+                      if w[4].startswith("arXiv:"))
+        hit = find_text_at_point(
+            page, ((target[0] + target[2]) / 2, (target[1] + target[3]) / 2))
+        assert hit is not None and hit.text == target[4]
+
+        original = hit.text
+        replacement = original[:6] + "X" * (len(original) - 6)
+        ReplaceExistingText(
+            page_num=0, old_word=original, new_word=replacement,
+            word_rect=hit.rect,
+        ).apply(doc)
+        assert replacement in doc[0].get_text()
+
+        out = str(tmp_path / "arxiv_xobj.pdf")
+        doc.save(out, garbage=3, deflate=True)
+    finally:
+        doc.close()
+
+    reopened = fitz.open(out)
+    try:
+        assert replacement in reopened[0].get_text()
+        assert original not in reopened[0].get_text()
+    finally:
+        reopened.close()

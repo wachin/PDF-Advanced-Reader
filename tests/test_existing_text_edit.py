@@ -481,11 +481,23 @@ def test_replace_in_operands_tj_multisegment():
     assert new_ops == [[b"Planet"]]
 
 
-def test_replace_in_operands_tj_multisegment_ambiguous():
-    # The word appears twice -> refuse rather than guess.
+def test_replace_in_operands_tj_multisegment_repeated_word():
+    # The word appears twice inside one operator: the caller says which
+    # occurrence to edit, and only that one changes.
     op = PDFOperator("TJ", [["World World"]], 0, 20)
     new_ops, status = _replace_in_operands(op, "World", "Planet")
-    assert status == "ambiguous"
+    assert status == "ok"
+    assert new_ops == [[b"Planet World"]]
+
+    new_ops, status = _replace_in_operands(
+        op, "World", "Planet", occurrence=1)
+    assert status == "ok"
+    assert new_ops == [[b"World Planet"]]
+
+    # No third occurrence -> nothing to replace.
+    new_ops, status = _replace_in_operands(
+        op, "World", "Planet", occurrence=2)
+    assert status == "not_found"
 
 
 def test_replace_in_operands_tj_not_found():
