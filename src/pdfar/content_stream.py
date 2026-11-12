@@ -173,17 +173,24 @@ class ContentStreamParser:
             
             c = data[i:i+1]
             
-            # Check if this looks like an operator (letters followed by whitespace, or single-char operators ' and ")
+            # A token starting with a letter is an operator when it is
+            # terminated by whitespace or a PDF delimiter.  Operators may be
+            # glued to the next operand (e.g. "]TJ/F42 12 Tf"), so delimiters
+            # such as '/' must end the operator too.
             if c in b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz':
                 j = i + 1
                 while j < len(data) and data[j:j+1] in b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz':
                     j += 1
-                if j >= len(data) or data[j:j+1] in b' \t\r\n\f':
-                    # This is an operator, stop parsing operands
-                    break
+                if j < len(data) and data[j:j+1] == b'*':
+                    j += 1
+                token = data[i:j]
+                if token not in (b'true', b'false', b'null'):
+                    if j >= len(data) or data[j:j+1] in b' \t\r\n\f()<>[]{}/':
+                        # This is an operator, stop parsing operands
+                        break
             elif c in b"'\"":
                 # Single-character operators ' and "
-                if i + 1 >= len(data) or data[i+1:i+2] in b' \t\r\n\f':
+                if i + 1 >= len(data) or data[i+1:i+2] in b' \t\r\n\f()<>[]{}/':
                     # This is an operator, stop parsing operands
                     break
             
@@ -448,11 +455,14 @@ class ContentStreamParser:
             if i >= data_len:
                 break
             
-            # Read operator (handle both letter operators and single-char operators ' and ")
+            # Read operator (letter operators, '*' suffixes such as T* / B*,
+            # and single-character operators ' and ")
             op_start = i
             while i < data_len and data[i:i+1] in b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz':
                 i += 1
-            
+            if i > op_start and i < data_len and data[i:i+1] == b'*':
+                i += 1
+
             # Also handle single-character operators ' and "
             if i == op_start and i < data_len and data[i:i+1] in b"'\"":
                 i += 1
@@ -557,7 +567,7 @@ def _extract_text_from_op(op: PDFOperator) -> str:
                             text += item.decode('latin-1', errors='ignore')
                         except Exception:
                             text += item.decode('utf-8', errors='ignore')
-            return text
+        return text
     elif op.operator == "'":
         if op.operands and isinstance(op.operands[0], str):
             return op.operands[0]

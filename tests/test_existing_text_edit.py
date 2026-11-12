@@ -23,6 +23,10 @@ from pdfar.text_edit_existing import (
     ReplaceExistingText,
     _page_content_streams,
     _replace_in_operands,
+    _validate_replacement,
+    combine_hits,
+    words_between,
+    words_in_line,
 )
 from pdfar.content_stream import PDFOperator
 
@@ -200,18 +204,144 @@ def test_refuses_glyphs_not_in_font(session):
         edit.apply(session.doc)
 
 
-def test_refuses_word_split_across_kerning(tmp_path):
-    """A word split across TJ string segments must be refused, not corrupted."""
+def test_refuses_when_get_fonts_raises(session, monkeypatch):
+    """An inspection failure is a refusal, never an implicit approval."""
+    page = session.doc[0]
+    target = next(w for w in page.get_text("words") if w[4] == "fox")
+    hit = find_text_at_point(page, _click_center(target))
+
+    def boom(self, *args, **kwargs):
+        raise RuntimeError("font introspection failed")
+
+    monkeypatch.setattr(fitz.Page, "get_fonts", boom)
+    edit = ReplaceExistingText(
+        page_num=0, old_word="fox", new_word="wolf", word_rect=hit.rect,
+    )
+    with pytest.raises(EditError, match="Could not inspect the page fonts"):
+        edit.apply(session.doc)
+
+
+def test_refuses_when_font_program_cannot_be_loaded(session, monkeypatch):
+    page = session.doc[0]
+    target = next(w for w in page.get_text("words") if w[4] == "fox")
+    hit = find_text_at_point(page, _click_center(target))
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("font program unavailable")
+
+    # Patch the module the engine actually uses (pymupdf), not the fitz shim.
+    monkeypatch.setattr("pdfar.text_edit_existing.fitz.Font", boom)
+    edit = ReplaceExistingText(
+        page_num=0, old_word="fox", new_word="wolf", word_rect=hit.rect,
+    )
+    with pytest.raises(EditError, match="Could not load the font program"):
+        edit.apply(session.doc)
+
+
+# --------------------------------------------------------------------------- #
+# Encoding-aware replacement (Type0 / embedded fonts)
+# --------------------------------------------------------------------------- #
+def _dejavu_path():
+    import glob
+    hits = glob.glob("/usr/share/fonts/**/DejaVuSans.ttf", recursive=True)
+    return hits[0] if hits else None
+
+
+def _make_type0_pdf(tmp_path, text="Héllo Wörld"):
+    """A PDF using an embedded DejaVuSans Type0/Identity-H font."""
+    path = str(tmp_path / "type0.pdf")
+    doc = fitz.open()
+    p = doc.new_page(width=400, height=300)
+    p.insert_text((50, 100), text, fontsize=14, fontname="F0",
+                  fontfile=_dejavu_path())
+    doc.save(path)
+    doc.close()
+    return path
+
+
+@pytest.mark.skipif(_dejavu_path() is None,
+                    reason="DejaVuSans.ttf is not installed")
+def test_type0_identity_h_replacement(tmp_path):
+    """Type0/Identity-H text is decoded and re-encoded via ToUnicode."""
+    path = _make_type0_pdf(tmp_path)
+    s = fitz.open(path)
+    try:
+        page = s[0]
+        target = next(w for w in page.get_text("words") if w[4] == "Wörld")
+        hit = find_text_at_point(page, _click_center(target))
+        edit = ReplaceExistingText(
+            page_num=0, old_word="Wörld", new_word="Earth", word_rect=hit.rect,
+        )
+        edit.apply(s)
+        text = s[0].get_text()
+        assert "Earth" in text
+        assert "Wörld" not in text
+        # The other word is untouched.
+        assert "Héllo" in text
+    finally:
+        s.close()
+
+
+@pytest.mark.skipif(_dejavu_path() is None,
+                    reason="DejaVuSans.ttf is not installed")
+def test_type0_replacement_with_accent(tmp_path):
+    """A non-ASCII replacement is encoded through the Type0 ToUnicode map."""
+    path = _make_type0_pdf(tmp_path)
+    s = fitz.open(path)
+    try:
+        page = s[0]
+        target = next(w for w in page.get_text("words") if w[4] == "Héllo")
+        hit = find_text_at_point(page, _click_center(target))
+        edit = ReplaceExistingText(
+            page_num=0, old_word="Héllo", new_word="Café", word_rect=hit.rect,
+        )
+        edit.apply(s)
+        assert "Café" in s[0].get_text()
+    finally:
+        s.close()
+
+
+@pytest.mark.skipif(_dejavu_path() is None,
+                    reason="DejaVuSans.ttf is not installed")
+def test_type0_without_tounicode_is_refused(tmp_path):
+    """Without a ToUnicode map a Type0 font cannot be reverse-mapped safely."""
+    path = _make_type0_pdf(tmp_path)
+    doc = fitz.open(path)
+    try:
+        fx = doc[0].get_fonts()[0][0]
+        doc.xref_set_key(fx, "ToUnicode", "null")
+        ok, reason, codec = _validate_replacement(doc, doc[0], "F0", "Hello")
+        assert ok is False
+        assert codec is None
+        assert "Cannot verify how characters are encoded" in reason
+    finally:
+        doc.close()
+
+
+def test_simple_font_replacement_with_accent(session):
+    """WinAnsi simple fonts encode accented replacements via cp1252."""
+    page = session.doc[0]
+    target = next(w for w in page.get_text("words") if w[4] == "fox")
+    hit = find_text_at_point(page, _click_center(target))
+    edit = ReplaceExistingText(
+        page_num=0, old_word="fox", new_word="fóx", word_rect=hit.rect,
+    )
+    edit.apply(session.doc)
+    assert "fóx" in session.doc[0].get_text()
+
+
+def test_supports_word_split_across_kerning(tmp_path):
+    """A word split across TJ string segments is reconstructed, not refused."""
     path = str(tmp_path / "kern.pdf")
     doc = fitz.open()
     p = doc.new_page(width=600, height=800)
     p.insert_text((100, 700), "x")
     contents = p.get_contents()
     xref = contents[0] if isinstance(contents, list) else contents
-    # "World" split into "Wor" and "ld" by a kerning number.
+    # "World" split into "Wor" and "ld" by a kerning number, with text after.
     stream = (
         b"q\nBT\n/helv 14 Tf\n1 0 0 1 100 700 Tm\n"
-        b"[ (Wor) -40 (ld) ] TJ\nET\nQ\n"
+        b"[ (Wor) -40 (ld) ( again) ] TJ\nET\nQ\n"
     )
     p.insert_font(fontname="helv")
     p.parent.update_stream(xref, stream)
@@ -226,12 +356,50 @@ def test_refuses_word_split_across_kerning(tmp_path):
         hit = find_text_at_point(page, _click_center(target))
         loc = locate_operator_for_word(page, hit.text, hit.rect)
         assert loc is not None
-        # The operator text joins to "World" so location succeeds...
         edit = ReplaceExistingText(
             page_num=0, old_word="World", new_word="Planet", word_rect=hit.rect,
         )
-        with pytest.raises(EditError, match="split across kerning"):
-            edit.apply(s)
+        edit.apply(s)
+        text = s[0].get_text()
+        assert "Planet" in text
+        assert "World" not in text
+        # Text after the replaced word is preserved.
+        assert "again" in text
+    finally:
+        s.close()
+
+
+def test_kerning_outside_word_is_preserved(tmp_path):
+    """Kerning numbers outside the matched word must survive the edit."""
+    path = str(tmp_path / "kern2.pdf")
+    doc = fitz.open()
+    p = doc.new_page(width=600, height=800)
+    p.insert_text((100, 700), "x")
+    contents = p.get_contents()
+    xref = contents[0] if isinstance(contents, list) else contents
+    stream = (
+        b"q\nBT\n/helv 14 Tf\n1 0 0 1 100 700 Tm\n"
+        b"[ (AB ) -25 (World) -15 ( CD) ] TJ\nET\nQ\n"
+    )
+    p.insert_font(fontname="helv")
+    p.parent.update_stream(xref, stream)
+    doc.save(path)
+    doc.close()
+
+    s = fitz.open(path)
+    try:
+        page = s[0]
+        target = next(w for w in page.get_text("words") if w[4] == "World")
+        hit = find_text_at_point(page, _click_center(target))
+        edit = ReplaceExistingText(
+            page_num=0, old_word="World", new_word="Earth", word_rect=hit.rect,
+        )
+        edit.apply(s)
+        xref2, data = _page_content_streams(s[0])[0]
+        assert b"<4561727468>" in data  # "Earth" re-encoded as a hex string
+        assert b"-25" in data  # kerning before the word kept
+        assert b"-15" in data  # kerning after the word kept
+        assert "Earth" in s[0].get_text()
     finally:
         s.close()
 
@@ -289,23 +457,123 @@ def test_save_reopen_preserves_edit(tmp_path, literal_pdf):
 # --------------------------------------------------------------------------- #
 def test_replace_in_operands_tj():
     op = PDFOperator("Tj", ["Hello World"], 0, 11)
-    new_ops, spanned = _replace_in_operands(op, "World", "Earth")
-    assert not spanned
-    assert new_ops == ["Hello Earth"]
+    new_ops, status = _replace_in_operands(op, "World", "Earth")
+    assert status == "ok"
+    # Replacement operands are bytes so the exact encoding is controlled.
+    assert new_ops == [b"Hello Earth"]
 
 
 def test_replace_in_operands_tj_bytes():
     op = PDFOperator("TJ", [[b"Hello World"]], 0, 15)
-    new_ops, spanned = _replace_in_operands(op, "World", "Earth")
-    assert not spanned
+    new_ops, status = _replace_in_operands(op, "World", "Earth")
+    assert status == "ok"
     val = new_ops[0][0]
     if isinstance(val, bytes):
         val = val.decode("latin-1", "ignore")
     assert val == "Hello Earth"
 
 
-def test_replace_in_operands_tj_spanned():
-    # "World" split across two string segments -> spanned flag.
+def test_replace_in_operands_tj_multisegment():
+    # "World" split across two string segments -> reconstructed.
     op = PDFOperator("TJ", [["Wor", -40, "ld"]], 0, 20)
-    new_ops, spanned = _replace_in_operands(op, "World", "Planet")
-    assert spanned is True
+    new_ops, status = _replace_in_operands(op, "World", "Planet")
+    assert status == "ok"
+    assert new_ops == [[b"Planet"]]
+
+
+def test_replace_in_operands_tj_multisegment_ambiguous():
+    # The word appears twice -> refuse rather than guess.
+    op = PDFOperator("TJ", [["World World"]], 0, 20)
+    new_ops, status = _replace_in_operands(op, "World", "Planet")
+    assert status == "ambiguous"
+
+
+def test_replace_in_operands_tj_not_found():
+    op = PDFOperator("TJ", [["Hello"]], 0, 10)
+    new_ops, status = _replace_in_operands(op, "World", "Planet")
+    assert status == "not_found"
+
+
+# --------------------------------------------------------------------------- #
+# Multi-word spans and whole-line editing
+# --------------------------------------------------------------------------- #
+def _word_hit(page, text):
+    target = next(w for w in page.get_text("words") if w[4] == text)
+    return find_text_at_point(page, _click_center(target))
+
+
+def test_words_in_line_and_combine(session):
+    page = session.doc[0]
+    hit = _word_hit(page, "quick")
+    line = words_in_line(page, hit)
+    assert [h.text for h in line] == ["the", "quick", "brown", "fox"]
+    combined = combine_hits(line)
+    assert combined is not None
+    assert combined.text == "the quick brown fox"
+    # The combined box spans the whole line.
+    assert combined.rect[0] <= line[0].rect[0]
+    assert combined.rect[2] >= line[-1].rect[2]
+
+
+def test_words_between_selects_span(session):
+    page = session.doc[0]
+    start = _word_hit(page, "quick")
+    end = _word_hit(page, "brown")
+    span = words_between(page, start, end)
+    assert [h.text for h in span] == ["quick", "brown"]
+    # Dragging in reverse selects the same span.
+    assert words_between(page, end, start) == span
+
+
+def test_replace_multi_word_span(session):
+    page = session.doc[0]
+    span = combine_hits(words_between(page, _word_hit(page, "quick"),
+                                      _word_hit(page, "brown")))
+    edit = ReplaceExistingText(
+        page_num=0, old_word=span.text, new_word="slow red", word_rect=span.rect,
+    )
+    edit.apply(session.doc)
+    text = session.doc[0].get_text()
+    assert "slow red" in text
+    assert "quick brown" not in text
+    # Neighbouring words are untouched.
+    assert "the" in text and "fox" in text
+
+
+def test_replace_whole_line(session):
+    page = session.doc[0]
+    line = combine_hits(words_in_line(page, _word_hit(page, "quick")))
+    edit = ReplaceExistingText(
+        page_num=0, old_word=line.text, new_word="a new line",
+        word_rect=line.rect,
+    )
+    edit.apply(session.doc)
+    text = session.doc[0].get_text()
+    assert "a new line" in text
+    assert "the quick brown fox" not in text
+    # The other line is a separate operator and stays intact.
+    assert "jumps over the lazy dog" in text
+
+
+def test_span_across_operators_is_refused(session):
+    """A visual span that crosses text operators cannot be replaced safely."""
+    page = session.doc[0]
+    fox = _word_hit(page, "fox")
+    edit = ReplaceExistingText(
+        page_num=0, old_word="fox jumps over", new_word="x", word_rect=fox.rect,
+    )
+    with pytest.raises(EditError, match="Could not locate"):
+        edit.apply(session.doc)
+
+
+def test_delete_word(session):
+    """An empty replacement removes the word without touching neighbours."""
+    page = session.doc[0]
+    hit = _word_hit(page, "fox")
+    edit = ReplaceExistingText(
+        page_num=0, old_word="fox", new_word="", word_rect=hit.rect,
+    )
+    edit.apply(session.doc)
+    text = session.doc[0].get_text()
+    assert "fox" not in text
+    assert "the quick brown" in text

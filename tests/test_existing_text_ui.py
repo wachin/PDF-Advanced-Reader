@@ -12,10 +12,13 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import fitz
-from PyQt6.QtCore import QPoint
-from PyQt6.QtGui import QColor, QImage, QPainter
+from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
+from PyQt6.QtGui import QColor, QImage, QMouseEvent, QPainter
 
-from pdfar.text_edit_existing import find_text_at_point
+from pdfar.geometry import map_rect
+from pdfar.text_edit_existing import (
+    combine_hits, find_text_at_point, words_between, words_in_line,
+)
 from pdfar.viewer import PDFView
 
 from conftest import make_session
@@ -102,5 +105,59 @@ def test_hover_overlay_paints_without_error(qapp, sample_pdf):
         view._paint_text_edit_overlay(painter, 0, px, py)
         painter.end()
         # No exception == success; the overlay ran.
+    finally:
+        view.shutdown()
+
+
+def _widget_point(view, page_no, rect):
+    """Map a page-space rect centre to a viewport widget point."""
+    px, py = view._page_origin(page_no)
+    px -= view.horizontalScrollBar().value()
+    py -= view.verticalScrollBar().value()
+    w0, h0, turn = view._sheet_space(page_no)
+    x0, y0, x1, y1 = map_rect(rect, w0, h0, turn)
+    return QPoint(int(px + ((x0 + x1) / 2.0) * view.zoom),
+                  int(py + ((y0 + y1) / 2.0) * view.zoom))
+
+
+def test_span_editor_commit(qapp, sample_pdf):
+    """A multi-word span can be edited through the viewer pipeline."""
+    view = _view_for(sample_pdf)
+    try:
+        view.set_tool_mode("edit_text")
+        page = view.doc[0]
+        start = find_text_at_point(page, _word_center(page, "PDFAR"))
+        end = find_text_at_point(page, _word_center(page, "world"))
+        span = combine_hits(words_between(page, start, end))
+        assert span.text == "PDFAR world"
+
+        view._open_text_editor(span.page, span)
+        view._commit_text_edit("PLANET")
+        text = view.doc[0].get_text()
+        assert "PLANET" in text
+        assert "PDFAR world" not in text
+        # The rest of the line is untouched.
+        assert "Hello" in text
+    finally:
+        view.shutdown()
+
+
+def test_double_click_opens_line_editor(qapp, sample_pdf):
+    """Double-clicking a word opens the editor for the whole line."""
+    view = _view_for(sample_pdf)
+    try:
+        view.set_tool_mode("edit_text")
+        page = view.doc[0]
+        hit = find_text_at_point(page, _word_center(page, "PDFAR"))
+        assert hit is not None
+        pt = _widget_point(view, 0, hit.rect)
+        ev = QMouseEvent(
+            QEvent.Type.MouseButtonDblClick, QPointF(pt), QPointF(pt),
+            Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier)
+        view.mouseDoubleClickEvent(ev)
+        assert view._edit_hit is not None
+        assert view._edit_hit.text == "Hello PDFAR world"
+        view._cancel_text_edit()
     finally:
         view.shutdown()

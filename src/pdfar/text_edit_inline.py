@@ -39,7 +39,8 @@ class ExistingTextEditor(QFrame):
         layout.setSpacing(4)
 
         self.line = QLineEdit(initial)
-        self.line.setMinimumWidth(max(120, int(font_size * len(initial) * 0.8) + 40))
+        self.line.setMinimumWidth(
+            min(600, max(120, int(font_size * len(initial) * 0.8) + 40)))
         self.line.selectAll()
         layout.addWidget(self.line)
 

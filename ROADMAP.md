@@ -8407,8 +8407,8 @@ Implemented:
 Partially implemented / limitations:
 - Multi-column, rotated, different-size and different-color text: detected and
   editable when each word maps to a single text-showing operator.
-- A word split across `TJ` kerning segments is **refused** with a clear message
-  (Strategy D) rather than corrupted.
+- ~~A word split across `TJ` kerning segments is refused~~ — supported since the
+  Phase 2 reliability pass (see the Phase 2 addendum below).
 - Replacement glyphs not present in the original font are **refused** (Strategy D).
 - Type0/CID/embedded-subset fonts: best-effort; replacement is attempted when the
   font can be loaded, but full font substitution/embedding is not yet done, and
@@ -8421,3 +8421,40 @@ Partially implemented / limitations:
 Known limitations to address later: font substitution/embedding when the
 original font lacks the needed glyphs; editing words split by kerning; broader
 CJK/complex-script support.
+
+### F10-7 Phase 2 — reliability and advanced editing (2026-11-12)
+
+Hardened the existing engine without replacing it. `Edit` / `DocumentSession`,
+the surgical single-operator splice, undo/redo, save and geometry are unchanged.
+
+- **Fail-closed font validation.** `_validate_replacement()` refuses when fonts
+  cannot be inspected, the font program cannot be loaded, a glyph is missing, or
+  a character cannot be encoded through the font's actual PDF encoding. No
+  inspection failure is treated as approval.
+- **Encoding-aware replacement.** A ToUnicode-CMap codec maps codes to Unicode
+  (and back) for simple and Type0/Identity-H fonts; replacement bytes are written
+  as hex strings and untouched bytes are preserved. Type0 fonts without a
+  ToUnicode map are refused.
+- **`TJ` multi-segment words.** A word split across kerning segments is
+  reconstructed: external kerning is preserved, internal kerning is dropped, and
+  ambiguous matches are refused.
+- **Multi-word / line editing.** Drag-select adjacent words on one line, or
+  double-click for the whole line. Spans must map to a single operator;
+  cross-operator spans are refused. No paragraph reflow.
+- **Visual verification.** Pixel-diff tests prove the edited region changes while
+  unrelated text and graphics stay identical, and detect overflow beyond the
+  original word box.
+- **Real-world compatibility.** Editable: the arXiv and Frontiers two-column
+  PDFs (embedded subset Type1 + ToUnicode). Refused fail-closed: the LibreOffice
+  GS262 guide (subsetted TrueType without a usable Unicode cmap). Also verified:
+  multiple font resources, coloured text, rotated text, subsetted Type0 fonts.
+- **Parser fixes.** Operators glued to the next token (`]TJ/F42 12 Tf`) are split
+  correctly; `T*`/`B*`/`b*`/`f*`/`W*` are recognised; `TJ` text extraction no
+  longer stops after the first operand.
+
+Tests: 47 dedicated existing-text tests (29 engine, 5 UI, 3 visual, 10
+real-world); full suite 2,907 passing.
+
+Still open: font substitution/embedding for missing glyphs, positional
+disambiguation of repeated words inside one operator, paragraph reflow, and
+Form XObject / scanned content.

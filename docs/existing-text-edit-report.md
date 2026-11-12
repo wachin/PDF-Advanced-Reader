@@ -82,20 +82,150 @@ page rotation, session, viewer) — 75 tests — also passes. A manual check on 
 real `demo.pdf` (embedded DejaVuSans-Bold, literal `Tj`) replaced an existing
 word and confirmed the change via text extraction.
 
-## 8. Known limitations
+## 8. Known limitations (Phase 1)
 
-- Words split across `TJ` kerning segments are refused (no silent corruption).
+- ~~Words split across `TJ` kerning segments are refused~~ — supported in Phase 2
+  (see §10).
 - Replacement glyphs missing from the original font are refused; font
-  substitution/embedding is not yet implemented.
+  substitution/embedding is not implemented.
 - Type0/CID and embedded-subset fonts: best-effort; some will be refused.
 - Form XObjects, scanned (non-text) areas and exotic graphics states are detected
   and refused.
 - No paragraph reflow, OpenType shaping, or complex CJK line breaking.
 
-## 9. Remaining work
+## 9. Remaining work (Phase 1 → addressed in Phase 2)
 
+- ~~Editing words split by kerning (merge the segments and rebuild the `TJ`).~~
+- ~~Stronger Type0/CID handling and verified visual rendering checks (pixel-diff).~~
 - Font substitution/embedding so edits can proceed when the original font lacks a
-  glyph (Strategy B/C).
-- Editing words split by kerning (merge the segments and rebuild the `TJ`).
-- Stronger Type0/CID handling and verified visual rendering checks on reopened
-  files (pixel-diff) for the supported cases.
+  glyph (still open).
+
+## 10. Phase 2 — Reliability and advanced editing (2026-11-12)
+
+Phase 2 hardened the engine without replacing it: the `Edit`/`DocumentSession`
+architecture, surgical single-operator splice, undo/redo, save and geometry are
+unchanged. All 2,907 tests pass; 47 are dedicated existing-text tests.
+
+### 10.1 Font validation is now fail-closed
+
+`_font_supports_text()` was replaced by `_validate_replacement()`, which returns
+`(ok, reason, codec)` and refuses unless **all** of the following hold:
+
+1. `page.get_fonts()` succeeds and the operator's resource is found.
+2. A trustworthy codec exists (the font's `/ToUnicode` CMap, or a known simple
+   base encoding).
+3. The font program loads (`extract_font` + `fitz.Font(fontbuffer=…)` for
+   embedded fonts, `fitz.Font(fontname=…)` otherwise).
+4. Every glyph exists (Type0: CID `< glyph_count`; simple: `has_glyph`).
+5. Every character can be encoded through the font's actual encoding.
+
+Any inspection failure is a refusal, never an implicit approval. The old
+`info[6]` embedded check (wrong for the 6-tuple `get_fonts()` result) is gone.
+
+### 10.2 Encoding-aware replacement
+
+A `_FontCodec` maps character codes to/from Unicode. It is built from the
+`/ToUnicode` CMap (`beginbfchar`/`beginbfrange`, 1- and 2-byte code spaces) or
+from a known simple encoding (`WinAnsiEncoding`→cp1252, `MacRomanEncoding`,
+`PDFDocEncoding`). Type0 fonts without a ToUnicode map are refused because their
+byte codes are CIDs, not Unicode. Replacement text is encoded to bytes with the
+codec and written as a hex string; untouched prefix/suffix bytes are preserved
+verbatim, so characters that are already correct are never re-encoded.
+
+`locate_operator_for_word()` now decodes operator text through the same codec,
+which makes Type0/Identity-H text locatable (previously the 2-byte CIDs decoded
+as garbage and never matched). Code width follows the font type: simple fonts are
+always treated as one-byte even when their ToUnicode CMap declares a wider
+codespace range (seen in the Frontiers documents), and mappings above 0xFF are
+discarded for them.
+
+### 10.3 `TJ` words split across segments
+
+`_replace_in_tj_array()` reconstructs the concatenated text, finds the word,
+and rebuilds the array:
+
+- kerning numbers strictly inside the match are dropped (they positioned the old
+  glyphs);
+- numbers before and after the match are preserved;
+- the replacement is inserted exactly once;
+- text in unrelated segments is preserved;
+- a word occurring more than once in the operator is refused as ambiguous.
+
+### 10.4 Multi-word and whole-line editing
+
+New helpers `words_in_line`, `words_between` and `combine_hits` build a span from
+several adjacent words on one line. The viewer now supports:
+
+- **drag-select** across words on one line, then release to edit the span;
+- **double-click** to edit the whole visual line;
+- single click still edits one word.
+
+A span is only editable when it maps to a single text-showing operator; a span
+that crosses operators is refused. This is a visual grouping, not a claim that a
+paragraph is one PDF object. No reflow is performed.
+
+### 10.5 Visual verification
+
+`tests/test_existing_text_visual.py` renders the page before and after a
+save/reopen round-trip at 144 dpi and compares pixel regions:
+
+- the edited region changes (mean abs diff > 3);
+- an unrelated footer and a filled graphic stay unchanged (diff < 1);
+- an over-wide replacement changes pixels beyond the original word box
+  (overflow is visible);
+- page count and unrelated extraction are unchanged.
+
+### 10.6 Real-world compatibility
+
+Tested against the PDFs in `external/`:
+
+| Document | Fonts | Result |
+|---|---|---|
+| `arxiv-2610.30749.pdf` | embedded subset Type1 + ToUnicode | **Editable** (22/23 prefix edits applied) |
+| `frontiers-fgene-2024-1387588.pdf` | embedded subset Type1 + ToUnicode | **Editable** (19/24) |
+| `frontiers-fpsyg-2025-1558407.pdf` | embedded subset fonts | **Editable** (19/24); some single-letter words refused as ambiguous |
+| `frontiers-fpsyt-2024-1366186.pdf` | embedded subset Type1 + ToUnicode | **Editable** (22/22) |
+| `GS262-GettingStarted.pdf` (LibreOffice) | subsetted TrueType, no usable Unicode cmap | **Refused** (fail-closed); document not modified |
+
+Synthetic cases that pass: multiple font resources on one page, coloured text
+(the separate `rg` operator is preserved), rotated text, and a subsetted
+Type0/Identity-H font.
+
+### 10.7 Parser corrections
+
+Two defects in the shared `content_stream.py` were fixed because they blocked
+real documents:
+
+- operators glued to the next token (`]TJ/F42 12 Tf`) are now split correctly;
+  `T*`, `B*`, `b*`, `f*` and `W*` are recognised;
+- `_extract_text_from_op()` no longer returns after the first `TJ` operand.
+
+### 10.8 Tests added (Phase 2)
+
+- `tests/test_existing_text_edit.py`: 29 tests (was 14) — fail-closed
+  inspection failures, Type0/Identity-H encode/decode, accented replacements,
+  missing-ToUnicode refusal, multi-segment `TJ`, kerning preservation, multi-word
+  spans, whole-line edits, cross-operator refusal, word deletion.
+- `tests/test_existing_text_ui.py`: 5 tests (was 3) — span commit, double-click
+  line editor.
+- `tests/test_existing_text_visual.py`: 3 tests (new) — pixel-diff, overflow,
+  structure preservation.
+- `tests/test_existing_text_realworld.py`: 10 tests (new) — real corpus,
+  save/reopen, subsetted-font refusal, multiple fonts, colour, rotation,
+  subsetting.
+
+### 10.9 Remaining limitations
+
+- Font substitution/embedding is still not implemented: a replacement glyph
+  absent from the original font (including subsetted fonts that stripped the
+  Unicode cmap) is refused.
+- A word/span that appears more than once in one operator is refused as
+  ambiguous; no positional disambiguation yet.
+- Paragraph-level reflow, OpenType shaping and complex CJK line breaking remain
+  out of scope.
+- Form XObjects and scanned content remain unsupported and are refused.
+- Graphics-state replay tracks `cm`, `Tm`, `Td`, `TD`, `T*`, `Tf`, `Tc`, `Tw`
+  and `Tz`, but does not yet model `q`/`Q` save/restore nesting or compose nested
+  `cm` matrices. Pages that rely on those may mislocate a word; the edit is
+  still applied only to an operator whose decoded text contains the word, but
+  positional disambiguation is not guaranteed in that case.

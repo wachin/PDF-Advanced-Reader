@@ -29,9 +29,9 @@ from PyQt6.QtCore import (
     QPoint, QPointF, QRect, QRectF, Qt, QThread, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QColor, QFont, QFontMetrics, QFontMetricsF, QImage, QKeyEvent, QMouseEvent,
-    QPaintEvent, QPainter, QPainterPath, QPen, QPixmap, QWheelEvent,
-    QGuiApplication, QResizeEvent,
+    QBrush, QColor, QFont, QFontMetrics, QFontMetricsF, QImage, QKeyEvent,
+    QMouseEvent, QPaintEvent, QPainter, QPainterPath, QPen, QPixmap,
+    QWheelEvent, QGuiApplication, QResizeEvent,
 )
 from PyQt6.QtWidgets import (
     QAbstractScrollArea, QFrame, QInputDialog, QMenu, QScroller,
@@ -59,6 +59,7 @@ from .search import SearchHit
 from .session import DocumentSession
 from .text_edit_existing import (
     WordHit, find_text_at_point, ReplaceExistingText,
+    combine_hits, words_between, words_in_line,
 )
 from .text_edit_inline import ExistingTextEditor
 from .tiles import Tile, TileGrid, TILE_SIZE
@@ -354,6 +355,9 @@ class PDFView(QAbstractScrollArea):
         self._text_editor: Optional[ExistingTextEditor] = None
         self._edit_hit: Optional[WordHit] = None
         self._edit_preview: Optional[str] = None
+        #: Drag-to-select words on one line for a multi-word edit.
+        self._text_select_start: Optional[WordHit] = None
+        self._text_select_hits: list[WordHit] = []
 
         # Annotations
         self.annotation_manager = AnnotationManager(self.session, self)
@@ -1009,6 +1013,28 @@ class PDFView(QAbstractScrollArea):
             self._hover_word = new_word
             self.viewport().update()
 
+    def _extend_text_selection(self, pos: QPoint) -> None:
+        """Extend a drag selection across words on the same text line."""
+        start = self._text_select_start
+        if start is None:
+            return
+        hit = self._pdf_point_at(pos)
+        if hit is None:
+            return
+        page, x, y = hit
+        if page != start.page:
+            return
+        current = find_text_at_point(self.doc[page], (x, y))
+        if current is None:
+            return
+        if (current.block_no != start.block_no
+                or current.line_no != start.line_no):
+            return
+        hits = words_between(self.doc[page], start, current)
+        if hits != self._text_select_hits:
+            self._text_select_hits = hits
+            self.viewport().update()
+
     def _open_text_editor(self, page: int, word_hit: WordHit) -> None:
         """Show the inline editor over *word_hit* and start live preview."""
         self._close_text_editor()
@@ -1089,6 +1115,17 @@ class PDFView(QAbstractScrollArea):
             painter.fillRect(r, QColor(255, 220, 0, 70))
             painter.setPen(QPen(QColor(220, 160, 0), 1.5))
             painter.drawRect(r)
+        sel = self._text_select_hits
+        if sel and len(sel) > 1 and self._text_editor is None:
+            combined = combine_hits(sel)
+            if combined is not None and combined.page == page:
+                x0, y0, x1, y1 = map_rect(combined.rect, w0, h0, turn)
+                r = QRect(int(ox + x0 * z), int(oy + y0 * z),
+                          max(1, int((x1 - x0) * z)),
+                          max(1, int((y1 - y0) * z)))
+                painter.fillRect(r, QColor(80, 150, 255, 80))
+                painter.setPen(QPen(QColor(40, 110, 220), 1.5))
+                painter.drawRect(r)
         preview = self._edit_preview
         hit = self._edit_hit
         if preview is not None and hit is not None and hit.page == page:
@@ -3658,7 +3695,11 @@ class PDFView(QAbstractScrollArea):
                 page, x, y = hit
                 word_hit = find_text_at_point(self.doc[page], (x, y))
                 if word_hit is not None:
-                    self._open_text_editor(page, word_hit)
+                    # Defer opening until release so a drag can extend the
+                    # selection across several words on the same line.
+                    self._text_select_start = word_hit
+                    self._text_select_hits = [word_hit]
+                    self.viewport().update()
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton:
@@ -3679,7 +3720,11 @@ class PDFView(QAbstractScrollArea):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self.tool_mode == "edit_text" and self._text_editor is None:
-            self._update_text_hover(event.position().toPoint())
+            if (self._text_select_start is not None
+                    and (event.buttons() & Qt.MouseButton.LeftButton)):
+                self._extend_text_selection(event.position().toPoint())
+            else:
+                self._update_text_hover(event.position().toPoint())
             event.accept()
             return
         if self._numbering_drag is not None:
@@ -3763,6 +3808,19 @@ class PDFView(QAbstractScrollArea):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self.tool_mode == "edit_text"
+                and self._text_select_start is not None):
+            start = self._text_select_start
+            hits = self._text_select_hits or [start]
+            self._text_select_start = None
+            self._text_select_hits = []
+            self.viewport().update()
+            target = combine_hits(hits) if len(hits) > 1 else start
+            if target is not None:
+                self._open_text_editor(target.page, target)
+            event.accept()
+            return
         if (event.button() == Qt.MouseButton.LeftButton
                 and self._numbering_drag is not None):
             self._numbering_drag = None
@@ -3855,6 +3913,21 @@ class PDFView(QAbstractScrollArea):
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self.tool_mode == "edit_text"):
+            hit = self._pdf_point_at(event.position().toPoint())
+            if hit is not None:
+                page, x, y = hit
+                word_hit = find_text_at_point(self.doc[page], (x, y))
+                if word_hit is not None:
+                    line = words_in_line(self.doc[page], word_hit)
+                    target = combine_hits(line) if line else word_hit
+                    if target is not None:
+                        self._text_select_start = None
+                        self._text_select_hits = []
+                        self._open_text_editor(target.page, target)
+            event.accept()
+            return
         if (event.button() == Qt.MouseButton.LeftButton
                 and self.tool_mode == "measure"
                 and self.measure_kind != "distance"

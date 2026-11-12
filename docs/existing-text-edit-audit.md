@@ -116,3 +116,48 @@ their own tests.
   substitution/embedding is a later improvement.
 - Form XObjects, rotated/scanned text, and complex graphics states: detected and
   refused where mapping is unreliable (Strategy D), to avoid corrupting the file.
+
+## 9. Phase 2 audit addendum (2026-11-12)
+
+A reliability review of the Phase 1 engine found four concrete defects.
+
+### 9.1 Font validation was fail-open
+
+`_font_supports_text()` returned `(True, None)` on every inspection failure:
+`page.get_fonts()` raising, the resource not being found, `extract_font()`
+returning empty data, or `fitz.Font(...)` failing to load. It also read the
+embedded flag from `info[6]`, but `get_fonts()` returns a **6-tuple**
+`(xref, ext, type, basefont, name, encoding)`, so `embedded` was always false.
+Net effect: an inspection failure was treated as proof that the font supported
+the character.
+
+### 9.2 Glyph presence was checked, but the PDF encoding was not
+
+The engine checked `fitz.Font.has_glyph(ord(ch))` on the Unicode code point and
+then wrote the replacement as a latin-1 literal string. That is only valid for
+simple fonts whose encoding matches Latin-1. For Type0/Identity-H fonts the
+stream contains 2-byte CIDs, and for WinAnsi the 0x80–0x9F range differs from
+Latin-1. A glyph existing in the font file does not prove it can be reached
+through the font's existing PDF encoding.
+
+### 9.3 The content-stream parser could not split glued operators
+
+LaTeX-generated PDFs commonly write `...]TJ/F42 9.9626 Tf` with no whitespace.
+`_parse_all_operands()` only ended an operator token at whitespace, so `TJ` was
+swallowed and the following `Tf` was parsed with the array as an operand and
+`"F42"` as the font size, raising `ValueError: could not convert string to
+float: 'F42'`. The same logic never recognised `T*`, `B*`, `b*`, `f*` or `W*`.
+
+### 9.4 Literal-string operands were decoded twice
+
+The parser decodes literal `(...)` strings to `str` (as UTF-8). The replacement
+path then re-encoded that `str` to latin-1 and decoded it through the font
+codec, so the text seen during location and the text seen during replacement
+could diverge. Real documents (e.g. the Frontiers PDFs) produced "text could not
+be found inside the located operator" as a result.
+
+### 9.5 Selection model was word-only
+
+The editor only ever opened on one word; there was no way to select several
+words or a whole line, and no pixel-level verification that an edit left the
+rest of the page visually intact.
