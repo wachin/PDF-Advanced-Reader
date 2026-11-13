@@ -911,6 +911,33 @@ def paragraph_for_word(page: fitz.Page, hit,
     return paragraph_at(page, hit.block_no, hit.line_no, paragraphs)
 
 
+def paragraph_rejection_reason(page: fitz.Page, hit,
+                               paragraphs: Optional[Sequence[Paragraph]] = None
+                               ) -> Optional[str]:
+    """Explain, if at all, why *hit* cannot be edited as one paragraph.
+
+    Returns ``None`` when the word *can* be edited as a paragraph (the caller
+    should open the paragraph editor).  Otherwise returns a human-readable
+    reason used to tell the user why the word editor is being offered instead
+    (spec §2 — diagnostic info for the "falls back to word editing" case).
+
+    The reasons come straight from the paragraph analysis: an unsupported
+    structure (multiple content streams, mixed fonts/sizes/colours, missing
+    text-to-operator mapping) is reported verbatim, and a word that was not
+    grouped into any paragraph at all gets a generic but actionable message.
+    """
+    para = paragraph_for_word(page, hit, paragraphs)
+    if para is None:
+        return (
+            "This text is not part of a recognised paragraph — it may be drawn "
+            "by an unsupported structure, a different font encoding, or a font "
+            "that cannot be matched to its operators. Use the word editor "
+            "instead.")
+    if para.problems:
+        return " ".join(para.problems)
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # Font metrics for layout
 # --------------------------------------------------------------------------- #

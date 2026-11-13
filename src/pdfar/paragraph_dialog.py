@@ -294,11 +294,15 @@ class ParagraphEditorDialog(QDialog):
         opts.addWidget(self._expand, 2, 3)
         layout.addLayout(opts)
 
-        # Editor.
+        # Editor.  Word-wrap to the available width (never a horizontal
+        # scrollbar — spec §3) and grow vertically for long paragraphs so the
+        # whole edit stays on screen.
         self._editor = QPlainTextEdit(self)
         self._editor.setMinimumHeight(110)
-        self._editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self._editor.textChanged.connect(self._on_text_changed)
+        self._editor.document().documentLayout().documentSizeChanged.connect(
+            self._adjust_editor_height)
         layout.addWidget(self._editor, 1)
 
         self._breaks_btn = QPushButton(self.tr("Use original line breaks"))
@@ -347,6 +351,21 @@ class ParagraphEditorDialog(QDialog):
 
     def _use_original_breaks(self) -> None:
         self._seed_text(keep_breaks=True)
+
+    def _adjust_editor_height(self) -> None:
+        """Let the editor grow with its wrapped content, then stop.
+
+        A long paragraph should be comfortable to read (no tiny scroll box),
+        but the editor must not push the preview and buttons off the dialog, so
+        growth is clamped to a maximum.
+        """
+        doc = self._editor.document()
+        margins = (self._editor.contentsMargins().top()
+                   + self._editor.contentsMargins().bottom())
+        text_height = int(doc.size().height() + margins + 6)
+        max_height = 320
+        self._editor.setMinimumHeight(min(max(text_height, 110), max_height))
+        self._editor.setMaximumHeight(max_height)
 
     def _apply_range(self) -> None:
         first = self._from.value() - 1
@@ -497,9 +516,34 @@ class ParagraphEditorDialog(QDialog):
     # Acceptance
     # ------------------------------------------------------------------ #
     def _on_accept(self) -> None:
-        if self._plan is None or not self._plan.feasible:
+        """Apply, but never silently: commit or explain why not.
+
+        The plan shown in the dialog is refreshed on a 120 ms debounce after
+        each keystroke, so it can be stale if the user clicks Apply within that
+        window.  Re-plan the *current* text here so the feasibility guard is
+        authoritative, then either accept (commit) or leave the dialog open with
+        a clear reason (spec §1 — Apply must commit or explain, never swallow).
+        """
+        self._replan()  # authoritative re-plan of the live editor text
+        plan = self._plan
+        if plan is not None and plan.feasible:
+            self.accept()
             return
-        self.accept()
+        # Infeasible: tell the user exactly why instead of doing nothing.
+        if plan is None:
+            self._set_status(self.tr(
+                "The paragraph could not be planned. Close and try again."),
+                "error")
+        elif plan.problems:
+            self._set_status(" ".join(plan.problems), "error")
+        elif plan.needs_substitution:
+            self._set_status(plan.substitution_reason or self.tr(
+                "Choose a font that can draw the new text before applying."),
+                "error")
+        else:
+            self._set_status(self.tr(
+                "The reflow does not fit. Shorten the text, allow a smaller "
+                "font, or widen into free space."), "error")
 
     # ------------------------------------------------------------------ #
     # Output

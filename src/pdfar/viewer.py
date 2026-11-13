@@ -65,7 +65,9 @@ from .text_edit_existing import (
 )
 from .text_edit_inline import ExistingTextEditor
 from .font_picker import FontSubstitutionDialog
-from .paragraph import Paragraph, ParagraphError, paragraph_for_word
+from .paragraph import (
+    Paragraph, ParagraphError, paragraph_for_word,
+    paragraph_rejection_reason)
 from .paragraph_dialog import ParagraphEditorDialog
 from .tiles import Tile, TileGrid, TILE_SIZE
 from .annotations import (
@@ -1186,11 +1188,14 @@ class PDFView(QAbstractScrollArea):
             self.transient_message.emit(str(exc))
             return
         if para is None or para.problems:
-            reason = " ".join(para.problems) if para else ""
+            # Diagnostic (spec §2): say *why* the paragraph editor is refused
+            # before falling back to the word editor, so the user is not left
+            # guessing why a click on their text "did nothing".
+            reason = paragraph_rejection_reason(pdf_page, word_hit)
             self.transient_message.emit(
-                self.tr("This text cannot be edited as one paragraph. ")
-                + (reason and (reason + " ") or "")
-                + self.tr("Use the word editor instead."))
+                self.tr("This text cannot be edited as one paragraph: ")
+                + (reason or self.tr("its layout is not supported."))
+                + " " + self.tr("Use the word editor instead."))
             # Fall back to the inline word editor for a single-word change.
             self._open_text_editor(page, word_hit)
             return
