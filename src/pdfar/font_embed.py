@@ -341,6 +341,16 @@ def build_font(doc: fitz.Document, face: FontFace, text: str) -> EmbeddedFont:
             f"The font '{face.display_name}' cannot be embedded because "
             f"{reason}.")
 
+    # Newlines and carriage returns are line/paragraph separators in the text
+    # being laid out, never glyphs to be drawn or embedded.  A multi-line
+    # paragraph's *new_text* carries them between rows, so a font could never
+    # "draw" one — which used to refuse every multi-line paragraph that needed
+    # font substitution (single-word substitution, which passes no newline,
+    # kept working, so paragraph edits silently failed to apply and so did not
+    # survive Save).  Drop line separators before measuring font coverage or
+    # building the subset; they are not written to the content stream as glyphs.
+    text = text.replace("\n", "").replace("\r", "")
+
     chars = "".join(dict.fromkeys(text))
     if not chars:
         raise FontEmbedError("There is no text to embed a font for.")
