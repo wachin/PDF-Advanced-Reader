@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
@@ -182,40 +182,141 @@ def _validate_block(ops, lo: int, hi: int, keys: Sequence[int]) -> None:
             "The paragraph's text is not contained in one rebuildable block.")
 
 
-def _block_bounds(ops, keys: Sequence[int]) -> Tuple[int, int, int, int]:
-    """Find the rebuildable range around the paragraph.
+#: Operators that position a line within a text block (used to decide which
+#: operators belong to the paragraph when it shares a block with siblings).
+_POSITION_OPS = frozenset({"Tm", "Td", "TD", "T*"})
 
-    Returns ``(lo, hi, first_bt, q_count)``.  ``lo`` is grown over the
-    ``q``/``cm`` prefix that establishes the paragraph's transform and ``hi``
-    over the matching ``Q`` closers.  The prefix is re-emitted verbatim, so a
-    per-block ``q cm`` wrapper (the normal way to draw rotated text) survives.
+
+def _blocks_for_keys(ops, key_set: Set[int]) -> List[dict]:
+    """Group the paragraph's text-show operators by their enclosing block.
+
+    Returns one dict per ``BT … ET`` block that contains at least one of the
+    paragraph's operators.  Each dict has the keys ``lo``, ``hi`` (the rebuild
+    range, grown over any ``q``/``cm`` prefix and matching ``Q`` closers so a
+    per-block rotation wrapper survives), ``first_bt``, ``et``, ``q_count`` and
+    ``has_sibling`` (whether the block also draws text that is not part of the
+    selected paragraph).
+
+    Real content streams frequently place several paragraphs inside one
+    ``BT … ET`` block (one block per text region is the norm for many
+    producers), so this is the common case, not an edge case.
     """
-    first, last = keys[0], keys[-1]
-    bt = first
-    while bt >= 0 and ops[bt].operator != "BT":
-        if ops[bt].operator == "ET":
+    n = len(ops)
+    bt_stack: List[int] = []
+    bt_for_index: List[Optional[int]] = [None] * n
+    bt_to_et: Dict[int, int] = {}
+    for i, op in enumerate(ops):
+        operator = op.operator
+        if operator == "BT":
+            bt_stack.append(i)
+            bt_for_index[i] = i
+        elif operator == "ET":
+            if bt_stack:
+                bt = bt_stack.pop()
+                bt_to_et[bt] = i
+                bt_for_index[i] = bt
+            else:
+                bt_for_index[i] = None
+        else:
+            bt_for_index[i] = bt_stack[-1] if bt_stack else None
+
+    grouped: Dict[int, List[int]] = {}
+    for key in key_set:
+        bt = bt_for_index[key]
+        if bt is None:
             raise ParagraphUnsupported(
                 "The paragraph's text is not inside a BT/ET block.")
-        bt -= 1
-    if bt < 0:
-        raise ParagraphUnsupported(
-            "The paragraph's text is not inside a BT/ET block.")
-    et = last
-    while et < len(ops) and ops[et].operator != "ET":
-        if ops[et].operator == "BT":
+        grouped.setdefault(bt, []).append(key)
+
+    blocks: List[dict] = []
+    for bt, bkeys in grouped.items():
+        bkeys = sorted(bkeys)
+        et = bt_to_et.get(bt)
+        if et is None:
             raise ParagraphUnsupported(
-                "The paragraph's text spans more than one BT/ET block.")
-        et += 1
-    if et >= len(ops):
-        raise ParagraphUnsupported(
-            "The paragraph's text has no closing ET operator.")
-    lo, hi = bt, et
-    while lo > 0 and ops[lo - 1].operator in ("q", "cm"):
-        lo -= 1
-    while hi + 1 < len(ops) and ops[hi + 1].operator == "Q":
-        hi += 1
-    q_count = sum(1 for index in range(lo, bt) if ops[index].operator == "q")
-    return lo, hi, bt, q_count
+                "The paragraph's text has no closing ET operator.")
+        sibling = False
+        for i in range(bt, et + 1):
+            if (ops[i].operator in ContentStreamParser.TEXT_SHOW_OPS
+                    and i not in key_set):
+                sibling = True
+                break
+        lo, hi = bt, et
+        while lo > 0 and ops[lo - 1].operator in ("q", "cm"):
+            lo -= 1
+        while hi + 1 < n and ops[hi + 1].operator == "Q":
+            hi += 1
+        q_count = sum(1 for index in range(lo, bt)
+                      if ops[index].operator == "q")
+        blocks.append({
+            "lo": lo, "hi": hi, "first_bt": bt, "et": et,
+            "q_count": q_count, "has_sibling": sibling, "bkeys": bkeys,
+        })
+    blocks.sort(key=lambda blk: blk["lo"])
+    return blocks
+
+
+def _owned_span(ops, bt: int, et: int, bkeys: Sequence[int]) -> Tuple[int, int]:
+    """The operator range that belongs to the paragraph inside its block.
+
+    This is the paragraph's own lines only — each line's positioning operator
+    (``Tm``/``Td``/``TD``/``T*``) immediately preceding its text, up to and
+    including the last line's show operator.  Sibling lines before/after are
+    deliberately excluded so they keep their original bytes.
+    """
+    first, last = bkeys[0], bkeys[-1]
+    # Most recent text-show operator in the block before this paragraph.
+    prev = bt
+    for i in range(bt, first):
+        if ops[i].operator in ContentStreamParser.TEXT_SHOW_OPS:
+            prev = i
+    # First positioning operator after the previous text and before the first
+    # line of this paragraph.
+    own_lo = first
+    for i in range(prev + 1, first):
+        if ops[i].operator in _POSITION_OPS:
+            own_lo = i
+            break
+    return own_lo, last
+
+
+def _tm_bytes(tm) -> bytes:
+    return b" ".join(_num(float(v)) for v in tm[:6]) + b" Tm"
+
+
+def _compensate_matrix(ops, own_lo: int, own_hi: int, init_tm) -> Tuple[float, ...]:
+    """Text matrix just after the paragraph, for the following line.
+
+    ``init_tm`` is the paragraph's text matrix (the first line's position).  We
+    replay the paragraph's own positioning operators so that, when the block is
+    reopened, a following line that positions itself relatively (``Td``/``T*``)
+    continues from exactly where the original paragraph left the text matrix.
+    Lines that set their own absolute ``Tm`` ignore this entirely.
+    """
+    tm = [float(v) for v in init_tm[:6]]
+    leading = 0.0
+    start = own_lo
+    # ``init_tm`` already reflects the first line's position; if the first owned
+    # operator is a relative move it is already accounted for, so skip it.
+    if ops[own_lo].operator in ("Td", "TD", "T*"):
+        start = own_lo + 1
+    for i in range(start, own_hi + 1):
+        op = ops[i]
+        operator = op.operator
+        if operator == "Tm":
+            tm = [float(v) for v in op.operands[:6]]
+        elif operator in ("Td", "TD"):
+            tx, ty = float(op.operands[0]), float(op.operands[1])
+            a, b, c, d, e, f = tm
+            tm = [a, b, c, d, e + a * tx + c * ty, f + b * tx + d * ty]
+            if operator == "TD":
+                leading = -ty
+        elif operator == "T*":
+            a, b, c, d, e, f = tm
+            tm = [a, b, c, d, e - c * leading, f - d * leading]
+        elif operator == "TL":
+            leading = float(op.operands[0])
+    return tuple(tm)
 
 
 def _encode_tj(line, encode, font_size: float, h_scale: float,
@@ -242,11 +343,15 @@ def _encode_tj(line, encode, font_size: float, h_scale: float,
 
 
 def build_block(para: Paragraph, plan: ParagraphPlan, encode,
-                resource: str) -> bytes:
+                resource: str, bare: bool = False) -> bytes:
     """Serialize the planned lines as one ``BT … ET`` block.
 
     Each line gets an explicit ``Tm`` so rotation, scaling and leading are
     reproduced without relying on ``Td`` state left by the original content.
+
+    When ``bare`` is true the surrounding ``BT``/``ET`` are omitted: the caller
+    is splicing the lines into an existing text object (a block the paragraph
+    shares with sibling lines), so a nested text object would be illegal.
     """
     tm = para.tm
     if tm is None:
@@ -259,7 +364,9 @@ def build_block(para: Paragraph, plan: ParagraphPlan, encode,
     normal = para.normal_scale or 1.0
     leading_text = plan.leading / normal
 
-    parts: List[bytes] = [b"BT"]
+    parts: List[bytes] = []
+    if not bare:
+        parts.append(b"BT")
     parts.append(b"/" + resource.encode("latin-1") + b" "
                  + _num(font_size) + b" Tf")
     if abs(para.char_spacing) > 1e-9:
@@ -282,7 +389,8 @@ def build_block(para: Paragraph, plan: ParagraphPlan, encode,
                                 _num(tx), _num(ty))) + b" Tm")
         parts.append(_encode_tj(line, encode, font_size, h_scale,
                                 plan.space_advance))
-    parts.append(b"ET")
+    if not bare:
+        parts.append(b"ET")
     return b"\n".join(parts)
 
 
@@ -402,9 +510,7 @@ class ReflowParagraph(Edit):
             raise EditError(
                 "The paragraph's text operators could not be found in the "
                 "content stream. The document may have changed.")
-
-        lo, hi, first_bt, q_count = _block_bounds(ops, keys)
-        _validate_block(ops, lo, hi, keys)
+        key_set = set(keys)
 
         if face is not None:
             from .font_embed import FontEmbedError, attach_font, build_font
@@ -427,20 +533,59 @@ class ReflowParagraph(Edit):
             resource = para.font_resource
             encode = codec.encode
 
-        try:
-            core = build_block(para, plan, encode, resource)
-        except (ValueError, UnicodeEncodeError) as exc:
-            raise EditError(
-                f"The new text cannot be encoded with the paragraph's font: "
-                f"{exc}.") from exc
+        blocks = _blocks_for_keys(ops, key_set)
+        if len(blocks) != 1:
+            raise ParagraphUnsupported(
+                "The paragraph is drawn across more than one text block, so it "
+                "cannot be rebuilt as one unit. Edit the individual lines "
+                "instead.")
+        blk = blocks[0]
+        bt, et = blk["first_bt"], blk["et"]
+        bkeys = blk["bkeys"]
 
-        # Re-emit the wrapper that established the paragraph's transform
-        # (``q cm`` for rotated text) and close it, plus one extra pair of our
-        # own so the text state cannot leak into the rest of the page.
-        prefix = data[ops[lo].start_pos:ops[first_bt].start_pos]
-        block = (b"q\n" + prefix + core + b"\n"
-                 + b"Q\n" * (q_count + 1))
-        new_stream = (data[:ops[lo].start_pos] + block
-                      + data[ops[hi].end_pos:])
+        if not blk["has_sibling"]:
+            # Whole-block replacement (unchanged behaviour): the paragraph owns
+            # the entire BT/ET block, so the block is rewritten as a unit and
+            # any ``q cm`` rotation wrapper is re-emitted.  Nothing outside the
+            # block is touched.
+            lo, hi, q_count = blk["lo"], blk["hi"], blk["q_count"]
+            _validate_block(ops, lo, hi, bkeys)
+            try:
+                core = build_block(para, plan, encode, resource)
+            except (ValueError, UnicodeEncodeError) as exc:
+                raise EditError(
+                    f"The new text cannot be encoded with the paragraph's "
+                    f"font: {exc}.") from exc
+            prefix = data[ops[lo].start_pos:ops[bt].start_pos]
+            block = (b"q\n" + prefix + core + b"\n"
+                     + b"Q\n" * (q_count + 1))
+            new_stream = (data[:ops[lo].start_pos] + block
+                          + data[ops[hi].end_pos:])
+        else:
+            # The paragraph shares its BT/ET block with sibling lines/paragraphs
+            # (the common real-world layout).  Replace only the paragraph's own
+            # operators and leave the neighbours exactly where they are,
+            # compensating the text matrix so any following relative line
+            # continues from the right place.  A nested BT/ET would be illegal
+            # inside the existing text object, so the new lines are emitted bare
+            # and wrapped by ``q … Q`` only to keep the text state local.
+            own_lo, own_hi = _owned_span(ops, bt, et, bkeys)
+            _validate_block(ops, own_lo, own_hi, bkeys)
+            try:
+                core = build_block(para, plan, encode, resource, bare=True)
+            except (ValueError, UnicodeEncodeError) as exc:
+                raise EditError(
+                    f"The new text cannot be encoded with the paragraph's "
+                    f"font: {exc}.") from exc
+            comp = _compensate_matrix(ops, own_lo, own_hi, para.tm)
+            # ``q … Q`` localises the new text state (font, spacing, …) so it
+            # cannot leak into the sibling lines; the compensating ``Tm`` is
+            # emitted after ``Q`` so it sets the text matrix for the following
+            # relative line (``q``/``Q`` save the graphics state, not the text
+            # matrix).
+            fragment = (b"q\n" + core + b"\nQ\n" + _tm_bytes(comp) + b"\n")
+            new_stream = (data[:ops[own_lo].start_pos] + fragment
+                          + data[ops[own_hi].end_pos:])
+
         doc.update_stream(target, new_stream)
         _verify_written_text(page, plan)
