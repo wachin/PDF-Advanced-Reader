@@ -1,8 +1,17 @@
 # Phase 6 — PdfCraft text-editing architecture: audit and adoption proposal
 
-Status: **proposal only — no migration performed.** Nothing in this document has
-been implemented. It is written for review and approval before any large-scale
-change.
+> **Status: superseded (2026-11-15).** This document was the Phase 6A decision
+> input. Its recommendation — Option C, a Rust + PyO3 hybrid — was **not**
+> adopted. After reviewing the prototype, the maintainer approved **Option A**:
+> a native Python port of the engine, implemented in Phase 6B under
+> `src/pdfar/pdfcraft/` and exposed read-only through
+> `src/pdfar/pdfcraft_adapter.py`. Keep this document for its analysis of the
+> alternatives, not for its recommendation. Current state:
+> [`developers/status.md`](developers/status.md).
+
+Status at the time of writing: **proposal only — no migration performed.**
+Nothing in this document had been implemented. It was written for review and
+approval before any large-scale change.
 
 Date: 2026-11-13. Repository: `feature/pdfcraft-editiong`.
 

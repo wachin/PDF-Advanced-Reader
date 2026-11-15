@@ -1,15 +1,17 @@
 # Provenance and licensing — PdfCraft-Python prototype
 
-This directory is an **isolated feasibility prototype**. It is not part of
-`src/pdfar/`, imports nothing from it, and is not used by the running
-application.
+This directory is the **research harness** for the port: fixtures, a demo, a
+benchmark and the prototype tests. The engine itself now lives in
+`src/pdfar/pdfcraft/` (moved there in Phase 6B) and is exposed to the
+application only through `src/pdfar/pdfcraft_adapter.py`. `poc/` imports the
+engine; the running application does not import `poc/`.
 
 ## What was written here
 
-Every Python file under `poc/` is an independent implementation written for
-this study. **No PdfCraft source code was copied or translated line by line.**
-The comments name the Rust module whose behaviour each function follows, so a
-reviewer can compare them side by side.
+Every Python file under `poc/` and `src/pdfar/pdfcraft/` is an independent
+implementation written for this study. **No PdfCraft source code was copied or
+translated line by line.** The comments name the Rust module whose behaviour
+each function follows, so a reviewer can compare them side by side.
 
 ## What was studied
 

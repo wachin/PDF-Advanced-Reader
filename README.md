@@ -422,22 +422,24 @@ See `DEBIAN.md`. A `debian/` directory with `changelog`/`copyright` is included 
 
 ```
 PDF-Advanced-Reader/
-├── src/pdfar/          # Main application code
-│   ├── __init__.py     # Package metadata
-│   ├── main.py         # Main window and UI
-│   ├── search.py       # Search logic
-│   ├── viewer.py       # PDF rendering component
-│   ├── page_numbers.py # Page numbering, erase mask, panel, preview, exports
-│   ├── fonts.py        # Installed-font catalog, style matching and embedding
-│   ├── cache.py        # Page caching
-│   └── i18n.py         # Internationalization support
-├── translations/       # Qt Linguist translation files
-│   ├── pdfar_en.ts
-│   └── pdfar_es.ts
-├── debian/             # Debian packaging metadata (future)
+├── src/pdfar/          # Application code (PyQt6 + PyMuPDF)
+│   ├── main.py         # MainWindow, menus, actions
+│   ├── viewer.py       # PDFView: painting, zoom, selection, search
+│   ├── session.py      # DocumentSession: versioning, revisions, apply()
+│   ├── edits.py        # Edit / Scope / history (copy-and-adopt)
+│   ├── render.py       # RenderPool and RenderResult
+│   ├── pdfcraft/       # Python port of PdfCraft's text engine
+│   └── ...             # pages, annotations, search, reflow, text editing
+├── tests/              # pytest suite
+├── poc/                # Research harness for the port
+├── docs/               # Design docs (start at docs/README.md)
+├── tools/              # Benchmark, profiler, demo-PDF generator
+├── translations/       # Qt Linguist .ts sources and compiled .qm
+├── external/           # Reference/test material (not project code)
+├── debian/             # Debian packaging metadata
 ├── run.py              # Entry point
-├── compile_ts.py       # Translation compiler
-└── README.md
+├── AGENTS.md           # Rules for AI agents
+└── CONTRIBUTING.md     # Setup, tests, PR process
 ```
 
 ---
@@ -455,8 +457,8 @@ PDFAR supports multiple languages through Qt Linguist:
 Add a new language:
 
 1. Copy `pdfar_es.ts` → `pdfar_xx.ts`
-2. Edit with Qt Linguist: `linguist pdfar_xx.ts`
-3. Compile: `python3 compile_ts.py`
+2. Edit with Qt Linguist: `linguist translations/pdfar_xx.ts`
+3. Compile: `lrelease translations/pdfar_xx.ts -qm translations/pdfar_xx.qm`
 
 ---
 
@@ -474,7 +476,7 @@ self.setWindowTitle("PDFAR - Advanced PDF Reader")
 ### Compile Translations
 
 ```bash
-python3 compile_ts.py
+lrelease translations/pdfar_es.ts -qm translations/pdfar_es.qm
 ```
 
 ---
@@ -529,8 +531,8 @@ Email: linuxfrontier@proton.me
 
 ## Contributing
 
-Contributions are welcome! Please follow these steps:
-
-1. Fork the repository
-2. Create a feature branch
-3. Submit a pull request.
+Contributions are welcome. Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) for
+setup, tests and the pull-request process. If you use an AI coding agent, point
+it at [`AGENTS.md`](AGENTS.md) first — it lists the architectural invariants
+that changes must respect. The documentation index is
+[`docs/README.md`](docs/README.md).
