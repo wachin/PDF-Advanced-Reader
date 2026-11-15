@@ -11,17 +11,15 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import fitz
 from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
 from PyQt6.QtGui import QColor, QImage, QMouseEvent, QPainter
 
 from pdfar.geometry import map_rect
 from pdfar.text_edit_existing import (
-    combine_hits, find_text_at_point, words_between, words_in_line,
+    combine_hits, find_text_at_point, words_between,
 )
 from pdfar.viewer import PDFView
 
-from conftest import make_session
 
 
 def _view_for(path):

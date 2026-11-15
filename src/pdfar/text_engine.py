@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Dict, Any, Sequence, Iterator
-from collections import defaultdict
+from dataclasses import dataclass
+from typing import List, Optional, Tuple, Dict, Any
 
 try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
@@ -16,7 +15,6 @@ from .content_stream import (
     ContentStreamParser, ContentStreamSerializer, PDFOperator,
     _extract_text_from_op, _make_new_operands, replace_text_in_stream
 )
-from .text_editing import _get_text_length
 
 
 @dataclass
@@ -116,8 +114,7 @@ class ContentStreamTokenizer:
         """
         if self._operator_map:
             return self._operator_map
-        
-        trace = self.get_text_trace()
+
         operators = self._parse_content_streams()
         
         # Map each operator to its seqno range
@@ -203,9 +200,6 @@ class GlyphOperatorMapper:
     
     def _build_map(self) -> None:
         """Build the glyph-to-operators mapping from text trace."""
-        trace = self.page.get_text("trace")
-        # Parse content streams
-        streams = self.page.get_contents()
         # This is a simplified version - real implementation would parse all streams
         pass
 

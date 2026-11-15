@@ -8,8 +8,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pymupdf as fitz
 import pytest
-from conftest import build_sample_pdf, make_session
-from test_page_settle import nested_pdf, own
+from conftest import build_sample_pdf
+from test_page_settle import nested_pdf
 
 from pdfar.edits import EditError
 from pdfar.pages import extract_pages

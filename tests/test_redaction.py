@@ -29,7 +29,7 @@ def doc_with_content(tmp_path):
     p2.insert_text((200, 300), "Page 2 content")
     p2.draw_rect(fitz.Rect(50, 50, 300, 300), color=(0, 0, 1))
     # Page 3: empty page
-    p3 = doc.new_page(width=600, height=800)
+    doc.new_page(width=600, height=800)
     doc.save(path)
     doc.close()
     return path

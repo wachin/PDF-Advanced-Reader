@@ -152,10 +152,9 @@ def test_regex_worker(session):
     worker.run()
     
     # Need to process events to allow worker to complete
-    from PyQt6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])
     for _ in range(50):  # Wait up to 5 seconds
-        QApplication.instance().processEvents()
+        app.processEvents()
         time.sleep(0.1)
         if len(hits) > 0:
             break

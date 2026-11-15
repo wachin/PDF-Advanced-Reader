@@ -3,12 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Any, Union
-
-try:
-    import pymupdf as fitz  # PyMuPDF >= 1.24
-except ImportError:
-    import fitz
+from typing import List, Tuple, Optional, Any
 
 
 @dataclass
@@ -129,7 +124,6 @@ class ContentStreamParser:
             j = i
             while j < len(data) and data[j:j+1] in b'0123456789.-':
                 j += 1
-            num_str = data[i:j].decode('ascii')
             try:
                 if b'.' in data[i:j]:
                     return float(data[i:j].decode('ascii')), j
@@ -274,7 +268,6 @@ class ContentStreamParser:
             j = i
             while j < len(data) and data[j:j+1] in b'0123456789.-':
                 j += 1
-            num_str = data[i:j].decode('ascii')
             try:
                 if b'.' in data[i:j]:
                     return float(data[i:j].decode('ascii')), j
@@ -369,7 +362,6 @@ class ContentStreamParser:
                 j = i
                 while j < end and data[j:j+1] in b'0123456789.-':
                     j += 1
-                num_str = data[i:j].decode('ascii')
                 try:
                     if b'.' in data[i:j]:
                         items.append(float(data[i:j].decode('ascii')))

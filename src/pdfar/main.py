@@ -23,12 +23,12 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QColorDialog, QComboBox, QDockWidget,
-    QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar,
-    QPushButton, QSpinBox, QStatusBar, QStyle, QStyledItemDelegate,
-    QStyleOptionViewItem, QTabWidget, QToolBar, QToolButton, QToolTip,
-    QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDockWidget,
+    QFileDialog, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+    QProgressBar, QPushButton, QSpinBox, QStatusBar, QStyle,
+    QStyledItemDelegate, QStyleOptionViewItem, QTabWidget, QToolBar,
+    QToolButton, QToolTip, QVBoxLayout, QWidget,
 )
 
 from . import APP_NAME, __version__
@@ -39,7 +39,7 @@ from .annotations import (
     scale_from_reference,
 )
 from .bookmarks import settings_key_for
-from .edits import ASSEMBLY_NOTE, EditError
+from .edits import ASSEMBLY_NOTE, Edit, EditError, Scope
 from .i18n import I18n
 from .icons import asset_path as _asset_path, tinted_icon
 from .page_labels import PageSpinBox, label_for, longest_label
@@ -50,10 +50,7 @@ from .page_numbers import (
 from .crop_dialog import CropDialog
 from .text_box_dialog import TextBoxDialog
 from .text_editing import (
-    AddTextBox, AddImage, TextBoxSettings, HeaderFooterSettings, WatermarkSettings, BatesNumberSettings,
-    ImageInsertSettings,
-    apply_text_boxes, apply_header_footer, apply_watermark, apply_bates_numbering,
-    apply_image_insert,
+    AddTextBox, AddImage, HeaderFooterSettings, WatermarkSettings, BatesNumberSettings,
 )
 from .pages import (
     CropPages, DeletePages, DuplicatePages, InsertBlankPage, InsertDocumentPages, MovePages, ReversePages,
@@ -1678,7 +1675,6 @@ class MainWindow(QMainWindow):
         if not self.view:
             return
         view = self.view
-        session = view.session
 
         source_path, _ = QFileDialog.getOpenFileName(
             self, "Select PDF File to Insert", "", "PDF Files (*.pdf)")
@@ -1901,7 +1897,7 @@ class MainWindow(QMainWindow):
 
         try:
             # Apply redactions through the annotation manager
-            count = self.view.annotation_manager.apply_redactions()
+            self.view.annotation_manager.apply_redactions()
             QMessageBox.information(self, "Apply Redactions",
                                     f"Applied redactions. {redact_count} mark(s) processed.")
         except Exception as exc:

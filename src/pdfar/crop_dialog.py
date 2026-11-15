@@ -11,15 +11,11 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
-    QPushButton,
     QRadioButton,
     QSpinBox,
     QVBoxLayout,
-    QWidget,
 )
 
-from .pages import get_page_content_bbox
 
 
 class CropDialog(QDialog):

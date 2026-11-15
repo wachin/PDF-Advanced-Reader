@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import fitz
-from PyQt6.QtCore import Qt, pyqtSignal
+from typing import Optional, Tuple
+
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QColorDialog,
     QComboBox,
     QDialog,
@@ -26,10 +30,7 @@ from PyQt6.QtWidgets import (
 
 from .text_editing import (
     TextBoxSettings, HeaderFooterSettings, WatermarkSettings, BatesNumberSettings,
-    ImageInsertSettings, AddImage,
-    apply_text_boxes, apply_header_footer, apply_watermark, apply_bates_numbering,
-    apply_image_insert,
-    TEXT_POSITIONS,
+    ImageInsertSettings, TEXT_POSITIONS,
 )
 
 
@@ -235,7 +236,7 @@ class TextBoxDialog(QDialog):
     
     def _update_font_styles(self):
         """Update font style combo based on selected family."""
-        from .fonts import BASE14_FONTS, styles_for, BASE14_KEYS
+        from .fonts import BASE14_FONTS, styles_for
         
         self.font_style.clear()
         family = self.font_family.currentData()

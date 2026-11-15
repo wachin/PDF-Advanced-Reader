@@ -469,7 +469,6 @@ def test_add_image_edit_undo(doc_blank):
 
 def test_text_box_font_validation_rejects_unsupported_char(doc_blank):
     """Text box rejects text with unsupported characters."""
-    from pdfar.edits import EditError
     
     session = make_session(doc_blank)
     try:
@@ -487,7 +486,6 @@ def test_text_box_font_validation_rejects_unsupported_char(doc_blank):
 
 def test_header_footer_font_validation_rejects_unsupported_char(doc_blank):
     """Header/footer rejects text with unsupported characters."""
-    from pdfar.edits import EditError
     
     session = make_session(doc_blank)
     try:
@@ -505,7 +503,6 @@ def test_header_footer_font_validation_rejects_unsupported_char(doc_blank):
 
 def test_watermark_font_validation_rejects_unsupported_char(doc_blank):
     """Watermark rejects text with unsupported characters."""
-    from pdfar.edits import EditError
     
     session = make_session(doc_blank)
     try:
@@ -523,7 +520,6 @@ def test_watermark_font_validation_rejects_unsupported_char(doc_blank):
 
 def test_bates_numbering_font_validation_rejects_unsupported_char(doc_blank):
     """Bates numbering rejects unsupported characters in prefix/suffix."""
-    from pdfar.edits import EditError
     
     session = make_session(doc_blank)
     try:

@@ -16,9 +16,9 @@ from PyQt6.QtGui import (
     QColor, QIcon, QPen, QPixmap,
 )
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QListWidget, QListWidgetItem, QTabWidget, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget, QMenu, QInputDialog, QMessageBox,
-    QHBoxLayout, QPushButton, QComboBox, QFileDialog, QProgressBar, QStyle,
+    QAbstractItemView, QApplication, QListWidget, QListWidgetItem, QTabWidget,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QMenu, QInputDialog,
+    QMessageBox, QHBoxLayout, QPushButton, QComboBox, QFileDialog, QStyle,
     QStyledItemDelegate, QLabel, QToolButton, QLayout, QLayoutItem,
 )
 from . import APP_NAME

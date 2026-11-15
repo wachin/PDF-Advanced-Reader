@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Any, List, Dict
+from typing import Optional, Tuple, List, Dict
 import math
 
 try:
@@ -12,7 +12,7 @@ except ImportError:
     import fitz
 
 from .edits import Edit, EditError, Scope
-from .content_stream import ContentStreamParser, ContentStreamSerializer, PDFOperator
+from .content_stream import ContentStreamParser, ContentStreamSerializer
 
 
 @dataclass
@@ -73,7 +73,6 @@ def compose_matrix(components: Dict[str, float]) -> Tuple[float, float, float, f
     scale_y = components.get('scale_y', 1.0)
     rotation = components.get('rotation', 0.0)
     skew_x = components.get('skew_x', 0.0)
-    skew_y = components.get('skew_y', 0.0)
     tx = components.get('tx', 0.0)
     ty = components.get('ty', 0.0)
     
@@ -154,9 +153,6 @@ class ImageTransform:
     
     def to_matrix(self) -> Tuple[float, float, float, float, float, float]:
         """Convert to PDF transformation matrix."""
-        cos_r = math.cos(self.rotation)
-        sin_r = math.sin(self.rotation)
-        
         a = self.scale_x * math.cos(self.rotation)
         b = self.scale_x * math.sin(self.rotation)
         c = -self.scale_y * math.sin(self.rotation)

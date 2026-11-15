@@ -282,7 +282,7 @@ def test_xobject_invoked_twice_on_one_page_is_refused():
 def test_shared_resources_dictionary_is_split():
     doc = _new_doc(pages=2)
     font = _font_xref(doc)
-    xref = _add_xobject(
+    _add_xobject(
         doc, 0, b"BT /helv 12 Tf 1 0 0 1 40 60 Tm (shared res) Tj ET", font)
     shared_res = _resources_xref(doc, 0)
     # Page 2 shares page 1's resource dictionary (common in generated PDFs).

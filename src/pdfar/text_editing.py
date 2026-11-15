@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import fitz
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Optional, Tuple, List
 
 from .edits import Edit, EditError, Scope
 from .fonts import (
-    BASE14_FONTS, BASE14_KEYS,
-    all_families, base14_alias, default_style, display_family, font_file,
-    resolve_family_label, styles_for,
+    BASE14_FONTS, base14_alias, font_file,
 )
 
 # Standard text box positions (for header/footer/watermark)
@@ -68,17 +66,7 @@ def resolve_font(font_family: str, font_style: str) -> Tuple[str, Optional[str]]
     # Check Base14 first
     for key, label, family in BASE14_FONTS:
         if family.lower() == font_family.lower() or label.lower() == font_family.lower():
-            # Map style to Base14 variant
-            style_map = {
-                "Regular": "regular",
-                "Bold": "bold",
-                "Italic": "italic",
-                "Bold Italic": "bold italic",
-                "BoldOblique": "bold italic",
-                "Oblique": "italic",
-            }
-            base_style = style_map.get(font_style, "regular")
-            return _BASE14_ALIASES[key][base_style], None
+            return base14_alias(key, font_style), None
     
     # Try system font
     path = font_file(font_family, font_style)
@@ -362,7 +350,6 @@ def apply_header_footer(
         if not valid:
             raise EditError(f"First page footer validation failed: {error}")
     
-    color = _parse_color(settings.font_color)
     
     for i in range(first, last + 1):
         page = doc.load_page(i)
@@ -468,7 +455,6 @@ def apply_watermark(
         if not valid:
             raise EditError(f"Watermark text validation failed: {error}")
     
-    color = _parse_color(settings.font_color)
     
     # Normalize rotation to 90-degree increments (PyMuPDF only supports 0, 90, 180, 270)
     rotation = int(round(settings.rotation / 90.0)) * 90

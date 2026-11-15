@@ -341,7 +341,7 @@ def test_about_dialog_content(qapp):
     try:
         dlg = win._build_about_dialog()
         labels = dlg.findChildren(QLabel)
-        rich = next(l for l in labels if "Copyright" in l.text())
+        rich = next(label for label in labels if "Copyright" in label.text())
         text = rich.text()
         assert "© 2026 Washington Indacochea Delgado" in text
         assert "mailto:linuxfrontier@proton.me" in text
@@ -355,7 +355,7 @@ def test_about_dialog_content(qapp):
         assert rich.openExternalLinks()
         assert (rich.textInteractionFlags()
                 != Qt.TextInteractionFlag.NoTextInteraction)
-        icons = [l for l in labels if not l.pixmap().isNull()]
+        icons = [label for label in labels if not label.pixmap().isNull()]
         assert icons, "about dialog should show the program icon"
         assert icons[0].pixmap().width() >= 128
         dlg.deleteLater()

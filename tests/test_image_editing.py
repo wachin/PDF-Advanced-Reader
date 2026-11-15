@@ -101,7 +101,6 @@ def test_decompose_matrix(doc_with_image):
     doc = fitz.open(doc_with_image)
     try:
         page = doc[0]
-        images = page.get_image_info()
         for img_info in page.get_image_info():
             if 'transform' in img_info:
                 transform = img_info['transform']
@@ -134,11 +133,6 @@ def test_apply_image_transform(doc_with_image):
     """Test applying image transform."""
     doc = fitz.open(doc_with_image)
     try:
-        # Find image name
-        page = doc[0]
-        images = page.get_image_info()
-        img_name = images[0]['number'] if images else 'fzImg0'
-        
         # Apply a scale transform
         transform = ImageTransform(scale_x=0.5, scale_y=0.5)
         result = apply_image_transform(doc, 0, 'fzImg0', transform, mode="relative")
@@ -165,14 +159,10 @@ def test_multiply_matrices():
 
 def test_edit_image_placement(doc_with_image, tmp_path):
     """Test EditImagePlacement through session."""
-    from pdfar.edits import EditError
     
     session = make_session(doc_with_image)
     try:
-        # Find image name
         doc = fitz.open(doc_with_image)
-        images = doc[0].get_image_info()
-        img_name = images[0]['number'] if images else 'fzImg0'
         doc.close()
         
         # Create edit

@@ -545,12 +545,12 @@ class SettlePageTree(Edit):
                 # Instead of refusing, copy the Resources dictionary down to the page
                 resources = doc.xref_get_key(xref, "Resources")
                 if resources and resources[0] == "dict":
-                    doc.xref_set_key(page, "Resources", resources[1])
+                    doc.xref_set_key(xref, "Resources", resources[1])
             # Also handle /AP (Annots) dictionary - never share /AP dict when rewriting
             if _stated(doc, xref, "AP") is not None:
                 ap = doc.xref_get_key(xref, "AP")
                 if ap and ap[0] == "dict":
-                    doc.xref_set_key(page, "AP", ap[1])
+                    doc.xref_set_key(xref, "AP", ap[1])
         # Whether a key is stated *anywhere* is asked of the whole tree, not of the
         # chains: a move re-parents by /Parent, so a sheet that walks past a node
         # today can be under it tomorrow — measured on a book whose /Kids and /Parent
@@ -1183,13 +1183,6 @@ def extract_pages(doc: fitz.Document, pages: Sequence[int], target_path: str) ->
     Does not modify *doc*. Checks boundaries, settles the page tree of a working copy
     so inherited attributes (/MediaBox, /CropBox, /Rotate) are preserved, copies the
     pages, outline, page labels, and metadata, and writes the output file atomically.
-    """
-    requires_assembly = True
-    """Extract *pages* from *doc* into a new PDF document at *target_path*.
-
-    Does not modify *doc*. Checks boundaries, settles the page tree of a working copy
-    so inherited attributes (/MediaBox, /CropBox, /Rotate) are preserved, copies the
-    pages, outline, page labels, and metadata, and writes the output file atomically.
 
     What survives the copy is what ``insert_pdf`` carries: the pages themselves, their
     own annotations and widgets, the outline rows whose destinations name a copied sheet
@@ -1372,7 +1365,6 @@ def merge_documents(source_paths: Sequence[str], target_path: str) -> None:
     geometry (/MediaBox, /CropBox, /Rotate) is preserved, copies pages, outlines,
     page labels, and metadata, and writes *target_path* atomically.
     """
-    requires_assembly = True
     if not source_paths:
         raise EditError("No source documents provided to merge")
 
@@ -1430,7 +1422,6 @@ def split_document(doc: fitz.Document, output_dir: str, chunk_size: int = 1,
 
     Each file will contain up to *chunk_size* pages. Returns list of created file paths.
     """
-    requires_assembly = True
     if chunk_size < 1:
         raise EditError(f"Chunk size must be at least 1, got {chunk_size}")
 

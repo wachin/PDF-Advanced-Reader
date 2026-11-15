@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import fitz
 import pytest
-from conftest import build_sample_pdf, make_session
+from conftest import make_session
 
 from pdfar.edits import EditError
 from pdfar.pages import CropPages, get_page_content_bbox
@@ -28,7 +28,7 @@ def doc_with_content(tmp_path):
     p2.insert_text((200, 300), "Page 2 content")
     p2.draw_rect(fitz.Rect(50, 50, 300, 300))
     # Page 3: empty page
-    p3 = doc.new_page(width=600, height=800)
+    doc.new_page(width=600, height=800)
     doc.save(path)
     doc.close()
     return path

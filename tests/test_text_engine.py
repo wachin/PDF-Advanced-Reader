@@ -9,11 +9,8 @@ import fitz
 import pytest
 from conftest import make_session
 
-from pdfar.edits import EditError
 from pdfar.text_engine import (
-    ContentStreamTokenizer, GlyphOperatorMapper, FontLadder,
-    ContentStreamSplicer, TextEditEngine,
-    FontLadder, ContentStreamSplicer, TextEditEngine,
+    ContentStreamTokenizer, FontLadder, ContentStreamSplicer, TextEditEngine,
 )
 
 
@@ -25,7 +22,7 @@ def doc_with_text(tmp_path):
     for i in range(3):
         p = doc.new_page(width=600, height=800)
         p.insert_text((100, 200), f"Hello World Page {i+1}", fontsize=14)
-        p.insert_text((100, 300), f"Test text with αβγ", fontsize=12)
+        p.insert_text((100, 300), "Test text with αβγ", fontsize=12)
     doc.save(path)
     doc.close()
     return path

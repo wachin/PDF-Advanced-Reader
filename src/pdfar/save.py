@@ -476,9 +476,9 @@ def save_document(session, path: Optional[str] = None, *, full: bool = False,
     if not _can_append(doc, target):
         if _has_signature_fields(doc) and _save_invalidates_signatures(doc):
             raise SaveError(
-                f"Document contains digital signatures that would be invalidated by a full rewrite. "
-                f"Use incremental save (Save without 'full' option) to preserve signatures, "
-                f"or remove signature fields before saving."
+                "Document contains digital signatures that would be invalidated by a full rewrite. "
+                "Use incremental save (Save without 'full' option) to preserve signatures, "
+                "or remove signature fields before saving."
             )
 
     # A viewer paints what an annotation's /AP says.  PDFAR's own marks write
