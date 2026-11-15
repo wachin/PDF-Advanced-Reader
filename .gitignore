@@ -37,13 +37,16 @@ env/
 # Qt / i18n
 *.qm
 
-# Debian
+# Debian build output (the packaging sources are tracked)
 *.changes
 *.buildinfo
 *.dsc
 *.tar.*
 *.deb
-debian/
+debian/files
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/*.substvars
 
 # OS
 .DS_Store
@@ -54,6 +57,8 @@ Thumbs.db
 
 # Testing
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .coverage
 htmlcov/
 
@@ -61,3 +66,10 @@ htmlcov/
 8vo/
 external/pdfcraft/
 external/OCR-AI/
+
+# Local AI-agent state and notes (never part of the project)
+.qwen/
+.qoder/
+.kilo/
+last-agent.md
+*.orig
